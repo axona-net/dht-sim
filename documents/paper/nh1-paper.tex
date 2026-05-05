@@ -43,6 +43,11 @@
 
 \begin{document}
 \maketitle
+% IEEE conference style suppresses page numbers by default
+% (\pagestyle{empty}). Override after \maketitle so reviewers can
+% reference page numbers in comments.
+\pagestyle{plain}
+\thispagestyle{plain}
 
 % ─────────────────────────────────────────────────────────────────────────────
 \begin{abstract}
@@ -1286,6 +1291,207 @@ bridge-finding. \nhone and \NXseventeen route through the partition
 not by finding the bridge each time --- they \emph{dissolve} the
 partition.
 
+\subsection{Bandwidth concentration: empirical resolution}
+\label{sec:eval-bandwidth}
+
+The companion red-team analysis~\cite{nh1redteam2026} ranks
+\emph{bandwidth saturation and congestion collapse} as a critical
+deploy blocker (Issue~\#3). Of the four Tier~1 issues, three
+(connection setup, RPC timeouts, latency jitter) are textbook
+engineering problems with known mitigations. Issue~\#3 was different:
+the simulator's uniform-cost-per-hop model (\S\ref{sec:eval-method})
+made it \emph{architecturally unfalsifiable} whether \nhone's
+adaptive routing concentrated load (the success-disaster oscillation
+hypothesized by the red team) or distributed it. Until that question
+was answered, every other claim about the protocol was contingent.
+
+\paragraph{Methodology.} We instrument every routing chokepoint with
+per-node send/receive counters: the \texttt{SimulatedNetwork.send}
+path used by Kademlia and \GDHT, plus a parallel \texttt{\_msg(from,
+to, type)} helper invoked from each conceptual wire site in \nhone
+and the NX-6 lineage (NX-6 through \NXseventeen) where routing
+bypasses the simulated transport via direct map access. Sites
+include: each lookup-hop transition; two-hop AP probes; hop-caching
+writes; lateral-spread propagation; LTP reinforcement walks;
+triadic-closure introductions; bilateral bootstrap handshakes; the
+2-hop neighbour scan used by \texttt{\_localCandidate} (annealing and
+dead-peer replacement); pub/sub \texttt{routeMessage} forwarding; and
+\texttt{sendDirect} entry. Per-cycle counters are reset after each
+training session, so the captured numbers are deltas.
+
+For each cycle we report total messages, mean / p50 / p99 / max
+per-node loads, the Gini coefficient of the per-node distribution,
+and counts of nodes exceeding $10\times$ and $100\times$ the cycle
+mean. The $100\times$ threshold corresponds to nodes whose absolute
+forwarding rate is two orders of magnitude above peers --- the
+practical definition of a bandwidth-saturation hazard.
+
+\paragraph{Headline result: distribution shape, $4 \times 4$
+sweep.} Across $42$ runs spanning four protocols (\textsc{K-DHT},
+\GDHT, \NXseventeen, \nhone) and four sizes ($5\mathrm{K}$,
+$10\mathrm{K}$, $25\mathrm{K}$, $50\mathrm{K}$), the load
+distribution diverges sharply between classical and adaptive
+protocols (Table~\ref{tab:bandwidth}).
+
+\begin{table*}[t]
+\centering
+\caption{Steady-state per-cycle traffic distribution at $50\,000$
+nodes, $500$ lookups per cycle, $10$ training sessions. ``Hot
+$>100\times$'' counts nodes processing more than $100\times$ the
+network mean per cycle --- the bandwidth-saturation hazard
+threshold.}
+\label{tab:bandwidth}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Protocol} & \textbf{Total/cyc} & \textbf{Gini} &
+\textbf{max/mean} & \textbf{Hot~$>10\times$} &
+\textbf{Hot~$>100\times$} \\
+\midrule
+\textsc{K-DHT} & $14{,}463$ & $\mathbf{0.940}$ & $208\times$ &
+$551$ & $\mathbf{56}$ \\
+\GDHT          & $17{,}633$ & $\mathbf{0.932}$ & $213\times$ &
+$423$ & $\mathbf{62}$ \\
+\NXseventeen   & $359{,}459$ & $0.694$ & $61\times$ & $1{,}524$ &
+$\mathbf{0}$ \\
+\nhone         & $416{,}071$ & $0.661$ & $47\times$ & $1{,}419$ &
+$\mathbf{0}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The hypothesis the red team raised --- \emph{that adaptive routing
+concentrates more than static routing} --- is empirically
+inverted. Kademlia and \GDHT develop $56$--$62$ catastrophic-bandwidth
+nodes at $50\mathrm{K}$ (max/mean ratios $> 200\times$); \nhone
+produces \emph{zero} such nodes at any tested scale. The classical
+DHTs' Gini coefficient grows monotonically with $N$ ($0.876
+\rightarrow 0.940$ from $5\mathrm{K}$ to $50\mathrm{K}$), while
+\nhone's grows much more slowly ($0.549 \rightarrow 0.661$).
+
+\paragraph{Long-run stability.} A $50$-session run at $50\mathrm{K}$
+nodes confirms the steady state is genuinely steady. Gini holds in
+$[0.657, 0.668]$ across all $50$ cycles (standard deviation
+$0.0025$); first-half versus second-half drift is $+0.002$. Hot
+$>10\times$ count holds in $[1378, 1453]$; hot $>100\times$ count is
+zero throughout. Average hops trend gently downward
+($5.55 \rightarrow 5.27$): the network keeps learning without
+disturbing the load profile.
+
+\paragraph{Decomposition of the $25\times$ volume tax.} \nhone's
+total traffic is $25$--$30\times$ Kademlia's. Per-type
+instrumentation isolates the cost. At $50\mathrm{K}$:
+
+\begin{table}[t]
+\centering
+\caption{Per-type traffic decomposition for \nhone at
+$50\,000$ nodes, $500$ lookups per cycle. Counts are total
+sender-plus-receiver bumps; wire-message count is half. Routing-hop
+\texttt{find\_node} traffic is $1.3\%$ of all traffic; the remaining
+$98.7\%$ is learning side-effects.}
+\label{tab:bandwidth-types}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Message type} & \textbf{Count/cyc} & \textbf{\%} \\
+\midrule
+\texttt{local\_probe} (2-hop annealing scan) & $370{,}566$ &
+$\mathbf{89.1\%}$ \\
+\texttt{lookahead\_probe} (two-hop AP) & $20{,}525$ & $4.9\%$ \\
+\texttt{lateral\_spread} & $7{,}474$ & $1.8\%$ \\
+\texttt{hop\_cache\_lateral} & $6{,}404$ & $1.5\%$ \\
+\texttt{find\_node} (actual routing hop) & $5{,}538$ & $1.3\%$ \\
+\texttt{hop\_cache} & $3{,}737$ & $0.9\%$ \\
+\texttt{reinforce} (LTP feedback) & $1{,}823$ & $0.4\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A single mechanism --- the 2-hop neighbour scan in
+\texttt{\_localCandidate}, used by simulated annealing and dead-peer
+replacement --- accounts for $89\%$ of \nhone's wire traffic. We
+introduce a parameter \texttt{annealRateScale} that multiplies the
+per-hop annealing trigger probability without disturbing the
+temperature-reheat semantics that fire on dead-peer detection
+(preserving churn-recovery behaviour).
+
+\paragraph{The rate-knee.} Sweeping
+\texttt{annealRateScale} $\in \{0.05, 0.10, 0.25, 0.50, 1.00\}$ at
+$50\mathrm{K}$ nodes (Table~\ref{tab:rate-knee}), \texttt{local\_probe}
+scales linearly with the rate (perfect $10\times$ reduction at rate
+$0.10$). Routing quality is unchanged across the entire range: hops
+$5.48$--$5.54$, time $268$--$271\,\mathrm{ms}$, success $100\%$. The
+knee is at rate $\approx 0.10$ --- the setting at which absolute
+hot-node count drops to its minimum ($575$ at rate $0.10$ versus
+$1{,}428$ at rate $1.00$ and $852$ at rate $0.05$).
+
+\begin{table*}[t]
+\centering
+\caption{\texttt{annealRateScale} knee for \nhone at $50\,000$ nodes.
+Routing quality (hops, time, success) is unchanged across the entire
+range.}
+\label{tab:rate-knee}
+\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+\textbf{rate} & \textbf{Total/cyc} & \textbf{local\_probe} &
+\textbf{Gini} & \textbf{Hot~$>10\times$} & \textbf{vs default} \\
+\midrule
+$0.05$ & $63{,}847$ & $18{,}224$ & $0.866$ & $852$ & $6.5\times$ cut \\
+$\mathbf{0.10}$ & $\mathbf{82{,}650}$ & $\mathbf{36{,}989}$ &
+$\mathbf{0.834}$ & $\mathbf{575}$ & $\mathbf{5.0\times}$ \textbf{cut} \\
+$0.25$ & $137{,}363$ & $92{,}453$ & $0.770$ & $735$ & $3.0\times$ cut \\
+$0.50$ & $232{,}749$ & $187{,}366$ & $0.713$ & $1{,}215$ &
+$1.8\times$ cut \\
+$1.00$ & $414{,}929$ & $369{,}552$ & $0.661$ & $1{,}428$ & (default) \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Robustness under churn.} Under $5\%$ per-cycle node
+turnover at $25\,000$ nodes (Table~\ref{tab:bandwidth-churn}),
+throttled \nhone holds $100\%$ routing success with
+Gini~$0.79$ --- still strictly better than Kademlia's $0.92$ ---
+and zero hot $>100\times$ nodes. Both classical protocols develop
+$7$ catastrophic-bandwidth nodes under the same churn load. The
+T\_REHEAT mechanism still fires on dead-peer detection regardless of
+the base annealing rate, so churn-recovery is uncompromised by the
+throttle: \nhone's churn-induced Gini increase ($+0.012$) is the
+smallest of any protocol tested.
+
+\begin{table*}[t]
+\centering
+\caption{Steady-state distribution at $25\,000$ nodes with $5\%$
+per-cycle churn.}
+\label{tab:bandwidth-churn}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Protocol} & \textbf{Total/cyc} & \textbf{Gini} &
+\textbf{Hot~$>100\times$} & \textbf{Success} \\
+\midrule
+\textsc{K-DHT} & $12{,}725$ & $0.919$ & $\mathbf{7}$ & $100\%$ \\
+\GDHT & $15{,}817$ & $0.910$ & $\mathbf{7}$ & $99.9\%$ \\
+\NXseventeen (default) & $496{,}256$ & $0.678$ & $0$ & $100\%$ \\
+\nhone (default) & $356{,}358$ & $0.654$ & $0$ & $100\%$ \\
+\textbf{\nhone (throttled)} & $\mathbf{71{,}695}$ & $\mathbf{0.786}$ &
+$\mathbf{0}$ & $\mathbf{100\%}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Reclassification of red-team Issue~\#3.} The foundational
+concentration question is empirically resolved: \nhone distributes
+load broadly and stably; classical DHTs concentrate it
+catastrophically at scale. The $25\times$ volume tax of full
+annealing is a single tunable parameter with a clean knee and zero
+impact on routing quality. The remaining bandwidth-saturation concern
+--- a popular pub/sub topic's root saturating from publish volume
+under Zipf workloads --- is a bounded sub-problem whose mitigation
+(hot-axon-root migration plus MaxDisjoint replication,
+\S\ref{sec:future}) was already specified by the red team. The
+deploy-blocker framing of the broader issue is retired.
+
 % ═════════════════════════════════════════════════════════════════════════════
 \section{Discussion and Limitations}
 \label{sec:discussion}
@@ -1367,14 +1573,19 @@ are lost. The $100\%$ pub/sub recovery under $5\%$ churn measurement
 assumes instant detection; a production-realistic figure would model
 \texttt{RPC\_TIMEOUT\_MS} and asymmetric reply paths.
 
-\paragraph{Bandwidth saturation.} AP scoring's static
-$\frac{1}{2}^{(\ell/100)}$ latency penalty does not penalize overloaded
-nodes. A real system risks \emph{success disasters}: LTP reinforces
-a node until it congests, abandons it when it slows, then flocks back
-when it recovers, in oscillatory loops. Mitigation: load-aware AP
-scoring with effective delay $= \mathrm{base\_delay} \times (1 +
-\mathrm{msg\_rate} / \mathrm{bandwidth\_cap})$ along the lines of
-Makris~\emph{et~al.}'s DFE pattern~\cite{makris2017novel}.
+\paragraph{Bandwidth saturation.} \emph{Reclassified
+following \S\ref{sec:eval-bandwidth}.} The hypothesis that AP
+scoring concentrates load on overloaded nodes is empirically
+falsified at the scales we measure: \nhone produces zero
+$>100\times$-mean nodes at any tested size while Kademlia produces
+$56$ at $50\mathrm{K}$ (Table~\ref{tab:bandwidth}). The residual
+concern is the Zipf-distributed pub/sub case --- a single popular
+topic's root saturating from publish volume rather than from routing
+traffic. This is bounded sub-problem; mitigation by hot-axon-root
+migration (Makris~\emph{et~al.}~\cite{makris2017novel} DFE pattern)
+plus MaxDisjoint topic replication
+(Harvesf-Blough~\cite{harvesf2007design}) is sketched
+in \S\ref{sec:future}.
 
 \paragraph{Latency jitter.} Real RTTs fluctuate $\pm 30\%$ from
 bufferbloat, asymmetric paths, and queuing. Our distance-derived

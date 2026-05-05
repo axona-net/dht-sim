@@ -960,8 +960,20 @@
           <div class="stat" data-tip="Mean hops per lookup this session."><span class="sl">Avg Hops</span><span class="sv hops" id="trainAvgHops">&#8212;</span></div>
           <div class="stat" data-tip="Mean lookup latency this session."><span class="sl">Avg Time</span><span class="sv time" id="trainAvgTime">&#8212;</span></div>
         </div>
+        <!-- v0.70.00 — per-cycle traffic-load distribution: how clustered or
+             decentralized is the load? Counters reset every session, so each
+             cycle reports a delta (messages observed during that cycle). -->
+        <div class="stat-row">
+          <div class="stat" data-tip="Total messages (sender + receiver counts) observed in this training cycle."><span class="sl">Msgs</span><span class="sv" id="trainMsgsTotal">&#8212;</span></div>
+          <div class="stat" data-tip="Per-node median message count — the typical node's load this cycle."><span class="sl">p50</span><span class="sv" id="trainMsgsP50">&#8212;</span></div>
+          <div class="stat" data-tip="Per-node 99th percentile — the load on heavily-trafficked nodes."><span class="sl">p99</span><span class="sv" id="trainMsgsP99">&#8212;</span></div>
+          <div class="stat" data-tip="Most-loaded single node this cycle — the maximum observed."><span class="sl">Max</span><span class="sv" id="trainMsgsMax">&#8212;</span></div>
+          <div class="stat" data-tip="Gini coefficient over the per-node load distribution (0 = perfectly uniform; 1 = one node carries everything). Tracks whether load is clustering or decentralizing as training proceeds."><span class="sl">Gini</span><span class="sv" id="trainMsgsGini">&#8212;</span></div>
+          <div class="stat" data-tip="Number of nodes with > 10× the cycle-mean message count. Hotspot indicator."><span class="sl">Hot &gt;10×</span><span class="sv" id="trainMsgsHot10x">&#8212;</span></div>
+        </div>
         <div class="chart-strip">
           <div class="training-chart-box" id="trainingChartBox"><canvas id="trainingLineChart"></canvas></div>
+          <div class="training-chart-box" id="trainingTrafficBox"><canvas id="trainingTrafficChart"></canvas></div>
         </div>
         <div id="trainingBaseline"></div>
         <div class="tl-divider"></div>
@@ -1042,7 +1054,7 @@
     </div>
 
     <!-- Version -->
-    <div id="legend">Version: 0.69.00</div>
+    <div id="legend">Version: 0.70.05</div>
   </div>
 
   </div><!-- /mainRow -->

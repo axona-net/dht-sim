@@ -53,6 +53,17 @@ export class SimulatedNetwork {
    * Simulate sending a message from `fromNode` to `toNodeId`.
    * Calls `handleMessage` on the target node synchronously (no real I/O).
    *
+   * Per-cycle traffic counters (v0.70.00) are incremented here on both
+   * endpoints — sender and receiver — plus a per-type subtotal. This is
+   * the single chokepoint every protocol-level message passes through, so
+   * instrumenting once captures everything: lookups, pings, pub/sub
+   * forwarding, sponsor-chain joins, hop caching, triadic closure, every
+   * mechanism. Engine.snapshotTrafficLoad() reads and resets these
+   * counters after each training cycle.
+   *
+   * The `from` half is bumped only for live nodes (sender may be a
+   * "ghost" node during certain edge-case test paths).
+   *
    * @returns {{ response: any, latency: number }}   latency in ms (round-trip)
    */
   send(fromNode, toNodeId, type, data) {
@@ -62,6 +73,18 @@ export class SimulatedNetwork {
     }
 
     this.messageCount++;
+
+    // ── Traffic counters: sender side ─────────────────────────────────
+    if (fromNode && fromNode.alive !== false) {
+      fromNode.msgsSent = (fromNode.msgsSent | 0) + 1;
+      if (!fromNode.msgsByType) fromNode.msgsByType = Object.create(null);
+      fromNode.msgsByType[type] = (fromNode.msgsByType[type] | 0) + 1;
+    }
+    // ── Traffic counters: receiver side ────────────────────────────────
+    toNode.msgsReceived = (toNode.msgsReceived | 0) + 1;
+    if (!toNode.msgsByType) toNode.msgsByType = Object.create(null);
+    toNode.msgsByType[type] = (toNode.msgsByType[type] | 0) + 1;
+
     const latency = roundTripLatency(fromNode, toNode);
     const response = toNode.handleMessage({ type, from: fromNode.id, data });
     return { response, latency };

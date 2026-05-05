@@ -139,6 +139,11 @@ export class NeuromorphicDHTNX6 extends DHT {
     this.ANNEAL_COOLING      = p('annealing', 'annealCooling', 0.9997);
     this.GLOBAL_BIAS         = p('annealing', 'globalBias', 0.5);
     this.ANNEAL_LOCAL_SAMPLE = p('annealing', 'annealLocalSample', 50);
+    // v0.70.03 — anneal-rate throttle for bandwidth-tax ablation. Default
+    // 1.0 keeps existing behaviour; lower values reduce per-hop trigger
+    // probability without interfering with T_REHEAT or temperature decay.
+    // NX-17 inherits this through NX-15 → NX-10 → NX-6 verbatim.
+    this.ANNEAL_RATE_SCALE   = p('annealing', 'annealRateScale', 1.0);
     this.ANNEAL_BUF_REBUILD  = 200;
 
     // ── Rule 11: Markov Pre-learning ──────────────────────────────────────────
@@ -688,6 +693,9 @@ export class NeuromorphicDHTNX6 extends DHT {
       trace.push({ fromId: currentId, synapse: nextSyn });
       totalTimeMs += nextSyn.latency;
 
+      // TRAFFIC: each hop transition is one wire FIND_NODE message.
+      this._msg(current, nextNode, 'find_node');
+
       // Highway renewal timestamp (N-15W rule)
       if (this.EN_TWO_TIER) {
         nextSyn.lastActiveEpoch = this.simEpoch;
@@ -716,7 +724,8 @@ export class NeuromorphicDHTNX6 extends DHT {
       // Rule 9: Simulated annealing
       if (this.EN_ANNEALING) {
         current.temperature = Math.max(this.T_MIN, current.temperature * this.ANNEAL_COOLING);
-        if (Math.random() < current.temperature) {
+        // v0.70.03 — ANNEAL_RATE_SCALE throttle (default 1.0 = unchanged)
+        if (Math.random() < current.temperature * this.ANNEAL_RATE_SCALE) {
           this._tryAnneal(current);
         }
       }
@@ -779,6 +788,10 @@ export class NeuromorphicDHTNX6 extends DHT {
       if (syn) {
         syn.reinforce(this.simEpoch, this.INERTIA_DURATION);
         syn.useCount = (syn.useCount ?? 0) + 1;
+        // TRAFFIC: LTP feedback — peer acknowledges that node's synapse to
+        // it carried a fast-path lookup. One wire ack per reinforced step.
+        const peer = this.nodeMap.get(synapse.peerId);
+        if (peer) this._msg(peer, node, 'reinforce');
       }
     }
   }
@@ -832,6 +845,10 @@ export class NeuromorphicDHTNX6 extends DHT {
       const firstNode = this.nodeMap.get(firstSyn.peerId);
       if (!firstNode?.alive) continue;
 
+      // TRAFFIC: each two-hop AP probe asks `firstNode` for its closest
+      // peer to target. One wire round-trip per probe-set entry.
+      this._msg(current, firstNode, 'lookahead_probe');
+
       const fwdCands = [];
       for (const fs of firstNode.synaptome.values()) {
         if ((fs.peerId ^ targetKey) < firstDist && this.nodeMap.get(fs.peerId)?.alive)
@@ -876,7 +893,12 @@ export class NeuromorphicDHTNX6 extends DHT {
     const stratum = clz64(nodeA.id ^ nodeC.id);
     const syn     = new Synapse({ peerId: cId, latencyMs: latMs, stratum });
     syn.weight    = initialWeight;
-    this._stratifiedAdd(nodeA, syn);
+    const added = this._stratifiedAdd(nodeA, syn);
+    // TRAFFIC: A probes C to confirm liveness and learn latency. Counted
+    // only on successful add so silent bilateral-cap refusals don't
+    // contribute. This site fires for: triadic closure, Markov pre-learn,
+    // cascade backpropagation, and any future _introduce caller.
+    if (added) this._msg(nodeA, nodeC, 'introduce_probe');
   }
 
   // ── Hop caching + cascading lateral spread ──────────────────────────────────
@@ -893,6 +915,10 @@ export class NeuromorphicDHTNX6 extends DHT {
     syn.weight    = 0.5;
     const added   = this._stratifiedAdd(nodeA, syn);
 
+    // TRAFFIC: hop-cache pickup probes C from A; charge depth-1 vs deeper
+    // separately so we can see which level produces the bulk of writes.
+    if (added) this._msg(nodeA, nodeC, depth === 1 ? 'hop_cache' : 'hop_cache_lateral');
+
     // Rule 7: Cascade to regional neighbours
     if (this.EN_LATERAL_SPREAD && added && depth <= this.LATERAL_MAX_DEPTH) {
       const aRegion  = aId >> BigInt(64 - this.GEO_REGION_BITS);
@@ -905,6 +931,9 @@ export class NeuromorphicDHTNX6 extends DHT {
       regional.sort((a, b) => b.weight - a.weight);
       const k = depth === 1 ? this.LATERAL_K : this.LATERAL_K2;
       for (let i = 0; i < Math.min(k, regional.length); i++) {
+        // TRAFFIC: lateral spread tells the regional peer about target.
+        const lateralPeer = this.nodeMap.get(regional[i].peerId);
+        if (lateralPeer) this._msg(nodeA, lateralPeer, 'lateral_spread');
         this._introduceAndSpread(regional[i].peerId, cId, depth + 1);
       }
     }
@@ -986,6 +1015,9 @@ export class NeuromorphicDHTNX6 extends DHT {
     for (const syn of node.synaptome.values()) {
       const peer = this.nodeMap.get(syn.peerId);
       if (!peer?.alive) continue;
+      // TRAFFIC: highway-refresh probes each 1-hop peer for its synaptome
+      // to discover candidate hubs. One RPC per peer iterated.
+      this._msg(node, peer, 'highway_probe');
       seen.add(peer.id);
       for (const pSyn of peer.synaptome.values()) {
         if (seen.has(pSyn.peerId)) continue;
@@ -1041,6 +1073,10 @@ export class NeuromorphicDHTNX6 extends DHT {
     const count = (node.transitCache.get(key) ?? 0) + 1;
     if (count >= this.INTRODUCTION_THRESHOLD) {
       node.transitCache.delete(key);
+      // TRAFFIC: the transit observer (`node`) hints to the original source
+      // that it should connect to nextId. One wire message per fired triadic.
+      const nodeA = this.nodeMap.get(originId);
+      if (nodeA) this._msg(node, nodeA, 'triadic_introduce');
       this._introduce(originId, nextId);
     } else {
       node.transitCache.set(key, count);
@@ -1107,6 +1143,9 @@ export class NeuromorphicDHTNX6 extends DHT {
     const newSyn  = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
     newSyn.weight = 0.1;
     node.addSynapse(newSyn);
+    // TRAFFIC: anneal handshake — node connects to a fresh candidate
+    // discovered via 2-hop scan. One wire message per successful anneal.
+    this._msg(node, candidate, 'anneal');
   }
 
   // ── Global candidate (annealing exploration) ───────────────────────────────
@@ -1134,6 +1173,9 @@ export class NeuromorphicDHTNX6 extends DHT {
     for (const syn of node.synaptome.values()) {
       const peer = this.nodeMap.get(syn.peerId);
       if (!peer?.alive) continue;
+      // TRAFFIC: each 1-hop peer probed for its synaptome is a "tell me
+      // your peers" RPC. Inner loop is data within that response.
+      this._msg(node, peer, 'local_probe');
       for (const peerSyn of peer.synaptome.values()) {
         const id = peerSyn.peerId;
         if (id === node.id || this._hasAny(node, id)) continue;
@@ -1213,6 +1255,9 @@ export class NeuromorphicDHTNX6 extends DHT {
     const newSyn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum: newStratum });
     newSyn.weight    = medianW;
     node.addSynapse(newSyn);
+    // TRAFFIC: A confirms the chosen replacement candidate (handshake to
+    // learn live latency). One wire message per successful replace.
+    this._msg(node, candidate, 'evict_replace');
     return newSyn;   // return so caller can add to current-hop candidates
   }
 
@@ -1319,6 +1364,31 @@ export class NeuromorphicDHTNX6 extends DHT {
         if (i < removable) tierMap.delete(candidates[i].peerId);
         else               candidates[i].weight = this.PRUNE_THRESHOLD;
       }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Traffic Counters (parity with SimulatedNetwork.send instrumentation)
+  // v0.70.02 — NX-6's routing primitives access peers via this.nodeMap
+  // directly (just like NH-1), so SimulatedNetwork.send's traffic counters
+  // never fire for the bulk of the protocol's wire activity. _msg() is the
+  // NX-6-side equivalent: every lookup hop, two-hop probe, LTP step, hop
+  // cache, lateral spread, triadic intro, local candidate scan, highway
+  // refresh, and dead-peer replacement calls _msg() once per conceptual
+  // wire message. Every NX-6 descendant (NX-7…NX-17) inherits this
+  // automatically because none of them override the routing methods.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  _msg(fromNode, toNode, type) {
+    if (fromNode && fromNode.alive !== false) {
+      fromNode.msgsSent = (fromNode.msgsSent | 0) + 1;
+      if (!fromNode.msgsByType) fromNode.msgsByType = Object.create(null);
+      fromNode.msgsByType[type] = (fromNode.msgsByType[type] | 0) + 1;
+    }
+    if (toNode && toNode.alive !== false) {
+      toNode.msgsReceived = (toNode.msgsReceived | 0) + 1;
+      if (!toNode.msgsByType) toNode.msgsByType = Object.create(null);
+      toNode.msgsByType[type] = (toNode.msgsByType[type] | 0) + 1;
     }
   }
 

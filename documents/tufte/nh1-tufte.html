@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Building a Smarter Internet — David A. Smith</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fffff8;
+    --text: #1a1a1a;
+    --ink: #2a2a2a;
+    --muted: #666;
+    --rule: #ccc;
+    --accent: #b94e36;
+    --accent-soft: #d4a896;
+    --serif: 'EB Garamond', et-book, Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { font-size: 17px; }
+
+  body {
+    font-family: var(--serif);
+    background-color: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 0;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  article {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 5rem 5rem 8rem 6rem;
+    position: relative;
+    counter-reset: sidenote-counter;
+  }
+
+  /* ---- Header ---- */
+  header.title-block {
+    width: 55%;
+    margin-bottom: 3.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  h1 {
+    font-weight: 400;
+    font-style: italic;
+    font-size: 3.4rem;
+    line-height: 1.05;
+    letter-spacing: -0.015em;
+    margin: 0 0 1.2rem 0;
+  }
+
+  .author {
+    font-variant: small-caps;
+    letter-spacing: 0.10em;
+    font-size: 1rem;
+    margin: 0 0 0.2rem 0;
+    font-style: normal;
+  }
+
+  .affiliation {
+    font-style: italic;
+    font-size: 0.95rem;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  .epigraph {
+    width: 55%;
+    margin: 2.5rem 0 4rem 0;
+    padding-left: 1.5rem;
+    border-left: 2px solid var(--accent-soft);
+    font-style: italic;
+    font-size: 1.05rem;
+    color: var(--ink);
+  }
+
+  .epigraph .attribution {
+    display: block;
+    margin-top: 0.5rem;
+    font-style: normal;
+    font-size: 0.85rem;
+    color: var(--muted);
+    font-variant: small-caps;
+    letter-spacing: 0.06em;
+  }
+
+  /* ---- Sections ---- */
+  section {
+    width: 55%;
+    margin-bottom: 1rem;
+    position: relative;
+  }
+
+  h2 {
+    font-weight: 400;
+    font-style: italic;
+    font-size: 1.55rem;
+    margin: 3.5rem 0 1rem 0;
+    letter-spacing: -0.005em;
+    line-height: 1.2;
+  }
+
+  h2 .num {
+    font-variant: small-caps;
+    letter-spacing: 0.10em;
+    font-style: normal;
+    margin-right: 0.7em;
+    font-size: 0.85em;
+    color: var(--muted);
+  }
+
+  h3 {
+    font-weight: 500;
+    font-style: italic;
+    font-size: 1.15rem;
+    margin: 2rem 0 0.6rem 0;
+    color: var(--ink);
+  }
+
+  /* ---- Paragraphs ---- */
+  p {
+    margin: 0 0 1.1rem 0;
+    text-align: left;
+    hyphens: auto;
+    -webkit-hyphens: auto;
+  }
+
+  .newthought {
+    font-variant: small-caps;
+    letter-spacing: 0.06em;
+    font-size: 1.04em;
+  }
+
+  /* ---- Sidenotes & Margin notes ---- */
+  .sidenote, .marginnote {
+    float: right;
+    clear: right;
+    margin-right: -65%;
+    width: 56%;
+    margin-top: 0.4rem;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    color: var(--muted);
+    position: relative;
+  }
+
+  .sidenote {
+    counter-increment: sidenote-counter;
+  }
+
+  .sidenote::before {
+    content: counter(sidenote-counter) ". ";
+    color: var(--accent);
+    font-variant-numeric: oldstyle-nums;
+  }
+
+  /* ---- Figures ---- */
+  figure {
+    margin: 2.5rem 0;
+    width: 100%;
+  }
+
+  figure.fullwidth {
+    width: calc(100% / 0.55);
+    max-width: 92%;
+  }
+
+  figure svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+  }
+
+  figcaption {
+    font-size: 0.85rem;
+    color: var(--muted);
+    line-height: 1.45;
+    margin-top: 0.8rem;
+    font-style: italic;
+  }
+
+  figcaption .figlabel {
+    font-variant: small-caps;
+    letter-spacing: 0.08em;
+    font-style: normal;
+    color: var(--text);
+    margin-right: 0.4em;
+    font-size: 0.85rem;
+  }
+
+  /* ---- Inline elements ---- */
+  code {
+    font-family: var(--mono);
+    font-size: 0.82em;
+    background: rgba(0,0,0,0.04);
+    padding: 0.05em 0.35em;
+    border-radius: 2px;
+  }
+
+  strong {
+    font-weight: 600;
+  }
+
+  em {
+    font-style: italic;
+  }
+
+  /* ---- Pull quotes ---- */
+  blockquote {
+    font-style: italic;
+    font-size: 1.18rem;
+    margin: 1.8rem 0 1.8rem 0;
+    padding: 0 0 0 1.5rem;
+    border-left: 2px solid var(--accent-soft);
+    line-height: 1.4;
+    color: var(--ink);
+  }
+
+  /* ---- Tables ---- */
+  table {
+    border-collapse: collapse;
+    margin: 1.8rem 0;
+    font-size: 0.95rem;
+    width: 100%;
+  }
+
+  th {
+    text-align: left;
+    padding: 0.5rem 1.2rem 0.4rem 0;
+    border-bottom: 1.5px solid var(--text);
+    font-weight: 500;
+    font-variant: small-caps;
+    letter-spacing: 0.05em;
+    font-size: 0.88rem;
+  }
+
+  td {
+    text-align: left;
+    padding: 0.45rem 1.2rem 0.45rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+
+  tr:last-child td {
+    border-bottom: none;
+  }
+
+  /* ---- Lists ---- */
+  ul, ol {
+    margin: 0 0 1.1rem 0;
+    padding-left: 1.5rem;
+  }
+
+  li {
+    margin-bottom: 0.4rem;
+  }
+
+  ol li::marker {
+    color: var(--muted);
+    font-variant-numeric: oldstyle-nums;
+  }
+
+  /* ---- SVG figure styles ---- */
+  .tufte-svg {
+    font-family: var(--serif);
+    overflow: visible;
+  }
+
+  .tufte-svg text {
+    fill: var(--text);
+    font-size: 12px;
+  }
+
+  .tufte-svg .axis {
+    stroke: var(--ink);
+    stroke-width: 0.8;
+    fill: none;
+  }
+
+  .tufte-svg .grid-cell {
+    fill: none;
+    stroke: var(--rule);
+    stroke-width: 0.6;
+  }
+
+  .tufte-svg .data-line {
+    fill: none;
+    stroke: var(--ink);
+    stroke-width: 1.4;
+  }
+
+  .tufte-svg .data-line.muted {
+    stroke: #aaa;
+  }
+
+  .tufte-svg .data-line.medium {
+    stroke: #888;
+  }
+
+  .tufte-svg .data-line.dark {
+    stroke: #555;
+  }
+
+  .tufte-svg .data-line.accent {
+    stroke: var(--accent);
+    stroke-width: 1.8;
+  }
+
+  .tufte-svg .reference {
+    stroke: var(--muted);
+    stroke-width: 0.8;
+    stroke-dasharray: 3 3;
+    fill: none;
+  }
+
+  .tufte-svg .label {
+    font-size: 11px;
+    fill: var(--text);
+  }
+
+  .tufte-svg .label.muted {
+    fill: var(--muted);
+  }
+
+  .tufte-svg .label.accent {
+    fill: var(--accent);
+  }
+
+  .tufte-svg .small {
+    font-size: 10px;
+  }
+
+  .tufte-svg .smaller {
+    font-size: 9px;
+  }
+
+  .tufte-svg .italic {
+    font-style: italic;
+  }
+
+  .tufte-svg .smallcaps {
+    font-variant: small-caps;
+    letter-spacing: 0.08em;
+  }
+
+  .tufte-svg .data-point {
+    fill: var(--ink);
+  }
+
+  .tufte-svg .data-point.accent {
+    fill: var(--accent);
+  }
+
+  /* ---- Responsive ---- */
+  @media (max-width: 900px) {
+    article { padding: 3rem 1.5rem; }
+    header.title-block, section, .epigraph { width: 100%; }
+    h1 { font-size: 2.4rem; }
+    .sidenote, .marginnote {
+      float: none;
+      margin: 0.8rem 0 1rem 1.5rem;
+      width: auto;
+      padding-left: 0.8rem;
+      border-left: 2px solid var(--accent-soft);
+      display: block;
+    }
+    figure.fullwidth { width: 100%; max-width: 100%; }
+  }
+
+  @media (max-width: 600px) {
+    html { font-size: 16px; }
+    article { padding: 2rem 1rem; }
+    h1 { font-size: 2rem; }
+  }
+</style>
+</head>
+<body>
+
+<article>
+
+  <header class="title-block">
+    <h1>Building a Smarter Internet</h1>
+    <p class="author">David A. Smith</p>
+    <p class="affiliation">YZ.social</p>
+  </header>
+
+  <div class="epigraph">
+    Neurons that fire together, wire together.
+    <span class="attribution">Donald Hebb · 1949</span>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- I. THE PROBLEM -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">I</span><span class="title">The Problem</span></h2>
+
+    <p><span class="newthought">Imagine</span> you and a million strangers each hold one piece of a giant jigsaw puzzle. Someone walks up and asks for piece&nbsp;#438,291. How do you find it?</p>
+
+    <p><strong>Option 1: Have a central directory.</strong> Some company keeps a giant list: &ldquo;piece 438,291 is held by Alice.&rdquo; Easy to look up&mdash;but now that company controls everything. They can shut you down, spy on you, charge you money, or just go bankrupt and take the directory with them.</p>
+
+    <p><strong>Option 2: Give every piece an &ldquo;address,&rdquo; and design a system where the network <em>itself</em> knows how to route requests to the right person, with no central directory.</strong> This is what a <strong>distributed hash table</strong> (DHT) does.<span class="sidenote">DHTs are the machinery behind BitTorrent, IPFS, parts of Ethereum, and the hidden services on Tor. Every node gets a random ID; every piece of content gets an ID; lookups route from one to the other.</span></p>
+
+    <p>The trick: how do you find the closest node when you don't know who's in the network and you only know a handful of peers?</p>
+
+    <p>The dominant DHT algorithm is called <strong>Kademlia</strong>, designed in 2002. Every node has a 160-bit ID&mdash;a very large random number. To measure &ldquo;distance&rdquo; between two IDs, you XOR them, comparing bit by bit.<span class="marginnote"><em>XOR</em> is a bitwise operation that returns 1 wherever two bits differ and 0 wherever they match. Two IDs that share many leading bits XOR to a small number; two unrelated IDs XOR to a large one.</span> To find a target, you ask the closest peer you know. They tell you about peers <em>they</em> know that are even closer. You ask one of those. Repeat.</p>
+
+    <p>The math is clean: each step at least <em>halves</em> the remaining distance, so you reach any target in about log&#8322;(N) hops. With a million nodes, that's 20 steps. Provably correct, used in production all over the internet.</p>
+
+    <p>There's just one problem.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- II. THE LATENCY TAX -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">II</span><span class="title">The Latency Tax</span></h2>
+
+    <p><span class="newthought">Twenty hops</span> sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart&mdash;roughly 100&nbsp;milliseconds for a round trip.</p>
+
+    <p>20 hops &times; 100&nbsp;ms = <strong>2 seconds</strong>. To find something. Every time.</p>
+
+    <p>For real-time applications&mdash;voice calls, online games, live messaging, push notifications&mdash;2 seconds is unusable. The math says routing is logarithmic, which is fast; the physics says each step is slow because peers are far apart. That's the tension.</p>
+
+    <p>This paper attacks the latency problem with two ideas, one of which is borrowed straight from neuroscience.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- III. G-DHT -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">III</span><span class="title">Putting the Address in the Address</span></h2>
+
+    <p><span class="newthought">The first idea</span> is almost embarrassingly simple. It's called <strong>G-DHT</strong> (Geographic DHT).</p>
+
+    <p>Kademlia node IDs are random. A node in Tokyo and a node in Berlin have IDs with no relationship to where they actually are. That's <em>why</em> hops are random and slow&mdash;random IDs mean random geography.</p>
+
+    <p>G-DHT changes one thing: the <strong>first 8 bits</strong> of every node ID encode where the node says it is on Earth.</p>
+
+    <p>The trick uses Google's S2 library, which divides Earth's surface into cells along a curve called a <strong>Hilbert curve</strong>.<span class="marginnote">Hilbert curves are space-filling: they trace a single continuous path that visits every cell in a grid. Their useful property is that consecutive points on the curve are also adjacent in space.</span> Its useful property: places near each other on Earth get cell numbers near each other. So XORing two S2 cell numbers gives a small result for nearby places and a large one for distant places.</p>
+
+    <figure>
+      <svg class="tufte-svg" viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg" aria-labelledby="fig1title">
+        <title id="fig1title">Random vs. Hilbert-ordered IDs on a 4&times;4 grid</title>
+
+        <!-- Left grid: Random IDs -->
+        <g transform="translate(40, 50)">
+          <text x="120" y="-20" text-anchor="middle" class="smallcaps small">Random IDs</text>
+
+          <!-- 4x4 grid -->
+          <g>
+            <!-- Row 0 -->
+            <rect x="0"   y="0"   width="60" height="60" class="grid-cell"/>
+            <rect x="60"  y="0"   width="60" height="60" class="grid-cell"/>
+            <rect x="120" y="0"   width="60" height="60" class="grid-cell"/>
+            <rect x="180" y="0"   width="60" height="60" class="grid-cell"/>
+            <!-- Row 1 -->
+            <rect x="0"   y="60"  width="60" height="60" class="grid-cell"/>
+            <rect x="60"  y="60"  width="60" height="60" class="grid-cell"/>
+            <rect x="120" y="60"  width="60" height="60" class="grid-cell"/>
+            <rect x="180" y="60"  width="60" height="60" class="grid-cell"/>
+            <!-- Row 2 -->
+            <rect x="0"   y="120" width="60" height="60" class="grid-cell"/>
+            <rect x="60"  y="120" width="60" height="60" class="grid-cell"/>
+            <rect x="120" y="120" width="60" height="60" class="grid-cell"/>
+            <rect x="180" y="120" width="60" height="60" class="grid-cell"/>
+            <!-- Row 3 -->
+            <rect x="0"   y="180" width="60" height="60" class="grid-cell"/>
+            <rect x="60"  y="180" width="60" height="60" class="grid-cell"/>
+            <rect x="120" y="180" width="60" height="60" class="grid-cell"/>
+            <rect x="180" y="180" width="60" height="60" class="grid-cell"/>
+          </g>
+
+          <!-- Random IDs:
+            7 13  3 10
+            1 15  9  4
+            6  0 12  8
+            5 11  2 14
+          -->
+          <g class="data-label" font-size="14" text-anchor="middle">
+            <text x="30"  y="35">7</text><text x="90"  y="35">13</text><text x="150" y="35">3</text><text x="210" y="35">10</text>
+            <text x="30"  y="95">1</text><text x="90"  y="95">15</text><text x="150" y="95">9</text><text x="210" y="95">4</text>
+            <text x="30"  y="155">6</text><text x="90" y="155">0</text><text x="150" y="155">12</text><text x="210" y="155">8</text>
+            <text x="30"  y="215">5</text><text x="90" y="215">11</text><text x="150" y="215">2</text><text x="210" y="215">14</text>
+          </g>
+
+          <text x="120" y="270" text-anchor="middle" class="label muted italic">neighbors in space, strangers in ID</text>
+        </g>
+
+        <!-- Right grid: Hilbert IDs -->
+        <g transform="translate(420, 50)">
+          <text x="120" y="-20" text-anchor="middle" class="smallcaps small">Hilbert (S2) IDs</text>
+
+          <!-- 4x4 grid -->
+          <g>
+            <rect x="0"   y="0"   width="60" height="60" class="grid-cell"/>
+            <rect x="60"  y="0"   width="60" height="60" class="grid-cell"/>
+            <rect x="120" y="0"   width="60" height="60" class="grid-cell"/>
+            <rect x="180" y="0"   width="60" height="60" class="grid-cell"/>
+            <rect x="0"   y="60"  width="60" height="60" class="grid-cell"/>
+            <rect x="60"  y="60"  width="60" height="60" class="grid-cell"/>
+            <rect x="120" y="60"  width="60" height="60" class="grid-cell"/>
+            <rect x="180" y="60"  width="60" height="60" class="grid-cell"/>
+            <rect x="0"   y="120" width="60" height="60" class="grid-cell"/>
+            <rect x="60"  y="120" width="60" height="60" class="grid-cell"/>
+            <rect x="120" y="120" width="60" height="60" class="grid-cell"/>
+            <rect x="180" y="120" width="60" height="60" class="grid-cell"/>
+            <rect x="0"   y="180" width="60" height="60" class="grid-cell"/>
+            <rect x="60"  y="180" width="60" height="60" class="grid-cell"/>
+            <rect x="120" y="180" width="60" height="60" class="grid-cell"/>
+            <rect x="180" y="180" width="60" height="60" class="grid-cell"/>
+          </g>
+
+          <!-- Hilbert path through cell centers
+            Path: 0(0,0) 1(1,0) 2(1,1) 3(0,1) 4(0,2) 5(0,3) 6(1,3) 7(1,2) 8(2,2) 9(2,3) 10(3,3) 11(3,2) 12(3,1) 13(2,1) 14(2,0) 15(3,0)
+            Centers (col*60+30, row*60+30):
+            (30,30) (90,30) (90,90) (30,90) (30,150) (30,210) (90,210) (90,150) (150,150) (150,210) (210,210) (210,150) (210,90) (150,90) (150,30) (210,30)
+          -->
+          <polyline class="data-line accent" points="
+            30,30 90,30 90,90 30,90 30,150 30,210 90,210 90,150
+            150,150 150,210 210,210 210,150 210,90 150,90 150,30 210,30"
+            stroke-width="2" fill="none"/>
+
+          <!-- Hilbert IDs:
+            0  1 14 15
+            3  2 13 12
+            4  7  8 11
+            5  6  9 10
+          -->
+          <g class="data-label" font-size="14" text-anchor="middle">
+            <text x="30"  y="35">0</text><text x="90"  y="35">1</text><text x="150" y="35">14</text><text x="210" y="35">15</text>
+            <text x="30"  y="95">3</text><text x="90"  y="95">2</text><text x="150" y="95">13</text><text x="210" y="95">12</text>
+            <text x="30"  y="155">4</text><text x="90" y="155">7</text><text x="150" y="155">8</text><text x="210" y="155">11</text>
+            <text x="30"  y="215">5</text><text x="90" y="215">6</text><text x="150" y="215">9</text><text x="210" y="215">10</text>
+          </g>
+
+          <text x="120" y="270" text-anchor="middle" class="label muted italic">consecutive integers walk a connected path</text>
+        </g>
+      </svg>
+      <figcaption>
+        <span class="figlabel">Figure 1.</span>
+        Two arrangements of the integers 0&ndash;15 on a 4&times;4 grid. With random IDs, sequential numbers scatter unpredictably; cells that are spatial neighbors are numerical strangers. With S2's Hilbert-curve IDs, sequential numbers form a connected path&mdash;a continuous walk that never leaves a small neighborhood. XOR distance in ID space now approximates distance on the ground.
+      </figcaption>
+    </figure>
+
+    <p>Now your node ID looks like: <code>[8-bit geographic cell][56-bit hash of public key]</code>.</p>
+
+    <p>The routing algorithm doesn't change at all, but XOR distance now approximately tracks physical distance. When a node looks for a &ldquo;close&rdquo; peer in ID space, it tends to find one that's also physically close. Local traffic stays local. The 20-hop world tour becomes a 13-hop journey around the neighborhood, with each hop maybe 7&nbsp;ms instead of 100.</p>
+
+    <p>Total: about 91&nbsp;ms instead of 2&nbsp;seconds. <strong>Roughly 20&times; faster</strong> for regional traffic, just from changing the <em>structure</em> of the addresses.</p>
+
+    <p>The cost: nodes can lie about where they are. This is a &ldquo;cooperative trust&rdquo; assumption.<span class="marginnote">An attacker who falsifies their geographic prefix degrades the locality benefit but not routing correctness. Mitigations exist&mdash;learned coordinates, geographic proof-of-work, IP&ndash;ASN binding&mdash;but G-DHT trades some defense against location-spoofing for a large speedup.</span> Mitigations exist, but for now G-DHT trades some defense against location-spoofing for a large speedup.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- IV. NH-1 -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">IV</span><span class="title">A Network That Learns Like a Brain</span></h2>
+
+    <p><span class="newthought">The second idea</span>, <strong>NH-1</strong>, is the heart of the paper. It asks a different question:</p>
+
+    <blockquote>What if, instead of <em>engineering</em> shortcuts into the network, the network <em>learned</em> its own shortcuts based on which paths actually work?</blockquote>
+
+    <p>To explain how, we reach for a strange-but-perfect analogy: the human brain.</p>
+
+    <h3>The Engineering Problem That Brains Already Solved</h3>
+
+    <p>A single neuron in your brain connects to roughly 10,000 others through structures called <strong>synapses</strong>. There are about 86&nbsp;billion neurons total. Any given neuron <em>could</em> connect to almost any other, but maintaining synapses is energetically expensive&mdash;so neurons are stuck with a hard cap, surrounded by far more potential partners than they can afford to keep.</p>
+
+    <p>How does the brain decide <em>which</em> connections to keep?</p>
+
+    <p>This is the same problem facing a peer in a peer-to-peer network. A web browser can only maintain about 50&ndash;100 simultaneous WebRTC connections.<span class="marginnote">WebRTC is the technology that lets browsers talk directly to each other, without a server in the middle. Safari caps at about 95 simultaneous connections; Firefox at about 190.</span> The network might have hundreds of thousands of nodes. Which 50 do you keep?</p>
+
+    <p>The brain solved this problem hundreds of millions of years ago. The solution is called <strong>long-term potentiation</strong>, or LTP.</p>
+
+    <h3>The Brain's Trick</h3>
+
+    <p>In 1973, two scientists&mdash;Bliss and L&oslash;mo&mdash;ran a now-classic experiment. They zapped a particular pathway in a rabbit's brain with high-frequency electrical pulses. Afterward, that pathway responded <em>more strongly</em> to subsequent signals&mdash;not for seconds, but for <em>weeks</em>. The connections had physically gotten stronger.</p>
+
+    <p>Decades of follow-up research filled in the details:</p>
+
+    <ol>
+      <li><strong>The coincidence detector.</strong> Synapses have a special kind of receptor (called NMDA) that only activates when <em>both</em> sides of the connection fire at roughly the same time. It's not &ldquo;I fired&rdquo; or &ldquo;you fired&rdquo;&mdash;it's specifically &ldquo;we fired together.&rdquo;</li>
+      <li><strong>The strengthening signal.</strong> When that coincidence happens, calcium rushes in and triggers the synapse to insert <em>more</em> of a different kind of receptor (AMPA), making the connection physically more sensitive.</li>
+      <li><strong>Consolidation.</strong> Over the next half hour or so, new proteins get made and new physical structures grow. The change becomes permanent.</li>
+      <li><strong>Decay.</strong> Connections that <em>don't</em> get used regularly weaken over time, in a process called long-term depression (LTD).</li>
+      <li><strong>A protective tag.</strong> Recently strengthened synapses get a temporary &ldquo;tag&rdquo; that protects them from being overwritten by competing changes&mdash;but only for a brief window.<span class="marginnote">Without this tag, learning would be self-destructive: the synapses you just learned were useful would be the <em>first</em> ones overwritten by the next signal.</span></li>
+    </ol>
+
+    <p>Donald Hebb summarized this in 1949&mdash;before the molecular details were known&mdash;in the rule that's now bedrock in neuroscience and AI:</p>
+
+    <blockquote>Neurons that fire together, wire together.</blockquote>
+
+    <p>Every artificial neural network you've ever heard of&mdash;every part of ChatGPT, every image recognition system, every recommendation algorithm&mdash;ultimately runs on a digital descendant of this rule.</p>
+
+    <h3>Translating Neurons into Network Routing</h3>
+
+    <p>The claim is that the brain's mechanism translates <em>literally</em> to peer-to-peer routing&mdash;no metaphor needed:</p>
+
+    <table>
+      <thead>
+        <tr><th>In the brain&hellip;</th><th>In NH-1&hellip;</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A synapse (neural connection)</td><td>A connection to a peer</td></tr>
+        <tr><td>Synaptic strength (weight 0 to 1)</td><td>A learned weight on each connection</td></tr>
+        <tr><td>LTP: co-firing strengthens</td><td>A successful lookup increments the weights along its path</td></tr>
+        <tr><td>LTD: disuse weakens</td><td>Every connection slowly decays over time</td></tr>
+        <tr><td>Synaptic tagging (protection)</td><td>Recently used connections are protected briefly</td></tr>
+        <tr><td>Pruning of unused connections</td><td>Lowest-scoring connection is evicted when a new one wants in</td></tr>
+      </tbody>
+    </table>
+
+    <p>That is what NH-1 <em>is</em>: a routing system where every connection has a weight that goes up when used and decays when not. The network's &ldquo;memory&rdquo; is its routing table, and the routing table evolves into whatever shape best serves the actual traffic.</p>
+
+    <h3>The Vitality Function</h3>
+
+    <p>The core of NH-1 is a single equation that scores every connection:</p>
+
+    <blockquote style="text-align:center; font-size:1.3rem; border-left:none; padding:0.5rem 0; margin:1rem 0;">
+      vitality &nbsp;=&nbsp; weight &nbsp;&times;&nbsp; recency
+    </blockquote>
+
+    <p>The <strong>weight</strong> is a number between 0 and 1, updated like this:</p>
+    <ul>
+      <li>Every successful lookup that uses the connection raises its weight by 0.05 (capped at 1).</li>
+      <li>Every &ldquo;tick&rdquo; of the clock multiplies every weight by 0.995&mdash;a slow decay.</li>
+    </ul>
+
+    <p>The <strong>recency</strong> is 1.0 for the first 20 ticks after a connection is used&mdash;the protective tag from synaptic tagging&mdash;then drops off exponentially.</p>
+
+    <figure>
+      <svg class="tufte-svg" viewBox="0 0 600 240" xmlns="http://www.w3.org/2000/svg" aria-labelledby="fig2title">
+        <title id="fig2title">The recency function</title>
+
+        <!-- chart area: x 60-540, y 30-200 (200 = bottom = 0; 30 = top = 1) -->
+        <!-- y axis -->
+        <line class="axis" x1="60" y1="30" x2="60" y2="200"/>
+        <!-- x axis -->
+        <line class="axis" x1="60" y1="200" x2="540" y2="200"/>
+
+        <!-- y axis labels -->
+        <text class="label small muted" x="55" y="34" text-anchor="end">1.0</text>
+        <text class="label small muted" x="55" y="204" text-anchor="end">0</text>
+
+        <!-- x axis labels: 0, 50, 100, 150, 200 ticks -->
+        <!-- 480 px wide / 200 ticks -->
+        <text class="label small muted" x="60" y="218" text-anchor="middle">0</text>
+        <text class="label small muted" x="180" y="218" text-anchor="middle">50</text>
+        <text class="label small muted" x="300" y="218" text-anchor="middle">100</text>
+        <text class="label small muted" x="420" y="218" text-anchor="middle">150</text>
+        <text class="label small muted" x="540" y="218" text-anchor="middle">200</text>
+        <text class="label small muted italic" x="300" y="234" text-anchor="middle">ticks since last reinforcement</text>
+
+        <text class="label small muted italic" x="20" y="115" text-anchor="middle" transform="rotate(-90, 20, 115)">recency</text>
+
+        <!-- Vertical dashed line at x=20 (px = 60+20*2.4 = 108) -->
+        <line class="reference" x1="108" y1="30" x2="108" y2="200"/>
+
+        <!-- Function curve: flat at recency=1 from x=0..20, then exp(-(t-20)/50) -->
+        <!-- Mapping: x_px = 60 + x_data*2.4; y_px = 200 - 170*y_data -->
+        <polyline class="data-line accent" points="60,30 108,30 132,60.8 156,86.1 180,106.7 204,123.7 228,137.4 252,148.8 276,158 300,165.7 348,177 396,184.5 444,189.6 492,193 540,195.4"/>
+
+        <!-- Annotations -->
+        <text class="label smallcaps small" x="84" y="22" text-anchor="middle">tagged</text>
+        <text class="label small italic" x="270" y="98" text-anchor="start">exponential decay</text>
+        <text class="label smaller muted" x="270" y="112" text-anchor="start">half-life &asymp; 35 ticks</text>
+
+        <!-- transition annotation below x-axis -->
+        <text class="label smaller muted italic" x="108" y="232" text-anchor="middle">t = 20</text>
+
+        <!-- ticks on y-axis at 0.5 -->
+        <line class="axis" x1="58" y1="115" x2="62" y2="115" stroke-width="0.6"/>
+        <text class="label smaller muted" x="55" y="118" text-anchor="end">0.5</text>
+
+      </svg>
+      <figcaption>
+        <span class="figlabel">Figure 2.</span>
+        The recency multiplier in NH-1's vitality function. For 20 ticks after a connection is used, recency stays locked at 1.0&mdash;the synaptic tag, protecting freshly learned shortcuts from being immediately overwritten. After that, it decays exponentially with a half-life of about 35 ticks. A connection unused for ~150 ticks contributes essentially nothing to its vitality, regardless of accumulated weight.
+      </figcaption>
+    </figure>
+
+    <p>When a new connection wants in but the routing table is full, the connection with the lowest vitality gets evicted. Frequently used connections accumulate weight and stay. Unused ones decay and get evicted. Recently strengthened ones are temporarily protected.</p>
+
+    <p>That's it. That's the core.</p>
+
+    <h3>Why the Consolidation Matters</h3>
+
+    <p>The previous version of this system (called NX-17) had <strong>18 different rules and 44 parameters</strong> controlling things like &ldquo;how full should each part of the routing table be?&rdquo; and &ldquo;when should we evict a peer?&rdquo; and &ldquo;how much should we prefer nearby peers?&rdquo;</p>
+
+    <p>NH-1 replaces all of that with the single vitality function plus <strong>12 rules and 12 parameters</strong>. Letting the connections themselves learn through reinforcement collapses a tangle of rules into one principle.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- V. THE FIVE OPERATIONS -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">V</span><span class="title">The Five Operations</span></h2>
+
+    <p><span class="newthought">Every behavior</span> in NH-1 falls into one of five categories&mdash;and the categories mirror how <em>any</em> adaptive system works:</p>
+
+    <p><strong>1. Navigate</strong> &mdash; pick the next hop for a lookup. NH-1 scores each candidate by combining XOR distance progress, learned weight, and observed latency. The latency factor halves the score every 100&nbsp;ms&mdash;so a peer that's mathematically a <em>bit</em> further but physically a <em>lot</em> closer wins.</p>
+
+    <p><strong>2. Learn</strong> &mdash; strengthen what works. Four mechanisms run on every successful lookup:</p>
+
+    <ul>
+      <li><strong>LTP</strong>: every connection on the successful path gets stronger.</li>
+      <li><strong>Hop caching</strong>: every intermediate node along the path remembers the <em>destination</em>, not just the next hop. Next time, the path is shorter.</li>
+      <li><strong>Triadic closure</strong>: if you keep seeing peer A relay messages to peer C through you, you introduce them directly. The triangle &ldquo;A&ndash;you&ndash;C&rdquo; becomes a direct edge &ldquo;A&ndash;C.&rdquo;<span class="marginnote">Named after social network theory: dense triangles emerge in any network shaped by interaction.</span></li>
+      <li><strong>Incoming promotion</strong>: peers who keep reaching out to you become candidates for <em>your</em> routing table. Passive learning&mdash;the network notices who's interested in you, not just who you're interested in.</li>
+    </ul>
+
+    <p><strong>3. Forget</strong> &mdash; decay everything that isn't reinforced; evict by vitality.</p>
+
+    <p><strong>4. Explore</strong> &mdash; inject occasional randomness. A purely greedy router would lock onto the first decent shortcut and never find better ones. NH-1 has two exploration tricks: a &ldquo;temperature&rdquo; that decays over time but spikes when something breaks (heat up when surprised, cool down when stable), and an &ldquo;epsilon-greedy&rdquo; rule that picks a random first hop 5% of the time, just to keep options alive.</p>
+
+    <p><strong>5. Structure</strong> &mdash; bootstrap and maintain the basic shape of the network when new nodes join.</p>
+
+    <p>The template is universal: act, learn from feedback, forget the obsolete, occasionally try something new, maintain basic structure. This is how any good adaptive system has to work.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- VI. AXONAL PUB/SUB -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">VI</span><span class="title">Axonal Pub/Sub</span></h2>
+
+    <p><span class="newthought">A real</span> peer-to-peer network needs more than &ldquo;find the node holding key&nbsp;X.&rdquo; It also needs <strong>broadcast</strong>: a publisher should be able to send a message to all subscribers of a topic, without knowing who they are.</p>
+
+    <p>This is publish/subscribe, or &ldquo;pub/sub.&rdquo; Think of how YouTube notifies subscribers of a new video&mdash;except without YouTube being in the middle.</p>
+
+    <p>In neuroscience, the <em>output</em> of a neuron&mdash;the long branching cable that delivers signals to many downstream targets&mdash;is called an <strong>axon</strong>. NH-1 builds axonal delivery trees:</p>
+
+    <ul>
+      <li>A topic has an ID, derived from the publisher's location and the topic name.</li>
+      <li>Subscribers send a message routed through the DHT toward that topic ID.</li>
+      <li>The first node already participating in the topic's tree intercepts the subscriber and adds them as a child.</li>
+      <li>When a publisher publishes, the message flows from the root down through all the branches.</li>
+    </ul>
+
+    <p>That part is standard. The useful property is that <strong>the tree heals itself with no special machinery</strong>. Every member of the tree periodically re-issues its subscribe message. If the tree is intact, nothing changes. If a parent died, the re-subscribe naturally lands on whichever live ancestor is now closest. No heartbeats, no failure detection, no parent tracking. The same mechanism that <em>builds</em> the tree <em>repairs</em> it.</p>
+
+    <p>Result: under 5% churn (5% of nodes joining and leaving constantly), NH-1 still delivers 100% of messages. After three refresh cycles, it recovers from any disruption.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- VII. THE THEORETICAL FLOOR -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">VII</span><span class="title">Hitting the Theoretical Floor</span></h2>
+
+    <p><span class="newthought">In 2004</span>, Frank Dabek and colleagues proved a beautiful, depressing result: <strong>no recursive DHT can be faster than 3&delta;</strong>, where &delta; is the median one-way latency between random pairs of nodes on the Internet.<span class="sidenote">Dabek et al., &ldquo;Designing a DHT for low latency and high throughput,&rdquo; <em>Proc. NSDI 2004</em>.</span></p>
+
+    <p>The proof is geometric. Each hop in a DHT covers half the remaining distance. So the total time is &delta;&nbsp;+&nbsp;&delta;/2&nbsp;+&nbsp;&delta;/4&nbsp;+&nbsp;&delta;/8&nbsp;+&nbsp;&hellip; which converges to <strong>2&delta;</strong>. Add one more hop for final delivery and you get 3&delta;. No matter how clever your routing, no matter how big your network, you can't beat this.</p>
+
+    <p>For 20 years, no published DHT had been measured at this floor. The best implementations got to maybe 2&times; the floor.</p>
+
+    <figure>
+      <svg class="tufte-svg" viewBox="0 0 700 400" xmlns="http://www.w3.org/2000/svg" aria-labelledby="fig3title">
+        <title id="fig3title">Lookup latency vs. network size</title>
+
+        <!-- chart area: x 60..560, y 40..340 -->
+        <!-- y range: 0..600 ms; y_px = 340 - (val/600)*300 -->
+        <!-- x positions: N=5K at x=130, N=25K at x=340, N=50K at x=510 -->
+
+        <!-- Axes -->
+        <line class="axis" x1="60" y1="40" x2="60" y2="340"/>
+        <line class="axis" x1="60" y1="340" x2="580" y2="340"/>
+
+        <!-- y-axis labels -->
+        <text class="label small muted" x="55" y="343" text-anchor="end">0</text>
+        <text class="label small muted" x="55" y="243" text-anchor="end">200</text>
+        <text class="label small muted" x="55" y="143" text-anchor="end">400</text>
+        <text class="label small muted" x="55" y="43" text-anchor="end">600</text>
+
+        <!-- y axis ticks -->
+        <line class="axis" x1="58" y1="240" x2="62" y2="240" stroke-width="0.6"/>
+        <line class="axis" x1="58" y1="140" x2="62" y2="140" stroke-width="0.6"/>
+        <line class="axis" x1="58" y1="40" x2="62" y2="40" stroke-width="0.6"/>
+
+        <text class="label smaller muted italic" x="20" y="190" text-anchor="middle" transform="rotate(-90, 20, 190)">global lookup latency (ms)</text>
+
+        <!-- x-axis labels -->
+        <text class="label small muted" x="130" y="358" text-anchor="middle">5,000</text>
+        <text class="label small muted" x="340" y="358" text-anchor="middle">25,000</text>
+        <text class="label small muted" x="510" y="358" text-anchor="middle">50,000</text>
+        <text class="label small muted italic" x="320" y="378" text-anchor="middle">network size (N)</text>
+
+        <!-- x ticks -->
+        <line class="axis" x1="130" y1="338" x2="130" y2="342" stroke-width="0.6"/>
+        <line class="axis" x1="340" y1="338" x2="340" y2="342" stroke-width="0.6"/>
+        <line class="axis" x1="510" y1="338" x2="510" y2="342" stroke-width="0.6"/>
+
+        <!-- Data values:
+          5K  25K  50K
+          K-DHT:   410 503 548
+          G-DHT:   268 287 291
+          NX-17:   215 241 243
+          NH-1:    240 254 264
+          3δ floor: 204 204 207
+          y_px = 340 - (val/600)*300
+          410 -> 340 - 205 = 135
+          503 -> 340 - 251.5 = 88.5
+          548 -> 340 - 274 = 66
+          268 -> 340 - 134 = 206
+          287 -> 340 - 143.5 = 196.5
+          291 -> 340 - 145.5 = 194.5
+          215 -> 340 - 107.5 = 232.5
+          241 -> 340 - 120.5 = 219.5
+          243 -> 340 - 121.5 = 218.5
+          240 -> 340 - 120 = 220
+          254 -> 340 - 127 = 213
+          264 -> 340 - 132 = 208
+          204 -> 340 - 102 = 238
+          207 -> 340 - 103.5 = 236.5
+        -->
+
+        <!-- 3δ floor -->
+        <polyline class="reference" points="130,238 340,238 510,236.5"/>
+        <text class="label smaller muted italic" x="525" y="240" text-anchor="start">3&delta; floor</text>
+
+        <!-- K-DHT line (light gray) -->
+        <polyline class="data-line muted" points="130,135 340,88.5 510,66"/>
+        <circle cx="130" cy="135" r="3" fill="#aaa"/>
+        <circle cx="340" cy="88.5" r="3" fill="#aaa"/>
+        <circle cx="510" cy="66" r="3" fill="#aaa"/>
+        <text class="label smaller muted" x="525" y="69" text-anchor="start">Kademlia (K-DHT)</text>
+        <text class="label smaller muted" x="525" y="82" text-anchor="start">scales the wrong way</text>
+
+        <!-- G-DHT line (medium gray) -->
+        <polyline class="data-line medium" points="130,206 340,196.5 510,194.5"/>
+        <circle cx="130" cy="206" r="3" fill="#888"/>
+        <circle cx="340" cy="196.5" r="3" fill="#888"/>
+        <circle cx="510" cy="194.5" r="3" fill="#888"/>
+        <text class="label smaller" fill="#666" x="525" y="197" text-anchor="start">G-DHT</text>
+
+        <!-- NH-1 line (accent) -->
+        <polyline class="data-line accent" points="130,220 340,213 510,208"/>
+        <circle cx="130" cy="220" r="3.5" fill="#b94e36"/>
+        <circle cx="340" cy="213" r="3.5" fill="#b94e36"/>
+        <circle cx="510" cy="208" r="3.5" fill="#b94e36"/>
+        <text class="label smaller accent" x="525" y="211" text-anchor="start">NH-1</text>
+
+        <!-- NX-17 line (dark) -->
+        <polyline class="data-line dark" points="130,232.5 340,219.5 510,218.5"/>
+        <circle cx="130" cy="232.5" r="3" fill="#555"/>
+        <circle cx="340" cy="219.5" r="3" fill="#555"/>
+        <circle cx="510" cy="218.5" r="3" fill="#555"/>
+        <text class="label smaller" fill="#444" x="525" y="222" text-anchor="start">NX-17</text>
+
+        <!-- annotations -->
+        <text class="label smaller muted italic" x="130" y="125" text-anchor="middle">410</text>
+        <text class="label smaller muted italic" x="510" y="56" text-anchor="middle">548</text>
+
+        <text class="label smaller muted italic" x="130" y="240" text-anchor="middle"></text>
+
+      </svg>
+      <figcaption>
+        <span class="figlabel">Figure 3.</span>
+        Global lookup latency versus network size, plotted against the Dabek 3&delta; analytical floor (gray dashed). Kademlia <em>worsens</em> as the network grows&mdash;more hops, each at full pairwise latency, each contributing fully to the total. NX-17 hugs the floor at 1.18&times;; NH-1 at 1.28&times;. The remaining 18% overhead matches what the geometric series predicts for ~4.5 hops where an ideal protocol takes 3.
+      </figcaption>
+    </figure>
+
+    <p>NH-1's predecessor, NX-17, hits <strong>1.18&times; the floor</strong> at 25,000 nodes. NH-1 hits <strong>1.28&times;</strong>. They sit at the theoretical limit. The remaining 18% overhead is structural&mdash;they take about 4.5 hops where an ideal protocol would take 3, and each &ldquo;extra&rdquo; hop costs about &delta;/2, exactly as the geometric series predicts.</p>
+
+    <p>For comparison, plain Kademlia <em>gets worse</em> as the network grows: 2.01&times; the floor at 5,000 nodes, 2.65&times; at 50,000. It scales the wrong way.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- VIII. THE GEOGRAPHY ABLATION -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">VIII</span><span class="title">Is It the Learning, or the Geography?</span></h2>
+
+    <p><span class="newthought">A skeptic</span> would push back: &ldquo;Sure, but maybe the geographic prefix is doing all the real work. The brain-inspired learning is gravy.&rdquo;</p>
+
+    <p>The paper runs an <strong>ablation study</strong> to answer this.<span class="marginnote">An ablation study removes one feature and re-runs everything to see what that feature actually contributed. It's the cleanest way to attribute a result to a specific mechanism.</span> Strip the geographic prefix entirely&mdash;random IDs again&mdash;and re-run the comparison.</p>
+
+    <p>Result: with <strong>zero geographic information</strong>, NX-17 still routes <strong>26% faster than Kademlia</strong>, and NH-1 routes <strong>8% faster</strong>. The learning is doing real work, not sharpening pre-existing geographic structure.</p>
+
+    <p>This is the kind of clean control experiment that should accompany any claim of this kind.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- IX. SLICE WORLD -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">IX</span><span class="title">Slice World</span></h2>
+
+    <p><span class="newthought">The sharpest</span> demonstration is what the paper calls the <strong>Slice World</strong> test. The network gets cut almost in half&mdash;Eastern hemisphere on one side, Western on the other, connected only through a <em>single node</em> near Hawaii. Every other cross-hemisphere connection is severed.</p>
+
+    <p>Can the protocol still route messages between hemispheres?</p>
+
+    <ul>
+      <li><strong>Plain Kademlia: 0% success.</strong> With no learning, the partition is permanent.</li>
+      <li><strong>G-DHT (geography only, no learning): 4.6% success.</strong> The geographic prefix accidentally points a few peers at the bridge, but nothing builds on the discovery.</li>
+      <li><strong>NX-17 and NH-1: ~94% success.</strong></li>
+    </ul>
+
+    <figure>
+      <svg class="tufte-svg" viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg" aria-labelledby="fig4title">
+        <title id="fig4title">Slice World partition recovery</title>
+
+        <!-- Two panels -->
+        <!-- Panel A: t=0, only bridge edges -->
+        <g transform="translate(0, 30)">
+          <text x="160" y="0" text-anchor="middle" class="smallcaps small muted">t = 0 lookups</text>
+
+          <!-- Left cluster nodes (12) -->
+          <!-- positions in panel coords (0-320 wide, 0-260 tall) -->
+          <g class="cluster-left" stroke="#666" stroke-width="0.8" fill="none">
+            <!-- intra-cluster edges (left) -->
+            <line x1="40" y1="60"  x2="75" y2="50"/>
+            <line x1="75" y1="50"  x2="90" y2="80"/>
+            <line x1="40" y1="60"  x2="55" y2="100"/>
+            <line x1="55" y1="100" x2="80" y2="120"/>
+            <line x1="80" y1="120" x2="100" y2="100"/>
+            <line x1="100" y1="100" x2="90" y2="80"/>
+            <line x1="55" y1="100" x2="45" y2="140"/>
+            <line x1="45" y1="140" x2="80" y2="160"/>
+            <line x1="80" y1="160" x2="105" y2="140"/>
+            <line x1="105" y1="140" x2="100" y2="100"/>
+            <line x1="80" y1="160" x2="60" y2="200"/>
+            <line x1="60" y1="200" x2="95" y2="210"/>
+            <line x1="95" y1="210" x2="105" y2="180"/>
+            <line x1="105" y1="180" x2="105" y2="140"/>
+          </g>
+          <!-- Bridge connection: left to bridge -->
+          <line x1="80" y1="120" x2="160" y2="135" stroke="#b94e36" stroke-width="1.2" fill="none"/>
+          <line x1="105" y1="140" x2="160" y2="135" stroke="#b94e36" stroke-width="1.2" fill="none"/>
+
+          <!-- Right cluster nodes (12) -->
+          <g class="cluster-right" stroke="#666" stroke-width="0.8" fill="none">
+            <line x1="220" y1="50" x2="245" y2="65"/>
+            <line x1="245" y1="65" x2="270" y2="55"/>
+            <line x1="270" y1="55" x2="290" y2="85"/>
+            <line x1="290" y1="85" x2="265" y2="100"/>
+            <line x1="265" y1="100" x2="245" y2="65"/>
+            <line x1="265" y1="100" x2="240" y2="130"/>
+            <line x1="240" y1="130" x2="265" y2="155"/>
+            <line x1="265" y1="155" x2="295" y2="145"/>
+            <line x1="295" y1="145" x2="290" y2="85"/>
+            <line x1="265" y1="155" x2="250" y2="195"/>
+            <line x1="250" y1="195" x2="285" y2="210"/>
+            <line x1="285" y1="210" x2="300" y2="180"/>
+            <line x1="300" y1="180" x2="295" y2="145"/>
+            <line x1="220" y1="180" x2="250" y2="195"/>
+          </g>
+          <!-- Bridge connection: right to bridge -->
+          <line x1="240" y1="130" x2="160" y2="135" stroke="#b94e36" stroke-width="1.2" fill="none"/>
+          <line x1="265" y1="100" x2="160" y2="135" stroke="#b94e36" stroke-width="1.2" fill="none"/>
+
+          <!-- Bridge node -->
+          <circle cx="160" cy="135" r="6" fill="#b94e36"/>
+          <text class="label smaller accent italic" x="160" y="118" text-anchor="middle">bridge</text>
+
+          <!-- Left cluster dots -->
+          <g fill="#2a2a2a">
+            <circle cx="40"  cy="60"  r="3"/>
+            <circle cx="75"  cy="50"  r="3"/>
+            <circle cx="90"  cy="80"  r="3"/>
+            <circle cx="55"  cy="100" r="3"/>
+            <circle cx="80"  cy="120" r="3"/>
+            <circle cx="100" cy="100" r="3"/>
+            <circle cx="45"  cy="140" r="3"/>
+            <circle cx="80"  cy="160" r="3"/>
+            <circle cx="105" cy="140" r="3"/>
+            <circle cx="60"  cy="200" r="3"/>
+            <circle cx="95"  cy="210" r="3"/>
+            <circle cx="105" cy="180" r="3"/>
+          </g>
+          <!-- Right cluster dots -->
+          <g fill="#2a2a2a">
+            <circle cx="220" cy="50"  r="3"/>
+            <circle cx="245" cy="65"  r="3"/>
+            <circle cx="270" cy="55"  r="3"/>
+            <circle cx="290" cy="85"  r="3"/>
+            <circle cx="265" cy="100" r="3"/>
+            <circle cx="240" cy="130" r="3"/>
+            <circle cx="265" cy="155" r="3"/>
+            <circle cx="295" cy="145" r="3"/>
+            <circle cx="220" cy="180" r="3"/>
+            <circle cx="250" cy="195" r="3"/>
+            <circle cx="285" cy="210" r="3"/>
+            <circle cx="300" cy="180" r="3"/>
+          </g>
+
+          <!-- Hemisphere labels -->
+          <text class="label smaller muted italic" x="70"  y="248" text-anchor="middle">Western hemisphere</text>
+          <text class="label smaller muted italic" x="260" y="248" text-anchor="middle">Eastern hemisphere</text>
+        </g>
+
+        <!-- Panel B: t=500, partition dissolved -->
+        <g transform="translate(360, 30)">
+          <text x="160" y="0" text-anchor="middle" class="smallcaps small muted">t = 500 lookups</text>
+
+          <!-- All the within-cluster edges + new cross-cluster edges -->
+          <g stroke="#666" stroke-width="0.8" fill="none">
+            <!-- left cluster -->
+            <line x1="40" y1="60"  x2="75" y2="50"/>
+            <line x1="75" y1="50"  x2="90" y2="80"/>
+            <line x1="40" y1="60"  x2="55" y2="100"/>
+            <line x1="55" y1="100" x2="80" y2="120"/>
+            <line x1="80" y1="120" x2="100" y2="100"/>
+            <line x1="100" y1="100" x2="90" y2="80"/>
+            <line x1="55" y1="100" x2="45" y2="140"/>
+            <line x1="45" y1="140" x2="80" y2="160"/>
+            <line x1="80" y1="160" x2="105" y2="140"/>
+            <line x1="105" y1="140" x2="100" y2="100"/>
+            <line x1="80" y1="160" x2="60" y2="200"/>
+            <line x1="60" y1="200" x2="95" y2="210"/>
+            <line x1="95" y1="210" x2="105" y2="180"/>
+            <line x1="105" y1="180" x2="105" y2="140"/>
+            <!-- right cluster -->
+            <line x1="220" y1="50" x2="245" y2="65"/>
+            <line x1="245" y1="65" x2="270" y2="55"/>
+            <line x1="270" y1="55" x2="290" y2="85"/>
+            <line x1="290" y1="85" x2="265" y2="100"/>
+            <line x1="265" y1="100" x2="245" y2="65"/>
+            <line x1="265" y1="100" x2="240" y2="130"/>
+            <line x1="240" y1="130" x2="265" y2="155"/>
+            <line x1="265" y1="155" x2="295" y2="145"/>
+            <line x1="295" y1="145" x2="290" y2="85"/>
+            <line x1="265" y1="155" x2="250" y2="195"/>
+            <line x1="250" y1="195" x2="285" y2="210"/>
+            <line x1="285" y1="210" x2="300" y2="180"/>
+            <line x1="300" y1="180" x2="295" y2="145"/>
+            <line x1="220" y1="180" x2="250" y2="195"/>
+          </g>
+
+          <!-- Cross-cluster edges (many) - in muted accent to show they're newly grown -->
+          <g stroke="#b94e36" stroke-width="0.6" fill="none" opacity="0.55">
+            <line x1="75"  y1="50"  x2="220" y2="50"/>
+            <line x1="90"  y1="80"  x2="245" y2="65"/>
+            <line x1="100" y1="100" x2="265" y2="100"/>
+            <line x1="80"  y1="120" x2="240" y2="130"/>
+            <line x1="105" y1="140" x2="265" y2="155"/>
+            <line x1="80"  y1="160" x2="250" y2="195"/>
+            <line x1="95"  y1="210" x2="285" y2="210"/>
+            <line x1="105" y1="180" x2="295" y2="145"/>
+            <line x1="40"  y1="60"  x2="270" y2="55"/>
+            <line x1="55"  y1="100" x2="290" y2="85"/>
+            <line x1="45"  y1="140" x2="220" y2="180"/>
+            <line x1="60"  y1="200" x2="300" y2="180"/>
+            <line x1="100" y1="100" x2="240" y2="130"/>
+            <line x1="80"  y1="160" x2="265" y2="155"/>
+            <line x1="55"  y1="100" x2="245" y2="65"/>
+            <line x1="105" y1="140" x2="295" y2="145"/>
+          </g>
+
+          <!-- Bridge dot still there but no longer special -->
+          <circle cx="160" cy="135" r="4" fill="#2a2a2a"/>
+
+          <!-- All the dots -->
+          <g fill="#2a2a2a">
+            <circle cx="40"  cy="60"  r="3"/>
+            <circle cx="75"  cy="50"  r="3"/>
+            <circle cx="90"  cy="80"  r="3"/>
+            <circle cx="55"  cy="100" r="3"/>
+            <circle cx="80"  cy="120" r="3"/>
+            <circle cx="100" cy="100" r="3"/>
+            <circle cx="45"  cy="140" r="3"/>
+            <circle cx="80"  cy="160" r="3"/>
+            <circle cx="105" cy="140" r="3"/>
+            <circle cx="60"  cy="200" r="3"/>
+            <circle cx="95"  cy="210" r="3"/>
+            <circle cx="105" cy="180" r="3"/>
+            <circle cx="220" cy="50"  r="3"/>
+            <circle cx="245" cy="65"  r="3"/>
+            <circle cx="270" cy="55"  r="3"/>
+            <circle cx="290" cy="85"  r="3"/>
+            <circle cx="265" cy="100" r="3"/>
+            <circle cx="240" cy="130" r="3"/>
+            <circle cx="265" cy="155" r="3"/>
+            <circle cx="295" cy="145" r="3"/>
+            <circle cx="220" cy="180" r="3"/>
+            <circle cx="250" cy="195" r="3"/>
+            <circle cx="285" cy="210" r="3"/>
+            <circle cx="300" cy="180" r="3"/>
+          </g>
+
+          <text class="label smaller muted italic" x="160" y="248" text-anchor="middle">partition dissolved</text>
+        </g>
+      </svg>
+      <figcaption>
+        <span class="figlabel">Figure 4.</span>
+        At t&nbsp;=&nbsp;0 (left), the partition has a single bridge node connecting two hemispheres. By t&nbsp;=&nbsp;500 lookups (right), hop caching has installed cross-hemisphere shortcuts in many intermediate nodes; triadic closure has converted observed transit pairs into direct edges. The bridge is no longer special. The protocol does not keep finding the bridge&mdash;it uses the bridge to rebuild the bridges that were cut.
+      </figcaption>
+    </figure>
+
+    <p>The bridge becomes a <strong>seed crystal</strong>. After just 10 lookups through the partition, hop caching has installed cross-hemisphere edges in many intermediate nodes. Triadic closure creates direct connections between peers that keep meeting through the bridge. By 500 lookups, hundreds of cross-hemisphere connections exist. The partition has effectively dissolved.</p>
+
+    <p>The protocol doesn't keep finding the bridge&mdash;it <em>uses</em> the bridge to rebuild the bridges that were cut. Like a brain forming new pathways around damaged tissue.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- X. THE HONEST FOOTNOTES -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">X</span><span class="title">What the Simulator Doesn't Model</span></h2>
+
+    <p><span class="newthought">The paper</span> is explicit about what <em>isn't</em> measured.</p>
+
+    <p>The simulator runs about 25,000 lines of JavaScript code modeling the network, but it abstracts away several real-world frictions:</p>
+
+    <ul>
+      <li><strong>Connection setup time.</strong> Real WebRTC connections take 1.5&ndash;3 seconds to negotiate. The simulator treats them as instant, so real-world recovery from partitions will be slower than the simulator suggests.</li>
+      <li><strong>Timeout windows.</strong> Real RPCs to dead nodes stall for seconds before failing. The simulator detects death instantly.</li>
+      <li><strong>Bandwidth saturation.</strong> A popular peer will get overloaded. The simulator's latency model doesn't capture this. Real systems risk &ldquo;success disasters&rdquo;&mdash;everyone routes through the fastest peer until it collapses, then abandons it, then floods back when it recovers, in oscillations that are hard to dampen.</li>
+      <li><strong>Latency jitter.</strong> Real round-trip times vary by &plusmn;30% from queuing and congestion. The simulator's latencies are clean and monotone.</li>
+    </ul>
+
+    <p>These get called out in a &ldquo;red team&rdquo; appendix.<span class="sidenote">The companion red-team analysis ranks thirteen deployment-relevant gaps by severity and time-to-fix.</span> The paper's results show <strong>the brain working perfectly</strong>; the <em>body</em>&mdash;actually deploying it on real internet conditions&mdash;still needs work.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- XI. PLASTICITY OF PLASTICITY -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">XI</span><span class="title">Plasticity of Plasticity</span></h2>
+
+    <p><span class="newthought">The most interesting</span> future direction is <strong>metaplasticity</strong>&mdash;plasticity of plasticity. In real brains, the rules governing learning <em>themselves</em> change based on the brain's activity level. A neuron that's been very active becomes harder to strengthen further (otherwise everything saturates). A neuron that's been quiet becomes easier. The learning rules adapt.</p>
+
+    <p>NH-1's parameters&mdash;decay rate, protection window, exploration rate&mdash;are currently hand-picked constants. A metaplastic version would let the network self-tune them based on local conditions. A peer in a stable region would adapt slowly. A peer in a high-churn region would adapt aggressively. The user would set one knob&mdash;&ldquo;I want my lookup failure rate below 1%&rdquo;&mdash;and the network would tune itself to hit it.</p>
+
+    <p>That's the next layer of brain-inspired self-organization, and the natural endpoint of the path the paper lays out.</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- XII. WHY THIS MATTERS -->
+  <!-- ============================================================ -->
+  <section>
+    <h2><span class="num">XII</span><span class="title">Why This Matters</span></h2>
+
+    <p><span class="newthought">Step back</span> from the technical details. The big idea:</p>
+
+    <p><strong>A peer-to-peer network and a brain face the same engineering problem</strong>&mdash;limited connection capacity, vastly more candidates than slots, and the need to figure out which connections are useful.</p>
+
+    <p><strong>The brain's hundreds-of-millions-of-years-old solution maps directly onto network routing.</strong> Strengthen what works. Decay what doesn't. Protect recent learning briefly so it isn't immediately overwritten. Occasionally explore. The result is a network whose structure is shaped by the traffic it carries, rather than by rules an engineer guessed at.</p>
+
+    <p>This isn't just a faster DHT. It's a demonstration that adaptive systems with the right learning rules find their own structure&mdash;that decades of brain research can collapse a 44-parameter system into a 12-parameter one, and that you can hit a theoretical limit that's stood for 20 years by importing the right idea from a different field.</p>
+
+    <p>Code, data, simulator, and the red-team analysis criticizing it are open source.</p>
+  </section>
+
+</article>
+
+</body>
+</html>

@@ -394,6 +394,13 @@ input[type="checkbox"] { accent-color: var(--glow); cursor: pointer; }
   max-width: min(98vw, 1500px);
   pointer-events: auto;   /* allow horizontal scroll on the table */
 }
+/* Wider overlay for the training panel — needed since v0.70.00 added a
+   second chart (traffic distribution) alongside the existing
+   hops/time/success line chart. Two charts side-by-side in 560px is
+   too cramped to read either one. */
+#resultsOverlay.train-wide {
+  max-width: min(96vw, 1100px);
+}
 
 .stat-row {
   display: flex; gap: 10px; margin-bottom: 5px;

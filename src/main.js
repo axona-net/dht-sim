@@ -118,13 +118,20 @@ _themeQuery.addEventListener('change', e => {
   applyTheme(e.matches);
 });
 
-// Expose for browser console / Claude debugging
-window.__sim = {
-  get globe()  { return globe;  },
-  get dht()    { return dht;    },
-  get sweep()  { return sweep;  },
-};
 const controls = new Controls();
+
+// Expose for browser console / Claude debugging.
+// `controls` is published so BenchmarkSweep can read the DOM-derived
+// structured rule objects (getNX1WRules) when deep-merging per-run
+// ablation overrides — without that, partial overrides drop every
+// `enabled: true` flag and silently disable rules we didn't intend to
+// touch (the v0.70.03 bug that invalidated NX-17 ablation runs).
+window.__sim = {
+  get globe()    { return globe;    },
+  get dht()      { return dht;      },
+  get sweep()    { return sweep;    },
+  get controls() { return controls; },
+};
 const results  = new Results('resultsOverlay');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -976,6 +983,12 @@ async function onTrainNetwork() {
   }
 
   // ── Session 0: baseline measurement (pre-training state) ──────────────
+  // v0.70.00 — reset traffic counters before the baseline so the snapshot
+  // taken after this session reflects exactly the baseline workload (any
+  // bootstrap / build-routing-table traffic that ran before training is
+  // discarded).
+  engine.snapshotTrafficLoad(dht, { topK: 0, reset: true });
+
   controls.setStatus('Running baseline measurement (session 0)…', 'info');
   const baseResult = await engine.runLookupTest(dht, {
     numMessages:     params.msgCount,
@@ -991,6 +1004,10 @@ async function onTrainNetwork() {
     const baseAvgSyn = baseNodes.length > 0 && typeof baseNodes[0].synaptome !== 'undefined'
       ? baseNodes.reduce((s, n) => s + n.synaptome.size, 0) / baseNodes.length
       : null;
+
+    // v0.70.00 — capture baseline-cycle traffic distribution
+    const baseTraffic = engine.snapshotTrafficLoad(dht, { topK: 10 });
+
     trainingHistory.push({
       session: 0,
       epoch:       0,
@@ -998,15 +1015,44 @@ async function onTrainNetwork() {
       successRate: baseResult.successRate,
       hops:        baseResult.hops,
       time:        baseResult.time,
+      traffic:     baseTraffic,
       isBaseline:  true,
     });
     results.showTrainingResults(trainingHistory);
     await yieldUI();
   }
 
+  // v0.70.02 — sweep-mode session cap. When the sweep harness drives
+  // training (run.mode === 'training', run.maxSessions = N), it sets
+  // window.__sim._trainingMaxSessions before clicking Train. The loop
+  // exits cleanly after N completed sessions (excluding baseline) so
+  // the harness can advance to the next run without user intervention.
+  const maxSessions = (typeof window !== 'undefined'
+    && window.__sim
+    && Number.isFinite(window.__sim._trainingMaxSessions))
+    ? window.__sim._trainingMaxSessions
+    : Infinity;
+
   while (trainingActive) {
     const session = trainingHistory.length; // 1-based after baseline
     controls.setStatus(`Training session ${session}…`, 'info');
+
+    // v0.70.04 — sweep-driven per-cycle churn. When window.__sim._trainingChurnPct
+    // is set, replace that % of live nodes (kill + bootstrap-join + heal) before
+    // each training cycle's lookup test. Skipped on session 1 so the baseline
+    // is the pre-churn steady state. Lets the harness drive sustained-churn
+    // load-distribution tests through the same training infrastructure.
+    const churnPct = (typeof window !== 'undefined'
+      && window.__sim
+      && Number.isFinite(window.__sim._trainingChurnPct))
+      ? window.__sim._trainingChurnPct : 0;
+    if (churnPct > 0 && session > 1) {
+      controls.setStatus(`Training session ${session}: applying ${churnPct}% churn…`, 'info');
+      await engine.applyChurnRound(dht, churnPct);
+      // Reset traffic counters so the bootstrap/heal traffic from churn
+      // isn't attributed to this cycle's routing.
+      engine.snapshotTrafficLoad(dht, { topK: 0, reset: true });
+    }
 
     const result = await engine.runLookupTest(dht, {
       numMessages:     params.msgCount,
@@ -1039,6 +1085,15 @@ async function onTrainNetwork() {
       avgSynapses = nodes.reduce((s, n) => s + n.synaptome.size, 0) / nodes.length;
     }
 
+    // v0.70.00 — per-cycle traffic-load snapshot (and counter reset).
+    // This is the raw delta of messages every node sent + received in
+    // the just-completed training session. Used to test the hypothesis
+    // that the system is concentrating load on a small minority of
+    // nodes (success-disaster / hot-axon-root / over-promoted highway).
+    // Captured before we yield, so the snapshot reflects exactly the
+    // session we just measured.
+    const traffic = engine.snapshotTrafficLoad(dht, { topK: 10 });
+
     trainingHistory.push({
       session,
       epoch:       trainingEpoch,
@@ -1046,6 +1101,7 @@ async function onTrainNetwork() {
       successRate: result.successRate,
       hops:        result.hops,
       time:        result.time,
+      traffic,                       // { summary, topN, distribution }
     });
 
     results.updateTrainingProgress(trainingHistory);
@@ -1058,6 +1114,14 @@ async function onTrainNetwork() {
     );
 
     await yieldUI();
+
+    // v0.70.02 — sweep-mode auto-stop. Count non-baseline completed
+    // sessions and break out cleanly once we hit the requested cap.
+    const completed = trainingHistory.filter(s => !s.isBaseline).length;
+    if (completed >= maxSessions) {
+      trainingActive = false;
+      break;
+    }
   }
 
   trainingActive = false;
@@ -1068,6 +1132,12 @@ async function onTrainNetwork() {
   controls.setStatus(_trainMsg, 'success');
   notify('Train Network complete', _trainMsg);
   await pushResult('training', results.getTrainingCSV(), { sessions: trainedSessions });
+
+  // v0.70.02 — notify sweep harness so it can advance to the next run.
+  // Mirrors the benchmark-side notifyBenchmarkComplete handshake.
+  if (typeof window !== 'undefined' && window.__sim?.sweep?.notifyTrainingComplete) {
+    window.__sim.sweep.notifyTrainingComplete();
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1926,7 +1996,12 @@ function createDHT(params) {
         alpha: params.alpha,
         bits: params.bits,
         geoBits: params.geoBits,
-        rules: params.nx1wRules,
+        // v0.70.03 — sweep-driven NX-rule overrides (parallel to NH-1's
+        // _nh1RulesOverride). The sweep harness deep-merges run.nx1wRulesOverride
+        // onto the DOM-derived params.nx1wRules before this constructor
+        // runs, so single-parameter ablations (e.g. annealLocalSample) can
+        // be driven without touching the UI.
+        rules: window.__sim?._nx1wRulesEffective ?? params.nx1wRules,
         // NX-17 ignores rootSetSize (forced to 0 in its constructor) but
         // honours maxDirectSubs, minDirectSubs, refresh/TTL timers.
         membership: params.nx17Params ?? params.nx15Params,

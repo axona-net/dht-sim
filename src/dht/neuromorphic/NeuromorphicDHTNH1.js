@@ -90,6 +90,18 @@ export class NeuromorphicDHTNH1 extends DHT {
     this.T_INIT              = 1.0;
     this.T_MIN               = 0.05;
     this.T_REHEAT            = 0.5;
+    // ── v0.70.03 — bandwidth-tax ablation knobs ──────────────────────────
+    // ANNEAL_LOCAL_SAMPLE caps how many 2-hop candidates _localCandidate
+    // examines per call. Default 50 makes _localCandidate the dominant
+    // local_probe contributor (~89% of NH-1 wire traffic at 25K). Lower
+    // values (5/10/20) trade off candidate diversity for bandwidth.
+    //
+    // ANNEAL_RATE_SCALE multiplies the per-hop anneal trigger probability,
+    // letting us throttle anneal frequency without changing the
+    // temperature-reheat semantics. Default 1.0 = current behaviour;
+    // 0.1 = fire ~10× less often.
+    this.ANNEAL_LOCAL_SAMPLE = r.annealLocalSample ?? 50;
+    this.ANNEAL_RATE_SCALE   = r.annealRateScale   ?? 1.0;
     // GEO_BITS controls how many top bits of the 64-bit node ID encode the
     // S2 Hilbert-curve cell prefix for the node's lat/lng. Read from the
     // user's `geoBits` config (defaulting to 8) — previously hardcoded to 8,
@@ -98,7 +110,9 @@ export class NeuromorphicDHTNH1 extends DHT {
     this.GEO_BITS            = config.geoBits ?? 8;
     this.GEO_REGION_BITS     = r.geoRegionBits ?? Math.min(4, this.GEO_BITS);
     this.STRATA_GROUPS       = 16;
-    this.ANNEAL_LOCAL_SAMPLE = 50;
+    // ANNEAL_LOCAL_SAMPLE / ANNEAL_RATE_SCALE moved up to the
+    // bandwidth-tax knobs block so they're visible alongside their
+    // siblings; both are now configurable via rules.
     this.RECENCY_HALF_LIFE   = r.recencyHalfLife ?? 50;
 
     // ── Membership pub/sub layer (AxonManager) ───────────────────────────
@@ -227,7 +241,14 @@ export class NeuromorphicDHTNH1 extends DHT {
         syn.bootstrap = true;     // NX-6 parity: bootstrap synapses preferred to keep
         syn._addedBy  = 'bootstrap';
         node.addSynapse(syn);
-        if (bidirectional) peer.addIncomingSynapse(node.id, latMs, stratum);
+        if (bidirectional) {
+        peer.addIncomingSynapse(node.id, latMs, stratum);
+        // TRAFFIC: bidirectional bootstrap requires a hello/handshake
+        // exchange. Counts as one wire message (zeroed by the pre-baseline
+        // snapshot before training starts, so this only matters for
+        // dedicated bootstrap diagnostics).
+        this._msg(node, peer, 'bootstrap');
+      }
       }
       node._nodeMapRef = this.nodeMap;
     }
@@ -306,7 +327,10 @@ export class NeuromorphicDHTNH1 extends DHT {
       syn.bootstrap = true;     // NX-6 parity
       syn._addedBy  = 'bootstrap';
       newNode.addSynapse(syn);
-      if (bidir) peer.addIncomingSynapse(newNode.id, latMs, stratum);
+      if (bidir) {
+        peer.addIncomingSynapse(newNode.id, latMs, stratum);
+        this._msg(newNode, peer, 'bootstrap');   // TRAFFIC: handshake
+      }
     }
     newNode._nodeMapRef = this.nodeMap;
   }
@@ -336,7 +360,10 @@ export class NeuromorphicDHTNH1 extends DHT {
       const syn     = new Synapse({ peerId: peer.id, latencyMs: latMs, stratum });
       syn._addedBy  = 'bootstrapJoin';
       newNode.addSynapse(syn);
-      if (this.bidirectional) peer.addIncomingSynapse(newNode.id, latMs, stratum);
+      if (this.bidirectional) {
+        peer.addIncomingSynapse(newNode.id, latMs, stratum);
+        this._msg(newNode, peer, 'bootstrap_join');   // TRAFFIC: churn-replacement handshake
+      }
     };
 
     const findClosest = (node, targetId) => {
@@ -492,6 +519,14 @@ export class NeuromorphicDHTNH1 extends DHT {
       trace.push({ fromId: currentId, synapse: nextSyn });
       totalTimeMs += nextSyn.latency;
 
+      // ── TRAFFIC: count the actual hop (find_node-equivalent) ───────────
+      // NH-1 bypasses SimulatedNetwork.send() (it accesses peers via
+      // nodeMap directly), so the v0.70.00 traffic counters on send()
+      // never fire for neuromorphic routing. We re-establish parity here:
+      // every conceptual on-the-wire interaction calls _msg().
+      const nextNode = this.nodeMap.get(nextId);
+      this._msg(current, nextNode, 'find_node');
+
       // ── LEARN: hop caching ─────────────────────────────────────────────
       if (currentId !== targetKey) this._hopCache(currentId, targetKey);
 
@@ -500,7 +535,10 @@ export class NeuromorphicDHTNH1 extends DHT {
 
       // ── EXPLORE: annealing ─────────────────────────────────────────────
       current.temperature = Math.max(this.T_MIN, current.temperature * this.ANNEAL_COOLING);
-      if (Math.random() < current.temperature) this._tryAnneal(current);
+      // v0.70.03 — multiply trigger probability by ANNEAL_RATE_SCALE so
+      // ablations can throttle the dominant local_probe source without
+      // disturbing the temperature-reheat semantics on dead-peer detection.
+      if (Math.random() < current.temperature * this.ANNEAL_RATE_SCALE) this._tryAnneal(current);
 
       currentId = nextId;
     }
@@ -539,6 +577,10 @@ export class NeuromorphicDHTNH1 extends DHT {
       if (firstDist === 0n) return first;
       const firstNode = this.nodeMap.get(first.peerId);
       if (!firstNode?.alive) continue;
+
+      // TRAFFIC: each two-hop AP probe is one round-trip (current asks
+      // first for its closest-to-target). Count once per probe-set entry.
+      this._msg(current, firstNode, 'lookahead_probe');
 
       const fwd = [];
       for (const fs of firstNode.synaptome.values()) {
@@ -638,6 +680,10 @@ export class NeuromorphicDHTNH1 extends DHT {
       if (syn) {
         syn.reinforce(this.simEpoch, this.INERTIA_DURATION);
         syn.useCount = (syn.useCount ?? 0) + 1;
+        // TRAFFIC: LTP feedback walks back along the path — each step is a
+        // small "your synapse to me delivered" ack from peer → node.
+        const peer = this.nodeMap.get(synapse.peerId);
+        if (peer) this._msg(peer, node, 'reinforce');
       }
     }
   }
@@ -651,6 +697,10 @@ export class NeuromorphicDHTNH1 extends DHT {
     const count = (node.transitCache.get(key) ?? 0) + 1;
     if (count >= this.TRIADIC_THRESHOLD) {
       node.transitCache.delete(key);
+      // TRAFFIC: the transit observer (`node`) sends an "introduce" hint
+      // back to the original source. One wire message per fired triadic.
+      const nodeA = this.nodeMap.get(originId);
+      if (nodeA) this._msg(node, nodeA, 'triadic_introduce');
       this._introduce(originId, nextId);
     } else {
       node.transitCache.set(key, count);
@@ -668,7 +718,11 @@ export class NeuromorphicDHTNH1 extends DHT {
     syn.weight    = 0.5;
     syn.inertia   = this.simEpoch;  // fresh recency
     syn._addedBy  = 'triadic';
-    this._addByVitality(nodeA, syn);
+    const added = this._addByVitality(nodeA, syn);
+    // TRAFFIC: the introduction probe — A reaches out to C to confirm it's
+    // alive and learn the actual latency. Count only on successful add so
+    // we don't credit messages that the bilateral cap silently refused.
+    if (added) this._msg(nodeA, nodeC, 'triadic_probe');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -688,6 +742,10 @@ export class NeuromorphicDHTNH1 extends DHT {
       syn._addedBy  = depth === 0 ? 'hopCache' : 'lateralSpread';
       const added   = this._addByVitality(node, syn);
 
+      // TRAFFIC: when a synapse is added, the node had to probe target to
+      // confirm it's alive and learn its latency — count one wire message.
+      if (added) this._msg(node, target, depth === 0 ? 'hop_cache' : 'hop_cache_lateral');
+
       // Lateral spread: propagate to geographic neighbors (same top-4 geo bits)
       if (this.EN_LATERAL_SPREAD && added && depth === 0) {
         const nodeRegion = node.id >> BigInt(64 - this.GEO_REGION_BITS);
@@ -702,6 +760,10 @@ export class NeuromorphicDHTNH1 extends DHT {
         }
         regional.sort((a, b) => b.weight - a.weight);
         for (let i = 0; i < Math.min(this.LATERAL_K, regional.length); i++) {
+          // TRAFFIC: the lateral-spread tells the regional peer about target.
+          // That's a wire message from node → regional peer.
+          const lateralPeer = this.nodeMap.get(regional[i].peerId);
+          this._msg(node, lateralPeer, 'lateral_spread');
           this._hopCache(regional[i].peerId, targetId, 1);
         }
       }
@@ -817,6 +879,10 @@ export class NeuromorphicDHTNH1 extends DHT {
     for (const syn of node.synaptome.values()) {
       const peer = this.nodeMap.get(syn.peerId);
       if (!peer?.alive) continue;
+      // TRAFFIC: each visited 1-hop peer is a "tell me your synaptome"
+      // FIND_NODE-style RPC. The inner loop is data within that response,
+      // not separate messages.
+      this._msg(node, peer, 'local_probe');
       for (const peerSyn of peer.synaptome.values()) {
         const id = peerSyn.peerId;
         if (id === node.id || node.synaptome.has(id)) continue;
@@ -852,6 +918,37 @@ export class NeuromorphicDHTNH1 extends DHT {
       if (dead.length > 0) {
         node.temperature = Math.max(node.temperature, this.T_REHEAT);
       }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Traffic Counters (parity with SimulatedNetwork.send instrumentation)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Bump per-node sent/received counters (and a per-type subtotal) for one
+   * conceptual on-the-wire message. NH-1 bypasses SimulatedNetwork.send()
+   * because every routing primitive accesses peers via this.nodeMap
+   * directly — so the v0.70.00 traffic instrumentation that lives on
+   * send() never fires for neuromorphic protocols. This helper is the
+   * NH-1-side equivalent: every routing/learning primitive calls it at
+   * each conceptual message site so Engine.snapshotTrafficLoad() sees the
+   * same counters Kademlia produces.
+   *
+   * Pairs with the reset loop in snapshotTrafficLoad — the snapshot zeros
+   * all four fields after each training cycle so the next cycle starts
+   * clean and the captured numbers are deltas.
+   */
+  _msg(fromNode, toNode, type) {
+    if (fromNode && fromNode.alive !== false) {
+      fromNode.msgsSent = (fromNode.msgsSent | 0) + 1;
+      if (!fromNode.msgsByType) fromNode.msgsByType = Object.create(null);
+      fromNode.msgsByType[type] = (fromNode.msgsByType[type] | 0) + 1;
+    }
+    if (toNode && toNode.alive !== false) {
+      toNode.msgsReceived = (toNode.msgsReceived | 0) + 1;
+      if (!toNode.msgsByType) toNode.msgsByType = Object.create(null);
+      toNode.msgsByType[type] = (toNode.msgsByType[type] | 0) + 1;
     }
   }
 
@@ -1159,7 +1256,12 @@ export class NeuromorphicDHTNH1 extends DHT {
     };
     for (const syn of node.synaptome.values()) {
       const p1 = this.nodeMap.get(syn.peerId);
-      if (p1?.alive) queryP1(p1);
+      if (p1?.alive) {
+        // TRAFFIC: each 1-hop probe used by the terminal-globality check
+        // is a bounded "your closest peer to target?" RPC.
+        this._msg(node, p1, 'two_hop_probe');
+        queryP1(p1);
+      }
     }
 
     // Also consider incoming peers as a reverse-routing option (incoming
@@ -1228,6 +1330,9 @@ export class NeuromorphicDHTNH1 extends DHT {
       if (result === 'consumed') return { consumed: true, atNode: current.id, hops };
       if (isTerminal) return { consumed: false, atNode: current.id, hops, terminal: true };
 
+      // TRAFFIC: forward this routed message one hop along the wire.
+      this._msg(current, nextHop, 'route_msg');
+
       previousId = nodeIdToHex(current.id);
       current = nextHop;
       hops++;
@@ -1259,6 +1364,11 @@ export class NeuromorphicDHTNH1 extends DHT {
   sendDirect(fromNode, peerId, type, payload) {
     const peer = this.nodeMap.get(topicToBigInt(peerId));
     if (!peer?.alive) return false;
+    // TRAFFIC: every sendDirect is one wire message — count at the entry
+    // point so nested in-handler sendDirect calls (drain queue) are
+    // counted too. The drain loop is in-process delivery to handlers, not
+    // a separate wire send, so we count here exactly once per call.
+    this._msg(fromNode, peer, `direct_${type}`);
     const handlers = this._directHandlers.get(peer);
     const handler = handlers?.get(type);
     if (!handler) return true;        // peer alive but no handler — no-op

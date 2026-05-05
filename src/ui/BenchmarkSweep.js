@@ -111,6 +111,16 @@ export class BenchmarkSweep {
     if (cb) cb(false);
   }
 
+  /**
+   * v0.70.02 — training-mode handshake. main.js's onTrainNetwork calls this
+   * after pushResult('training', …) finishes so the sweep can advance.
+   */
+  notifyTrainingComplete() {
+    const cb = this._onTrain;
+    this._onTrain = null;
+    if (cb) cb(true);
+  }
+
   // ── Internal state machine ────────────────────────────────────────────────
 
   _next() {
@@ -136,6 +146,35 @@ export class BenchmarkSweep {
 
       // Re-apply after init in case anything reset (e.g. pubsubCoverage)
       this._applyParams(run);
+
+      // v0.70.02 — dispatch on run.mode. 'training' drives the Train
+      // Network loop (used for traffic-load distribution sweeps); the
+      // default ('benchmark') keeps the existing Init→Benchmark flow.
+      if (run.mode === 'training') {
+        // Honour run.maxSessions via the global flag main.js reads.
+        window.__sim ??= {};
+        window.__sim._trainingMaxSessions =
+          Number.isFinite(run.maxSessions) ? run.maxSessions : 20;
+        // v0.70.04 — per-cycle churn injection (0 = off).
+        window.__sim._trainingChurnPct =
+          Number.isFinite(run.churnPctPerCycle) ? run.churnPctPerCycle : 0;
+
+        this._onTrain = (success) => {
+          if (!this._running) return;
+          if (!success) return;
+          this._results.push({ runIdx: this._idx, params: { ...run } });
+          this._idx++;
+          // Clear training-mode flags so a subsequent manual training run
+          // isn't accidentally bounded or churning.
+          if (window.__sim) {
+            delete window.__sim._trainingMaxSessions;
+            delete window.__sim._trainingChurnPct;
+          }
+          setTimeout(() => this._next(), 1500);
+        };
+        document.getElementById('btnTrainNetwork')?.click();
+        return;
+      }
 
       // Register benchmark callback then click Benchmark
       this._onBench = (success) => {
@@ -185,7 +224,21 @@ export class BenchmarkSweep {
       sel.dispatchEvent(new Event('change', { bubbles: true }));
     };
 
+    // v0.70.02 — single-protocol selector for training-mode runs.
+    // Training reads from #dhtProtocol (one protocol per run), unlike
+    // benchmark which uses the #benchProtocols multiselect. When run.mode
+    // is 'training', expect run.protocol = 'kademlia' | 'geob' | 'ngdhtnx17'
+    // | 'ngdhtnh1' etc.
+    if (run.protocol) {
+      const sel = document.getElementById('dhtProtocol');
+      if (sel) {
+        sel.value = run.protocol;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+
     setNum('nodeCount',           run.nodeCount);
+    setNum('msgCount',            run.msgCount);   // lookups per training session
     setNum('geoBits',             run.geoBits);
     setNum('pubsubCoverage',      run.pubsubCoverage);
     setNum('pubsubGroupSize',     run.pubsubGroupSize);
@@ -303,6 +356,22 @@ export class BenchmarkSweep {
       if (window.__sim) delete window.__sim._nh1RulesOverride;
     }
 
+    // v0.70.04 — NX rules override path with deep-merge onto a snapshot
+    // of the DOM-derived rules. The previous v0.70.03 implementation
+    // wrote the partial override directly into _nx1wRulesEffective,
+    // which silently dropped every `enabled: true` flag and disabled
+    // rules the run didn't intend to touch (anneal, hop caching, lateral
+    // spread, triadic, LTP all came up off — invalidated NX-17 ablation
+    // runs). Now we snapshot the full structured rules from Controls
+    // and merge the override on top, preserving every default flag.
+    if (run.nx1wRulesOverride !== undefined) {
+      window.__sim ??= {};
+      const base = window.__sim?.controls?.getNX1WRules?.() ?? {};
+      window.__sim._nx1wRulesEffective = this._deepMerge(base, run.nx1wRulesOverride);
+    } else if (window.__sim) {
+      delete window.__sim._nx1wRulesEffective;
+    }
+
     // Directional sub-caps (v0.67.02). Same override pattern — main.js
     // reads window.__sim._max{Outgoing,Incoming}Override before falling
     // back to params from Controls. Default Infinity means "no directional
@@ -361,5 +430,29 @@ export class BenchmarkSweep {
 
   _log(msg) {
     console.log(`[Sweep] ${msg}`);
+  }
+
+  /**
+   * Deep-merge `override` onto `base` and return a fresh object. Plain
+   * objects (own enumerable keys) recurse; every other value type
+   * (numbers, strings, booleans, arrays, null) replaces wholesale.
+   *
+   * Used to layer per-run nx1wRulesOverride onto the DOM-derived
+   * Controls.getNX1WRules() snapshot so partial overrides (e.g.
+   * `{ annealing: { annealRateScale: 0.1 } }`) don't drop unrelated
+   * `enabled: true` flags from sibling sections.
+   */
+  _deepMerge(base, override) {
+    const isPlain = (v) =>
+      v != null && typeof v === 'object' && !Array.isArray(v);
+    if (!isPlain(base))     return isPlain(override) ? this._deepMerge({}, override) : override;
+    if (!isPlain(override)) return base;
+    const out = { ...base };
+    for (const k of Object.keys(override)) {
+      out[k] = isPlain(override[k]) && isPlain(base[k])
+        ? this._deepMerge(base[k], override[k])
+        : override[k];
+    }
+    return out;
   }
 }

@@ -192,6 +192,7 @@ export class Results {
     this._hideSection('pairResults');
     this._hideSection('hotspotResults');
     this.panel?.classList.remove('bench-wide');
+    this.panel?.classList.remove('train-wide');
 
     if (result.hopsRaw && result.timeRaw) {
       requestAnimationFrame(() => {
@@ -231,6 +232,7 @@ export class Results {
     this._hideSection('pairResults');
     this._hideSection('hotspotResults');
     this.panel?.classList.remove('bench-wide');
+    this.panel?.classList.remove('train-wide');
   }
 
   // ── Training Results ─────────────────────────────────────────────────────
@@ -249,9 +251,14 @@ export class Results {
     this._hideSection('pairResults');
     this._hideSection('hotspotResults');
     this.panel?.classList.remove('bench-wide');
+    this.panel?.classList.remove('train-wide');
+    this.panel?.classList.add('train-wide');
     this._attachPanelHeader('trainingResults', 'Train Network', () => this._trainingCSV(), `dht-training-${Date.now()}.csv`);
     this._updateTrainingStats(history);
-    requestAnimationFrame(() => this._drawTrainingChart(history));
+    requestAnimationFrame(() => {
+      this._drawTrainingChart(history);
+      this._drawTrainingTrafficChart(history);
+    });
   }
 
   updateTrainingProgress(history) {
@@ -260,6 +267,7 @@ export class Results {
     // Call synchronously: chart already exists and canvas has dimensions,
     // so no rAF needed — and rAF batching prevents incremental updates.
     this._drawTrainingChart(history);
+    this._drawTrainingTrafficChart(history);
   }
 
   _updateTrainingStats(history) {
@@ -272,15 +280,33 @@ export class Results {
     this._setText('trainAvgHops',  s.hops?.mean != null ? s.hops.mean.toFixed(2) : '—');
     this._setText('trainAvgTime',  s.time?.mean != null ? `${s.time.mean.toFixed(1)} ms` : '—');
 
+    // v0.70.00 — per-cycle traffic-load tiles
+    const t = s.traffic?.summary;
+    this._setText('trainMsgsTotal',  t ? t.total.toLocaleString() : '—');
+    this._setText('trainMsgsP50',    t ? t.p50.toLocaleString()   : '—');
+    this._setText('trainMsgsP99',    t ? t.p99.toLocaleString()   : '—');
+    this._setText('trainMsgsMax',    t ? t.max.toLocaleString()   : '—');
+    this._setText('trainMsgsGini',   t ? t.gini.toFixed(3)        : '—');
+    this._setText('trainMsgsHot10x', t ? t.hot10x.toLocaleString(): '—');
+
     // Build the row HTML (shared between baseline pin and rolling log)
     const sessionLabel = s.isBaseline ? '◆ base' : `#${s.session}`;
+    // v0.70.00 — compact traffic-distribution summary appended to each
+    // session row: total messages observed in this cycle, p99 / max
+    // per-node, and Gini coefficient. Lets the operator watch the
+    // distribution evolve session-by-session in the rolling log
+    // without having to open the CSV. (Reuses `t` declared above.)
+    const trafficSummary = t
+      ? ` · msgs ${t.total.toLocaleString()} (p99 ${t.p99} · max ${t.max} · gini ${t.gini.toFixed(2)})`
+      : '';
     const rowHTML =
       `<span class="tl-session">${sessionLabel}</span>` +
       `<span class="tl-hops">hops ${s.hops?.mean != null ? s.hops.mean.toFixed(2) : '—'}</span>` +
       `<span class="tl-time">${s.time?.mean != null ? s.time.mean.toFixed(1) + ' ms' : '—'}</span>` +
       `<span class="tl-success">${(s.successRate * 100).toFixed(1)}%</span>` +
       `<span class="tl-meta">syn ${s.avgSynapses != null ? s.avgSynapses.toFixed(1) : '—'}` +
-      (s.isBaseline ? ' · pre-training' : ` · epoch ${s.epoch}`) + '</span>';
+      (s.isBaseline ? ' · pre-training' : ` · epoch ${s.epoch}`) +
+      trafficSummary + '</span>';
 
     if (s.isBaseline) {
       // Sticky pinned baseline — always visible above the session log
@@ -427,13 +453,129 @@ export class Results {
     });
   }
 
+  /**
+   * v0.70.00 — Traffic-distribution time-series chart.
+   *
+   * One line per percentile across training sessions: median (p50) shows
+   * what a typical node sees per cycle; p99 and max show the tail.
+   * Together they tell us whether the load distribution is staying flat
+   * (decentralized) or growing more skewed (clustering on a small number
+   * of overloaded nodes).
+   *
+   * Y-axis is logarithmic: in healthy decentralized regimes p50 and max
+   * differ by a small constant factor, but in success-disaster regimes
+   * max grows orders of magnitude beyond p50 — log-scale keeps both
+   * legible without one curve hiding the other.
+   */
+  _drawTrainingTrafficChart(history) {
+    const canvas = this._el('trainingTrafficChart');
+    if (!canvas || typeof Chart === 'undefined' || history.length < 1) return;
+
+    const labels = history.map(s => s.isBaseline ? '◆ base' : `#${s.session}`);
+    const small  = { size: 10, family: "'JetBrains Mono','Fira Mono','Consolas',monospace" };
+
+    // Use 1 instead of 0 / null so log scale doesn't break on cycles
+    // that somehow recorded zero (won't happen normally — but safer).
+    const series = (selector) => history.map(s => {
+      const v = selector(s.traffic?.summary);
+      return v == null || v === 0 ? null : v;
+    });
+
+    const dataMax  = series(t => t?.max);
+    const dataP99  = series(t => t?.p99);
+    const dataP90  = series(t => t?.p90);
+    const dataP50  = series(t => t?.p50);
+    const dataMean = series(t => t?.mean);
+
+    if (this._charts['trainingTrafficChart']) {
+      const ch = this._charts['trainingTrafficChart'];
+      ch.data.labels = labels;
+      ch.data.datasets[0].data = dataMax;
+      ch.data.datasets[1].data = dataP99;
+      ch.data.datasets[2].data = dataP90;
+      ch.data.datasets[3].data = dataP50;
+      ch.data.datasets[4].data = dataMean;
+      ch.update('none');
+      return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    this._charts['trainingTrafficChart'] = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Max',  data: dataMax,  borderColor: '#d33b3b', backgroundColor: '#d33b3b', tension: 0.15, pointRadius: 1, borderWidth: 1.5 },
+          { label: 'p99',  data: dataP99,  borderColor: '#e07b00', backgroundColor: '#e07b00', tension: 0.15, pointRadius: 1, borderWidth: 1.3 },
+          { label: 'p90',  data: dataP90,  borderColor: '#c4a500', backgroundColor: '#c4a500', tension: 0.15, pointRadius: 1, borderWidth: 1.3 },
+          { label: 'p50',  data: dataP50,  borderColor: '#2d7373', backgroundColor: '#2d7373', tension: 0.15, pointRadius: 1, borderWidth: 1.3 },
+          { label: 'Mean', data: dataMean, borderColor: '#888',    backgroundColor: '#888',    tension: 0.15, pointRadius: 1, borderWidth: 1.0, borderDash: [4, 3] },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'top', labels: { font: small, boxWidth: 12, boxHeight: 8 } },
+          title:  { display: true, text: 'Per-cycle traffic distribution (msgs / node, log scale)', color: '#666', font: small },
+          tooltip: { titleFont: small, bodyFont: small },
+        },
+        scales: {
+          x: { ticks: { color: '#666', font: small, maxRotation: 0 }, grid: { color: 'rgba(0,0,0,0.05)' } },
+          y: {
+            type: 'logarithmic',
+            ticks: { color: '#666', font: small, callback: (v) => Number(v).toLocaleString() },
+            grid:  { color: 'rgba(0,0,0,0.05)' },
+            title: { display: true, text: 'msgs / node (log)', color: '#666', font: small },
+          },
+        },
+      },
+    });
+  }
+
   _trainingCSV() {
     if (!this._trainingHistory?.length) return '';
+    // v0.70.00 — traffic-distribution columns appended after the
+    // existing training-progress columns. Per cycle: total messages
+    // observed (sender + receiver counters), median / 90th / 99th
+    // percentile / max / Gini coefficient over the per-node totals,
+    // plus counts of nodes that exceeded 10× and 100× the cycle mean.
+    // These are the raw inputs for the "is the load distribution
+    // clustering or decentralizing?" question.
+    //
+    // v0.70.02 — per-type breakdown columns. We compute the union of
+    // every byType key seen across the training history, ordered by
+    // total volume descending so the dominant message types appear
+    // first. One column per type, prefixed `Type:` to keep the
+    // existing summary columns unambiguous. This lets us decompose the
+    // "where is the bandwidth going?" question — e.g. is `lookahead_probe`
+    // the dominant tax, or is it pub/sub forwarding?
+    const typeTotals = new Map();   // type → total across all sessions
+    for (const s of this._trainingHistory) {
+      const bt = s.traffic?.summary?.byType;
+      if (!bt) continue;
+      for (const t of Object.keys(bt)) {
+        typeTotals.set(t, (typeTotals.get(t) ?? 0) + bt[t]);
+      }
+    }
+    const typeCols = [...typeTotals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([t]) => t);
+    const typeHeaders = typeCols.map(t => `Type:${t}`);
+
     const rows = [
       ['Session', 'Avg Hops', 'Avg Time (ms)',
-       'Success Rate', 'Avg Synapses', 'Epoch'].join(','),
+       'Success Rate', 'Avg Synapses', 'Epoch',
+       // traffic columns
+       'Msgs total', 'Msgs mean', 'Msgs p50', 'Msgs p90', 'Msgs p99',
+       'Msgs max', 'Msgs Gini', 'Hot >10× nodes', 'Hot >100× nodes',
+       ...typeHeaders].join(','),
     ];
     for (const s of this._trainingHistory) {
+      const t  = s.traffic?.summary;
+      const bt = t?.byType ?? {};
       rows.push([
         s.isBaseline ? 'baseline' : s.session,
         s.hops?.mean  != null ? s.hops.mean.toFixed(3)  : '',
@@ -441,6 +583,18 @@ export class Results {
         s.successRate != null ? (s.successRate * 100).toFixed(2) + '%' : '',
         s.avgSynapses != null ? s.avgSynapses.toFixed(1) : '',
         s.epoch       != null ? s.epoch : '',
+        // traffic delta values for this cycle
+        t ? t.total   : '',
+        t ? t.mean.toFixed(2) : '',
+        t ? t.p50     : '',
+        t ? t.p90     : '',
+        t ? t.p99     : '',
+        t ? t.max     : '',
+        t ? t.gini.toFixed(4) : '',
+        t ? t.hot10x  : '',
+        t ? t.hot100x : '',
+        // per-type subtotals (each is sender+receiver count, so 2× wire)
+        ...typeCols.map(k => bt[k] ?? 0),
       ].join(','));
     }
     rows.push(this._paramsSection(null, [
@@ -458,6 +612,10 @@ export class Results {
     if (this._charts['trainingLineChart']) {
       this._charts['trainingLineChart'].destroy();
       delete this._charts['trainingLineChart'];
+    }
+    if (this._charts['trainingTrafficChart']) {
+      this._charts['trainingTrafficChart'].destroy();
+      delete this._charts['trainingTrafficChart'];
     }
     this._hideSection('trainingResults');
   }
@@ -509,6 +667,7 @@ export class Results {
       this._hideSection('pairResults');
       this._hideSection('hotspotResults');
       this.panel?.classList.remove('bench-wide');
+      this.panel?.classList.remove('train-wide');
       this._attachPanelHeader('membershipSimResults', 'Pub/Sub Membership (Live)',
                               () => this._membershipSimCSV(),
                               `dht-membership-sim-${Date.now()}.csv`);
@@ -733,6 +892,7 @@ export class Results {
     this._hideSection('pubsubResults');
     this._hideSection('hotspotResults');
     this.panel?.classList.remove('bench-wide');
+    this.panel?.classList.remove('train-wide');
     this._attachPanelHeader('pairResults', 'Pair Learning', () => this._pairCSV(), `dht-pair-learning-${Date.now()}.csv`);
     this._updatePairStats(history);
     this._drawPairChart(history);
@@ -934,6 +1094,7 @@ export class Results {
     this._hideSection('pairResults');
     this._hideSection('hotspotResults');
     this.panel?.classList.remove('bench-wide');
+    this.panel?.classList.remove('train-wide');
     this._attachPanelHeader('pubsubResults', 'Pub/Sub', () => this._pubsubCSV(), `dht-pubsub-${Date.now()}.csv`);
     this._updatePubSubStats(history, numGroups, coverage);
     requestAnimationFrame(() => this._drawPubSubChart(history));
@@ -1192,6 +1353,7 @@ export class Results {
     this._hideSection('pairResults');
     this._hideSection('hotspotResults');
     this.panel?.classList.remove('bench-wide');
+    this.panel?.classList.remove('train-wide');
     this._attachPanelHeader('churnResults', 'Churn Test', () => this._churnCSV(), `dht-churn-${Date.now()}.csv`);
     this._updateChurnStats(timeSeries);
     requestAnimationFrame(() => this._drawChurnChart(timeSeries));
@@ -1882,6 +2044,7 @@ export class Results {
     this._hideSection('pairResults');
     this._hideSection('hotspotResults');
     this.panel?.classList.remove('bench-wide');
+    this.panel?.classList.remove('train-wide');
   }
 
   // ── Hotspot Results ───────────────────────────────────────────────────────

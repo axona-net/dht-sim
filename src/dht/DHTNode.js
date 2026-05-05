@@ -31,6 +31,31 @@ export class DHTNode {
     this.joinedAt = Date.now();
 
     /**
+     * Per-cycle traffic counters (v0.70.00).
+     *
+     * The simulator until now has had no model of bandwidth — every node
+     * can handle an arbitrary number of messages per unit time. The
+     * hypothesis (red-team Tier 1 "bandwidth saturation" deploy blocker)
+     * is that real workloads will produce a heavy-tailed distribution: a
+     * small number of nodes — highway hubs, hot pub/sub roots,
+     * over-trained synapse targets — will accumulate physically impossible
+     * message rates while the median node sees almost nothing.
+     *
+     * Every message through SimulatedNetwork.send() bumps a counter on
+     * both endpoints and a per-type subtotal.
+     * Engine.snapshotTrafficLoad() reads and resets them after each
+     * training cycle, producing a per-cycle delta we can plot, summarize,
+     * and use to set load-balancing goals.
+     *
+     * Initialized to 0; reset to 0 after each snapshot. msgsByType is a
+     * null-prototype object to avoid hash-key collisions with method
+     * names.
+     */
+    this.msgsSent = 0;
+    this.msgsReceived = 0;
+    this.msgsByType = Object.create(null);
+
+    /**
      * S2 geographic cell ID (GEO_CELL_BITS wide).
      * Computed for every node regardless of protocol so that regional lookups
      * can route by geographic cell XOR even in plain Kademlia.

@@ -299,26 +299,56 @@ export class SimulationEngine {
           // Pick a target: destPool → hotPool → uniform random.
           let receiver;
           if (destPool) {
-            const others = destPool.filter(n => n.id !== source.id && n.alive);
-            if (others.length > 0) {
-              if (destRandom) {
-                // Random selection — used for continent tests where any destination
-                // in the target region is equally valid.  Tests the protocol's
-                // ability to reach arbitrary far-away nodes, not just the
-                // XOR-nearest one.
-                receiver = others[Math.floor(Math.random() * others.length)];
-              } else {
-                // XOR-nearest selection for hot-dest / CDN traffic pattern.
-                // Each client reaches its most topologically-accessible popular
-                // node; repeated traffic along those same short paths lets N-DHT
-                // build dense shortcut webs (the tributary effect).
-                const srcId = source.id;
-                receiver = others.reduce((best, n) =>
-                  (n.id ^ srcId) < (best.id ^ srcId) ? n : best
-                );
+            if (destRandom) {
+              // Random selection — used for continent tests where any
+              // destination in the target region is equally valid. Single
+              // pass with rejection: pick a random index, fall back to a
+              // bounded scan only if the picked node is dead or self.
+              // O(1) typical, O(N_dest) worst case. Avoids allocating a
+              // fresh filtered array every lookup (was 5K-element alloc
+              // per call at 10 %/50K, 2.5M allocations for a 500-lookup
+              // test cell — observable GC stall on the main thread).
+              const srcId = source.id;
+              receiver = null;
+              const tries = Math.min(destPool.length, 8);
+              for (let t = 0; t < tries; t++) {
+                const cand = destPool[Math.floor(Math.random() * destPool.length)];
+                if (cand && cand.alive && cand.id !== srcId) { receiver = cand; break; }
               }
+              if (!receiver) {
+                // Linear scan fallback (rare — only when the random picks
+                // all hit the source or dead nodes).
+                for (const n of destPool) {
+                  if (n.alive && n.id !== srcId) { receiver = n; break; }
+                }
+              }
+              if (!receiver) receiver = this._randomOtherNode(dht, source.id);
             } else {
-              receiver = this._randomOtherNode(dht, source.id);
+              // XOR-nearest selection for hot-dest / CDN traffic pattern.
+              // Each client reaches its most topologically-accessible
+              // popular node; repeated traffic along those short paths
+              // lets N-DHT build dense shortcut webs (the tributary
+              // effect).
+              //
+              // Single-pass scan with cached best-distance — was a
+              // .filter().reduce() chain that recomputed best.id^srcId
+              // on every comparison and allocated a fresh filtered
+              // array per lookup. At 10 %/50K (5K dest pool, 500
+              // lookups) that's 2.5M extra BigInt XORs and 2.5M
+              // allocations per test cell. Observable browser-tab
+              // hang on the v0.70.04 whitepaper-refresh sweep at this
+              // exact (G-DHT, dest, 50K) cell.
+              const srcId = source.id;
+              let bestNode = null;
+              let bestDist = 0n;
+              for (const n of destPool) {
+                if (!n.alive || n.id === srcId) continue;
+                const d = n.id ^ srcId;
+                if (bestNode === null || d < bestDist) {
+                  bestNode = n; bestDist = d;
+                }
+              }
+              receiver = bestNode ?? this._randomOtherNode(dht, source.id);
             }
           } else if (hotPool) {
             const others = hotPool.filter(n => n.id !== source.id && n.alive);
@@ -395,6 +425,44 @@ export class SimulationEngine {
    * @returns {Promise<object>}  { protocolDefs, testSpecs, data }
    *   data[protocolKey][specKey] = { hops, time, successRate, totalRuns }
    */
+  /**
+   * v0.70.04 — apply a single round of churn (kill + bootstrap-join + heal).
+   *
+   * Used by training-mode sweeps that interleave churn with traffic-load
+   * snapshots to validate "does the throttled neuromorphic profile still
+   * recover under sustained churn?" The benchmark's churn test runs a
+   * fixed 5 rounds; this lets training drive per-cycle churn at any rate
+   * with the same kill / replace / heal mechanics.
+   *
+   * @param {object} dht
+   * @param {number} ratePct        — % of live nodes to replace this round
+   * @param {Function|null} landFn  — (lat,lng)=>bool land detector
+   */
+  async applyChurnRound(dht, ratePct, landFn = null) {
+    const rate = Math.max(0, Math.min(1, ratePct / 100));
+    if (rate <= 0) return { killed: 0, added: 0 };
+    const getLandPoint = landFn ?? (() => randomLandPoint(null));
+    const alive = dht.getNodes().filter(n => n.alive);
+    const numToReplace = Math.max(1, Math.floor(alive.length * rate));
+    for (const node of shuffleSample(alive, numToReplace)) {
+      await dht.removeNode(node.id);
+    }
+    const liveAfter = dht.getNodes().filter(n => n.alive);
+    let added = 0;
+    for (let i = 0; i < numToReplace; i++) {
+      const { lat, lng } = getLandPoint();
+      const newNode = await dht.addNode(lat, lng);
+      const sponsor = liveAfter[Math.floor(Math.random() * liveAfter.length)];
+      if (sponsor && typeof dht.bootstrapJoin === 'function') {
+        dht.bootstrapJoin(newNode.id, sponsor.id);
+      }
+      added++;
+    }
+    if (typeof dht.postChurnHeal === 'function') dht.postChurnHeal();
+    dht.verifyConnectionCap?.('training-churn');
+    return { killed: numToReplace, added };
+  }
+
   async runBenchmark(protocolDefs, params = {}) {
     const {
       testSpecs = [
@@ -2341,6 +2409,98 @@ export class SimulationEngine {
       ys.push(total ? (cum / total) * 100 : ((i + 1) / n) * 100);
     }
     return { xs, ys };
+  }
+
+  /**
+   * Snapshot per-node traffic counters and reset them. v0.70.00.
+   *
+   * Reads `msgsSent`, `msgsReceived`, and `msgsByType` from every live
+   * node (populated by SimulatedNetwork.send), summarizes the
+   * population, and resets the counters to 0 / {} so the next training
+   * cycle starts clean. The returned record is a *delta* — what
+   * happened in the cycle that just ended.
+   *
+   * The hypothesis we are testing: bandwidth is currently unmodeled, so
+   * a small number of nodes (highway hubs, hot pub/sub roots,
+   * over-trained synapse targets) accumulate physically impossible
+   * message rates while the median node sees almost nothing. The
+   * snapshot exposes this distribution so we can plot it, summarize
+   * it, and use it to set load-balancing goals (red-team Tier 1
+   * "bandwidth saturation" deploy blocker).
+   *
+   * @param {object} dht
+   * @returns {{
+   *   summary: { N, total, mean, p50, p75, p90, p95, p99, max, gini,
+   *              hot10x, hot100x, byType },
+   *   topN:    Array<{id, lat, lng, isHighway, total, sent, received, byType}>,
+   *   distribution: number[]   // raw per-node total array (sorted ascending)
+   * }}
+   */
+  snapshotTrafficLoad(dht, opts = {}) {
+    const { topK = 10, reset = true } = opts;
+    const nodes = (typeof dht.getNodes === 'function')
+      ? dht.getNodes().filter(n => n.alive)
+      : [...(dht.nodeMap?.values?.() ?? [])].filter(n => n.alive);
+
+    const records = nodes.map(n => ({
+      id:        n.id,
+      lat:       n.lat,
+      lng:       n.lng,
+      isHighway: !!n.isHighway,
+      sent:      n.msgsSent     | 0,
+      received:  n.msgsReceived | 0,
+      total:    (n.msgsSent | 0) + (n.msgsReceived | 0),
+      byType:    n.msgsByType ? { ...n.msgsByType } : {},
+    }));
+
+    // ── Aggregate stats over the per-node totals ───────────────────────
+    const totals = records.map(r => r.total).sort((a, b) => a - b);
+    const N      = totals.length;
+    const sum    = totals.reduce((s, v) => s + v, 0);
+    const mean   = N ? sum / N : 0;
+    const pct = (p) => N ? totals[Math.min(N - 1, Math.floor(N * p))] : 0;
+
+    // Type-level totals across all nodes (each message increments two
+    // counters — sent + received — so the per-type sum here is double
+    // the wire-level message count by design).
+    const byType = {};
+    for (const r of records) {
+      for (const t of Object.keys(r.byType)) {
+        byType[t] = (byType[t] | 0) + r.byType[t];
+      }
+    }
+
+    const summary = {
+      N,
+      total:   sum,
+      mean,
+      p50:     pct(0.50),
+      p75:     pct(0.75),
+      p90:     pct(0.90),
+      p95:     pct(0.95),
+      p99:     pct(0.99),
+      max:     totals[N - 1] || 0,
+      gini:    this._gini(totals),
+      hot10x:  totals.filter(v => mean && v > 10  * mean).length,
+      hot100x: totals.filter(v => mean && v > 100 * mean).length,
+      byType,
+    };
+
+    // ── Top-K hottest nodes (by total) for diagnostic display ─────────
+    const topN = [...records]
+      .sort((a, b) => b.total - a.total)
+      .slice(0, topK);
+
+    // ── Reset counters so next cycle starts clean ─────────────────────
+    if (reset) {
+      for (const n of nodes) {
+        n.msgsSent = 0;
+        n.msgsReceived = 0;
+        n.msgsByType = Object.create(null);
+      }
+    }
+
+    return { summary, topN, distribution: totals };
   }
 
   /**
