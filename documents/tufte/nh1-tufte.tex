@@ -16,6 +16,7 @@
 \usepackage{xcolor}
 \usepackage{booktabs}
 \usepackage{microtype}
+\usepackage{fancyhdr}
 
 \definecolor{rust}{RGB}{185,78,54}
 \definecolor{rustsoft}{RGB}{212,168,150}
@@ -34,10 +35,16 @@
 \maketitle
 % v0.3.48: tufte-handout's running-header processing applies SOUL
 % letterspacing via \MakeTextLowercase, which fails on certain
-% page-break points in this document. Switching to a plain pagestyle
-% bypasses the letterspaced running heads but keeps the typography.
-\pagestyle{plain}
-\thispagestyle{plain}
+% page-break points in this document. We use a fancyhdr-based style
+% that bypasses the letterspaced running heads but adds visible
+% page numbers at the bottom.
+\fancypagestyle{ndhtplain}{%
+  \fancyhf{}%
+  \renewcommand{\headrulewidth}{0pt}%
+  \fancyfoot[C]{\thepage}%
+}
+\pagestyle{ndhtplain}
+\thispagestyle{ndhtplain}
 
 % --------------------------------------------------------------------
 % Epigraph
@@ -78,7 +85,7 @@ There's just one problem.
 % =====================================================================
 \section{The Latency Tax}
 
-\newthought{Twenty hops} sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart---roughly 100~milliseconds one-way.
+\newthought{Twenty hops} sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart---roughly 100~milliseconds round trip.
 
 20 hops $\times$ 100~ms $=$ \textbf{2 seconds.} To find something. Every time.
 

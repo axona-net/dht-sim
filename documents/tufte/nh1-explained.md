@@ -24,7 +24,7 @@ There's just one problem.
 
 ## Hops Are Cheap, But Time Is Expensive
 
-20 hops sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart — roughly 100 milliseconds one-way.
+20 hops sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart—roughly 100 milliseconds round trip.
 
 20 hops × 100 ms = **2 seconds**. To find something. Every time.
 
