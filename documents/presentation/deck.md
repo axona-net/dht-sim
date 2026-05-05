@@ -3,8 +3,8 @@ marp: true
 theme: default
 size: 16:9
 paginate: true
-header: "Neuromorphic DHT — NH-1"
-footer: "v0.3.47 · sim v0.70.04 · 2026-05-03"
+header: "N-DHT"
+footer: "v0.3.48 · sim v0.70.05 · 2026-05-05"
 style: |
   section {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -53,7 +53,7 @@ style: |
 
 <!-- _class: title -->
 
-# Neuromorphic DHT — NH-1
+# N-DHT
 
 ## A Learning-Adaptive Distributed Hash Table
 ## with Axonal Publish-Subscribe

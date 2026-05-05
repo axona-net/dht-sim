@@ -1,5 +1,7 @@
 # Building a Smarter Internet: How Brain Science Helped Speed Up Peer-to-Peer Networks
 
+*An N-DHT explainer · v0.3.48 · 2026-05-05 · David A. Smith · YZ.social*
+
 ## The Problem: Finding Stuff on a Network Without a Boss
 
 Imagine you and a million strangers each hold one piece of a giant jigsaw puzzle. Someone walks up and asks for piece #438,291. How do you find it?
@@ -22,7 +24,7 @@ There's just one problem.
 
 ## Hops Are Cheap, But Time Is Expensive
 
-20 hops sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart — roughly 100 milliseconds for a round trip.
+20 hops sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart — roughly 100 milliseconds one-way.
 
 20 hops × 100 ms = **2 seconds**. To find something. Every time.
 
@@ -133,7 +135,7 @@ Every behavior in NH-1 falls into one of five categories — and the categories 
 
 **2. LEARN** — strengthen what works. Four learning mechanisms run on every successful lookup:
 
-- **LTP**: every connection on the successful path gets stronger.
+- **LTP**: every connection on a *fast* successful path (one that beats the running average of recent path latencies) gets stronger.
 - **Hop caching**: every intermediate node along the path remembers the *destination*, not just the next hop. So next time, the path is shorter.
 - **Triadic closure**: if you keep seeing peer A relay messages to peer C through you, you introduce them directly. The triangle "A–you–C" becomes a direct edge "A–C." (This is named after social network theory: dense triangles emerge in any network shaped by interaction.)
 - **Incoming promotion**: peers who keep reaching out to you become candidates for *your* routing table. Passive learning — the network notices who's interested in you, not just who you're interested in.
@@ -171,7 +173,7 @@ The proof is geometric. Each hop in a DHT covers half the remaining distance. So
 
 For 20 years, no published DHT had been measured at this floor. The best implementations got to maybe 2× the floor.
 
-NH-1's predecessor, NX-17, hits **1.18× the floor** at 25,000 nodes. NH-1 hits **1.28×**. They sit at the theoretical limit. The remaining 18% overhead is structural — they take about 4.5 hops where an ideal protocol would take 3, and each "extra" hop costs about δ/2, exactly as the geometric series predicts.
+NH-1's predecessor, NX-17, hits **1.16× the floor** at 25,000 nodes. NH-1 hits **1.27×**. They sit at the theoretical limit. The remaining ~20% overhead is structural — they take about 4 to 5 hops where an ideal protocol would take 3, and each "extra" hop costs about δ/2, exactly as the geometric series predicts.
 
 For comparison, plain Kademlia *gets worse* as the network grows: 2.01× the floor at 5,000 nodes, 2.65× at 50,000. It scales the wrong way.
 

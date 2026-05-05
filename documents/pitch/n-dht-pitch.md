@@ -3,8 +3,8 @@ marp: true
 theme: default
 size: 16:9
 paginate: true
-header: "N/DHT — Neuromorphic Distributed Hash Tables"
-footer: "v0.2.0 · 2026-05-02 · YZ.social"
+header: "N-DHT — Neuromorphic Distributed Hash Tables"
+footer: "v0.3.48 · 2026-05-05 · YZ.social"
 style: |
   section {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -79,7 +79,7 @@ style: |
 
 <!-- _class: title -->
 
-# N/DHT
+# N-DHT
 
 ## *Neuromorphic Distributed Hash Tables*
 
@@ -132,7 +132,7 @@ The internet is supposed to be a peer-to-peer network. **In practice it isn't.**
 
 ## What we believe
 
-Six principles N/DHT is built on. Each is checkable in code; none is aspirational marketing:
+Six principles N-DHT is built on. Each is checkable in code; none is aspirational marketing:
 
 <br>
 
@@ -152,9 +152,9 @@ Six principles N/DHT is built on. Each is checkable in code; none is aspirationa
 
 ---
 
-## The protocol class: N/DHT
+## The protocol class: N-DHT
 
-**N/DHT** is a new class of distributed hash tables in which **routing tables learn from traffic**.
+**N-DHT** is a new class of distributed hash tables in which **routing tables learn from traffic**.
 
 Every peer maintains a *synaptome* — a bounded set of weighted connections to other peers. Each connection carries a vitality score (`weight × recency`). Successful routing reinforces the weights; unused connections decay. The routing table evolves toward the traffic the network actually carries, the way a cortical region's synaptic structure is shaped by the sensory input it processes.
 
@@ -162,7 +162,7 @@ Every peer maintains a *synaptome* — a bounded set of weighted connections to 
 
 | Element | What it is |
 |---|---|
-| **N/DHT** | The protocol class — neuromorphic learning applied to routing |
+| **N-DHT** | The protocol class — neuromorphic learning applied to routing |
 | **Synaptome** | The vitality-scored routing table at each node (≤ 50 connections) |
 | **Vitality** | `weight × recency` — Hebbian-reinforced score; the single admission gate |
 | **Axonal tree** | Built-in publish/subscribe primitive; routed subscribe + reverse-path multicast |
@@ -197,11 +197,11 @@ Every peer maintains a *synaptome* — a bounded set of weighted connections to 
 
 ## What this enables
 
-N/DHT is general-purpose infrastructure. Real-world applications across many domains:
+N-DHT is general-purpose infrastructure. Real-world applications across many domains:
 
 <br>
 
-| Domain | What N/DHT enables |
+| Domain | What N-DHT enables |
 |---|---|
 | **Privacy-respecting messaging** | Signal-class infrastructure with no central server — no metadata trail, no custodian to compel |
 | **Decentralized identity** | DID/ENS routing without identity intermediaries; verifiable credentials peer-to-peer |
@@ -220,7 +220,7 @@ N/DHT is general-purpose infrastructure. Real-world applications across many dom
 
 ## Why this is real, not slideware
 
-Five things separate N/DHT from the long tail of "decentralized" projects that never ship:
+Five things separate N-DHT from the long tail of "decentralized" projects that never ship:
 
 <br>
 
@@ -240,7 +240,7 @@ Five things separate N/DHT from the long tail of "decentralized" projects that n
 
 ## How it gets funded
 
-N/DHT is **open-source and non-profit**. The funding model is deliberate:
+N-DHT is **open-source and non-profit**. The funding model is deliberate:
 
 <br>
 

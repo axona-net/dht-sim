@@ -32,6 +32,12 @@
 \begin{document}
 
 \maketitle
+% v0.3.48: tufte-handout's running-header processing applies SOUL
+% letterspacing via \MakeTextLowercase, which fails on certain
+% page-break points in this document. Switching to a plain pagestyle
+% bypasses the letterspaced running heads but keeps the typography.
+\pagestyle{plain}
+\thispagestyle{plain}
 
 % --------------------------------------------------------------------
 % Epigraph
@@ -41,7 +47,12 @@
   \normalfont\textsc{\footnotesize Donald Hebb} \,$\cdot$\, 1949
 \end{quote}
 
-\vspace{1.5em}
+\vspace{0.4em}
+\begin{flushright}
+\textit{\footnotesize An N-DHT Explainer\quad v0.3.48\quad 2026-05-05}
+\end{flushright}
+
+\vspace{1em}
 
 % =====================================================================
 % I. THE PROBLEM
@@ -67,7 +78,7 @@ There's just one problem.
 % =====================================================================
 \section{The Latency Tax}
 
-\newthought{Twenty hops} sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart---roughly 100~milliseconds for a round trip.
+\newthought{Twenty hops} sounds fast, but each hop sends a message between two random computers somewhere on Earth. If your peers are scattered randomly across the globe, the average pair sits about half the planet apart---roughly 100~milliseconds one-way.
 
 20 hops $\times$ 100~ms $=$ \textbf{2 seconds.} To find something. Every time.
 
@@ -283,7 +294,7 @@ NH-1 replaces all of that with the single vitality function plus \textbf{12 rule
 \textbf{2. Learn} --- strengthen what works. Four mechanisms run on every successful lookup:
 
 \begin{itemize}
-  \item \textbf{LTP}: every connection on the successful path gets stronger.
+  \item \textbf{LTP}: every connection on a \emph{fast} successful path (one that beats the running average of recent path latencies) gets stronger.
   \item \textbf{Hop caching}: every intermediate node along the path remembers the \emph{destination}, not just the next hop. Next time, the path is shorter.
   \item \textbf{Triadic closure}: if you keep seeing peer A relay messages to peer C through you, you introduce them directly. The triangle ``A--you--C'' becomes a direct edge ``A--C.''\marginnote{Named after social network theory: dense triangles emerge in any network shaped by interaction.}
   \item \textbf{Incoming promotion}: peers who keep reaching out to you become candidates for \emph{your} routing table. Passive learning---the network notices who's interested in you, not just who you're interested in.
@@ -357,30 +368,30 @@ For 20 years, no published DHT had been measured at this floor. The best impleme
   \node[font=\scriptsize\itshape, color=inkmuted, anchor=west] at (axis cs:3.05,207) {$3\delta$ floor};
 
   % K-DHT (light gray, climbs)
-  \addplot[gray, line width=0.9pt, mark=*, mark size=1.5pt] coordinates {(1,410) (2,503) (3,548)};
-  \node[font=\scriptsize, color=inkmuted, anchor=west] at (axis cs:3.05,548) {Kademlia (K-DHT)};
+  \addplot[gray, line width=0.9pt, mark=*, mark size=1.5pt] coordinates {(1,410) (2,512) (3,550)};
+  \node[font=\scriptsize, color=inkmuted, anchor=west] at (axis cs:3.05,550) {Kademlia (K-DHT)};
   \node[font=\scriptsize, color=inkmuted, anchor=west] at (axis cs:3.05,520) {scales the wrong way};
   \node[font=\scriptsize\itshape, color=inkmuted, anchor=south] at (axis cs:1,418) {410};
 
   % G-DHT
-  \addplot[gray!70!black, line width=0.9pt, mark=*, mark size=1.5pt] coordinates {(1,268) (2,287) (3,291)};
-  \node[font=\scriptsize, color=inkmuted, anchor=west] at (axis cs:3.05,291) {G-DHT};
+  \addplot[gray!70!black, line width=0.9pt, mark=*, mark size=1.5pt] coordinates {(1,268) (2,283) (3,296)};
+  \node[font=\scriptsize, color=inkmuted, anchor=west] at (axis cs:3.05,296) {G-DHT};
 
   % NH-1 (accent)
-  \addplot[rust, line width=1.4pt, mark=*, mark size=2pt] coordinates {(1,240) (2,254) (3,264)};
-  \node[font=\scriptsize, color=rust, anchor=west] at (axis cs:3.05,264) {NH-1};
+  \addplot[rust, line width=1.4pt, mark=*, mark size=2pt] coordinates {(1,240) (2,261) (3,273)};
+  \node[font=\scriptsize, color=rust, anchor=west] at (axis cs:3.05,273) {NH-1};
 
   % NX-17 (dark)
-  \addplot[gray!50!black, line width=0.9pt, mark=*, mark size=1.5pt] coordinates {(1,215) (2,241) (3,243)};
-  \node[font=\scriptsize, color=inkmuted, anchor=west] at (axis cs:3.05,243) {NX-17};
+  \addplot[gray!50!black, line width=0.9pt, mark=*, mark size=1.5pt] coordinates {(1,215) (2,237) (3,249)};
+  \node[font=\scriptsize, color=inkmuted, anchor=west] at (axis cs:3.05,249) {NX-17};
 
 \end{axis}
 \end{tikzpicture}
-\caption[Latency vs.\ network size]{Global lookup latency versus network size, plotted against the Dabek $3\delta$ analytical floor (gray dashed). Kademlia \emph{worsens} as the network grows---more hops, each at full pairwise latency, each contributing fully to the total. NX-17 hugs the floor at $1.18\times$; NH-1 at $1.28\times$. The remaining 18\% overhead matches what the geometric series predicts for $\sim$4.5 hops where an ideal protocol takes 3.}
+\caption[Latency vs.\ network size]{Global lookup latency versus network size, plotted against the Dabek $3\delta$ analytical floor (gray dashed). Kademlia \emph{worsens} as the network grows---more hops, each at full pairwise latency, each contributing fully to the total. NX-17 hugs the floor at $1.16\times$; NH-1 at $1.27\times$. The remaining $\sim$20\% overhead matches what the geometric series predicts for 4--5 hops where an ideal protocol takes 3.}
 \label{fig:floor}
 \end{figure*}
 
-NH-1's predecessor, NX-17, hits \textbf{$1.18\times$ the floor} at 25{,}000 nodes. NH-1 hits \textbf{$1.28\times$}. They sit at the theoretical limit. The remaining 18\% overhead is structural---they take about 4.5 hops where an ideal protocol would take 3, and each ``extra'' hop costs about $\delta/2$, exactly as the geometric series predicts.
+NH-1's predecessor, NX-17, hits \textbf{$1.16\times$ the floor} at 25{,}000 nodes. NH-1 hits \textbf{$1.27\times$}. They sit at the theoretical limit. The remaining $\sim$20\% overhead is structural---they take about 4 to 5 hops where an ideal protocol would take 3, and each ``extra'' hop costs about $\delta/2$, exactly as the geometric series predicts.
 
 For comparison, plain Kademlia \emph{gets worse} as the network grows: $2.01\times$ the floor at 5{,}000 nodes, $2.65\times$ at 50{,}000. It scales the wrong way.
 
