@@ -1,4 +1,4 @@
-# Building a Smarter Internet: How Brain Science Helped Speed Up Peer-to-Peer Networks
+# Neuromorphic Distributed Hash Table
 
 *An N-DHT explainer · v0.3.48 · 2026-05-05 · David A. Smith · YZ.social*
 
