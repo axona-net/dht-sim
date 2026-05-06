@@ -171,7 +171,7 @@ There's just one problem.
 
 For real-time applications---voice calls, online games, live messaging, push notifications---2 seconds is unusable. The math says routing is logarithmic, which is fast; the physics says each step is slow because peers are far apart. That's the tension.
 
-This paper attacks the latency problem with two ideas, one of which is borrowed straight from neuroscience.
+The protocol attacks the latency problem with two ideas, one of which is borrowed straight from neuroscience.
 
 % =====================================================================
 % IV. G-DHT
@@ -241,7 +241,7 @@ The cost: nodes can lie about where they are. This is a ``cooperative trust'' as
 % =====================================================================
 \section{A Network That Learns Like a Brain}
 
-\newthought{The second idea}, \textbf{NH-1}, is the heart of the paper. It asks a different question:
+\newthought{The second idea}, \textbf{NH-1}, is the heart of the protocol. It asks a different question:
 
 \begin{quote}
 \itshape What if, instead of engineering shortcuts into the network, the network learned its own shortcuts based on which paths actually work?
@@ -426,7 +426,7 @@ Result: under 5\% churn (5\% of nodes joining and leaving constantly), NH-1 stil
 
 The proof is geometric. Each hop in a DHT covers half the remaining distance. So the total time is $\delta + \delta/2 + \delta/4 + \delta/8 + \cdots$ which converges to $2\delta$. Add one more hop for final delivery and you get $3\delta$. No matter how clever your routing, no matter how big your network, you can't beat this.
 
-For 20 years, no published DHT had been measured at this floor. The best implementations got to maybe $2\times$ the floor.
+For two decades, no published DHT had been measured at this floor. The best implementations got to maybe $2\times$ the floor.
 
 % --- Figure 3: Dabek floor chart ----------------------------------
 \begin{figure*}[h]
@@ -489,7 +489,7 @@ For comparison, plain Kademlia \emph{gets worse} as the network grows: $2.01\tim
 
 \newthought{A skeptic} would push back: ``Sure, but maybe the geographic prefix is doing all the real work. The brain-inspired learning is gravy.''
 
-The paper runs an \textbf{ablation study} to answer this.\marginnote{An ablation study removes one feature and re-runs everything to see what that feature actually contributed. It's the cleanest way to attribute a result to a specific mechanism.} Strip the geographic prefix entirely---random IDs again---and re-run the comparison.
+An \textbf{ablation study} answers this.\marginnote{An ablation study removes one feature and re-runs everything to see what that feature actually contributed. It's the cleanest way to attribute a result to a specific mechanism.} Strip the geographic prefix entirely---random IDs again---and re-run the comparison.
 
 Result: with \textbf{zero geographic information}, NX-17 still routes \textbf{26\% faster than Kademlia}, and NH-1 routes \textbf{8\% faster}. The learning is doing real work, not sharpening pre-existing geographic structure.
 
@@ -500,7 +500,7 @@ This is the kind of clean control experiment that should accompany any claim of 
 % =====================================================================
 \section{Slice World}
 
-\newthought{The sharpest} demonstration is what the paper calls the \textbf{Slice World} test. The network gets cut almost in half---Eastern hemisphere on one side, Western on the other, connected only through a \emph{single node} near Hawaii. Every other cross-hemisphere connection is severed.
+\newthought{The sharpest} demonstration is the \textbf{Slice World} test. The network gets cut almost in half---Eastern hemisphere on one side, Western on the other, connected only through a \emph{single node} near Hawaii. Every other cross-hemisphere connection is severed.
 
 Can the protocol still route messages between hemispheres?
 
@@ -657,7 +657,7 @@ The protocol doesn't keep finding the bridge---it \emph{uses} the bridge to rebu
 % =====================================================================
 \section{What the Simulator Doesn't Model}
 
-\newthought{The paper} is explicit about what \emph{isn't} measured.
+\newthought{It is worth} being explicit about what \emph{isn't} measured.
 
 The simulator runs about 25{,}000 lines of JavaScript code modeling the network, but it abstracts away several real-world frictions:
 
@@ -668,7 +668,7 @@ The simulator runs about 25{,}000 lines of JavaScript code modeling the network,
   \item \textbf{Latency jitter.} Real round-trip times vary by $\pm$30\% from queuing and congestion. The simulator's latencies are clean and monotone.
 \end{itemize}
 
-These get called out in a ``red team'' appendix.\sidenote{The companion red-team analysis ranks thirteen deployment-relevant gaps by severity and time-to-fix.} The paper's results show \textbf{the brain working perfectly}; the \emph{body}---actually deploying it on real internet conditions---still needs work.
+These get called out in a separate red-team analysis.\sidenote{The companion red-team analysis ranks thirteen deployment-relevant gaps by severity and time-to-fix.} The protocol's measured results show \textbf{the brain working perfectly}; the \emph{body}---actually deploying it on real internet conditions---still needs work.
 
 % =====================================================================
 % XII. PLASTICITY OF PLASTICITY
@@ -679,7 +679,7 @@ These get called out in a ``red team'' appendix.\sidenote{The companion red-team
 
 NH-1's parameters---decay rate, protection window, exploration rate---are currently hand-picked constants. A metaplastic version would let the network self-tune them based on local conditions. A peer in a stable region would adapt slowly. A peer in a high-churn region would adapt aggressively. The user would set one knob---``I want my lookup failure rate below 1\%''---and the network would tune itself to hit it.
 
-That's the next layer of brain-inspired self-organization, and the natural endpoint of the path the paper lays out.
+That's the next layer of brain-inspired self-organization, and the natural endpoint of the path the protocol lays out.
 
 % =====================================================================
 % XIII. WHY THIS MATTERS
@@ -692,7 +692,7 @@ That's the next layer of brain-inspired self-organization, and the natural endpo
 
 \textbf{The brain's hundreds-of-millions-of-years-old solution maps directly onto network routing.} Strengthen what works. Decay what doesn't. Protect recent learning briefly so it isn't immediately overwritten. Occasionally explore. The result is a network whose structure is shaped by the traffic it carries, rather than by rules an engineer guessed at.
 
-This isn't just a faster DHT. It's a demonstration that adaptive systems with the right learning rules find their own structure---that decades of brain research can collapse a 44-parameter system into a 12-parameter one, and that you can hit a theoretical limit that's stood for 20 years by importing the right idea from a different field.
+This isn't just a faster DHT. It's a demonstration that adaptive systems with the right learning rules find their own structure---that decades of brain research can collapse a 44-parameter system into a 12-parameter one, and that you can hit a theoretical limit that's stood for two decades by importing the right idea from a different field.
 
 Code, data, simulator, and the red-team analysis criticizing it are open source.
 

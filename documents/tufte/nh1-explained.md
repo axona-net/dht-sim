@@ -42,7 +42,7 @@ There's just one problem.
 
 For real-time applications — voice calls, online games, live messaging, push notifications — 2 seconds is unusable. The math says routing is logarithmic, which is fast; the physics says each step is slow because peers are far apart. That's the tension.
 
-This paper, by David A. Smith, attacks the latency problem with two ideas, one of which is borrowed straight from neuroscience.
+The protocol attacks the latency problem with two ideas, one of which is borrowed straight from neuroscience.
 
 ## Idea #1: Put the Address in the Address
 
@@ -52,7 +52,7 @@ Kademlia node IDs are random. A node in Tokyo and a node in Berlin have IDs with
 
 G-DHT changes one thing: the **first 8 bits** of every node ID encode where the node says it is on Earth.
 
-Smith uses Google's S2 library, which divides Earth's surface into cells along a curve called a **Hilbert curve**. Its useful property: places near each other on Earth get cell numbers near each other. So XORing two S2 cell numbers gives a small result for nearby places and a large one for distant places.
+G-DHT uses Google's S2 library, which divides Earth's surface into cells along a curve called a **Hilbert curve**. Its useful property: places near each other on Earth get cell numbers near each other. So XORing two S2 cell numbers gives a small result for nearby places and a large one for distant places.
 
 Now your node ID looks like: `[8-bit geographic cell][56-bit hash of your public key]`.
 
@@ -60,15 +60,15 @@ The routing algorithm doesn't change at all, but XOR distance now approximately 
 
 Total: about 91 ms instead of 2 seconds. **Roughly 20× faster** for regional traffic, just from changing the *structure* of the addresses.
 
-The cost: nodes can lie about where they are. Smith acknowledges this — it's a "cooperative trust" assumption. Mitigations exist, but for now G-DHT trades some defense against location-spoofing for a large speedup.
+The cost: nodes can lie about where they are. This is a "cooperative trust" assumption. Mitigations exist, but for now G-DHT trades some defense against location-spoofing for a large speedup.
 
 ## Idea #2: A Network That Learns Like a Brain
 
-The second idea, **NH-1**, is the heart of the paper. It asks a different question:
+The second idea, **NH-1**, is the heart of the protocol. It asks a different question:
 
 **What if, instead of *engineering* shortcuts into the network, the network *learned* its own shortcuts based on which paths actually work?**
 
-To explain how, Smith reaches for a strange-but-perfect analogy: the human brain.
+The strange-but-perfect analogy: the human brain.
 
 ### The Engineering Problem That Brains Already Solved
 
@@ -104,7 +104,7 @@ Every artificial neural network you've ever heard of — every part of ChatGPT, 
 
 ### Translating Neurons into Network Routing
 
-Smith's claim is that the brain's mechanism translates *literally* to peer-to-peer routing — no metaphor needed:
+The brain's mechanism translates *literally* to peer-to-peer routing — no metaphor needed:
 
 | In the brain... | In NH-1... |
 |---|---|
@@ -183,7 +183,7 @@ In 2004, Frank Dabek and colleagues proved a beautiful, depressing result: **no 
 
 The proof is geometric. Each hop in a DHT covers half the remaining distance. So the total time is δ + δ/2 + δ/4 + δ/8 + ... which converges to **2δ**. Add one more hop for final delivery and you get 3δ. No matter how clever your routing, no matter how big your network, you can't beat this.
 
-For 20 years, no published DHT had been measured at this floor. The best implementations got to maybe 2× the floor.
+For two decades, no published DHT had been measured at this floor. The best implementations got to maybe 2× the floor.
 
 NH-1's predecessor, NX-17, hits **1.16× the floor** at 25,000 nodes. NH-1 hits **1.27×**. They sit at the theoretical limit. The remaining ~20% overhead is structural — they take about 4 to 5 hops where an ideal protocol would take 3, and each "extra" hop costs about δ/2, exactly as the geometric series predicts.
 
@@ -193,7 +193,7 @@ For comparison, plain Kademlia *gets worse* as the network grows: 2.01× the flo
 
 A skeptic would push back: "Sure, but maybe the geographic prefix is doing all the real work. The brain-inspired learning is gravy."
 
-Smith ran an **ablation study** to answer this. (An ablation study is when you remove one feature and re-run everything to see what that feature actually contributed.) He stripped the geographic prefix entirely — random IDs again — and re-ran the comparison.
+An **ablation study** answers this. (An ablation study removes one feature and re-runs everything to see what that feature actually contributed.) Strip the geographic prefix entirely — random IDs again — and re-run the comparison.
 
 Result: with **zero geographic information**, NX-17 still routes **26% faster than Kademlia**, and NH-1 routes **8% faster**. The learning is doing real work, not sharpening pre-existing geographic structure.
 
@@ -201,7 +201,7 @@ This is the kind of clean control experiment that should accompany any claim of 
 
 ## The Slice World Test: Healing a Broken Network
 
-The sharpest demonstration is what Smith calls the **Slice World** test. The network gets cut almost in half — Eastern hemisphere on one side, Western on the other, connected only through a *single node* near Hawaii. Every other cross-hemisphere connection is severed.
+The sharpest demonstration is the **Slice World** test. The network gets cut almost in half — Eastern hemisphere on one side, Western on the other, connected only through a *single node* near Hawaii. Every other cross-hemisphere connection is severed.
 
 Can the protocol still route messages between hemispheres?
 
@@ -215,7 +215,7 @@ The protocol doesn't keep finding the bridge — it *uses* the bridge to rebuild
 
 ## The Honest Footnotes
 
-Smith is explicit about what *isn't* measured.
+It is worth being explicit about what *isn't* measured.
 
 The simulator runs about 25,000 lines of JavaScript code modeling the network, but it abstracts away several real-world frictions:
 
@@ -224,7 +224,7 @@ The simulator runs about 25,000 lines of JavaScript code modeling the network, b
 - **Bandwidth saturation.** A popular peer will get overloaded. The simulator's latency model doesn't capture this. Real systems risk "success disasters" — everyone routes through the fastest peer until it collapses, then abandons it, then floods back when it recovers, in oscillations that are hard to dampen.
 - **Latency jitter.** Real round-trip times vary by ±30% from queuing and congestion. The simulator's latencies are clean and monotone.
 
-Smith calls these out in a "red team" appendix. The paper's results show **the brain working perfectly**; the *body* — actually deploying it on real internet conditions — still needs work.
+These get called out in a separate red-team analysis. The protocol's measured results show **the brain working perfectly**; the *body* — actually deploying it on real internet conditions — still needs work.
 
 ## What's Next: Plasticity of Plasticity
 
@@ -232,7 +232,7 @@ The most interesting future direction is **metaplasticity** — plasticity of pl
 
 NH-1's parameters — decay rate, protection window, exploration rate — are currently hand-picked constants. A metaplastic version would let the network self-tune them based on local conditions. A peer in a stable region would adapt slowly. A peer in a high-churn region would adapt aggressively. The user would set one knob — "I want my lookup failure rate below 1%" — and the network would tune itself to hit it.
 
-That's the next layer of brain-inspired self-organization, and the natural endpoint of the path the paper lays out.
+That's the next layer of brain-inspired self-organization, and the natural endpoint of the path the protocol lays out.
 
 ## Why This Matters
 
@@ -242,6 +242,6 @@ Step back from the technical details. The big idea:
 
 **The brain's hundreds-of-millions-of-years-old solution maps directly onto network routing.** Strengthen what works. Decay what doesn't. Protect recent learning briefly so it isn't immediately overwritten. Occasionally explore. The result is a network whose structure is shaped by the traffic it carries, rather than by rules an engineer guessed at.
 
-This isn't just a faster DHT. It's a demonstration that adaptive systems with the right learning rules find their own structure — that decades of brain research can collapse a 44-parameter system into a 12-parameter one, and that you can hit a theoretical limit that's stood for 20 years by importing the right idea from a different field.
+This isn't just a faster DHT. It's a demonstration that adaptive systems with the right learning rules find their own structure — that decades of brain research can collapse a 44-parameter system into a 12-parameter one, and that you can hit a theoretical limit that's stood for two decades by importing the right idea from a different field.
 
 Code, data, simulator, and the red-team analysis criticizing it are open source.
