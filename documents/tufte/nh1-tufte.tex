@@ -42,7 +42,6 @@
 
 \begin{document}
 
-\maketitle
 % v0.3.48: tufte-handout's running-header processing applies SOUL
 % letterspacing via \MakeTextLowercase, which fails on certain
 % page-break points in this document. We use a fancyhdr-based style
@@ -53,26 +52,97 @@
   \renewcommand{\headrulewidth}{0pt}%
   \fancyfoot[C]{\thepage}%
 }
-\pagestyle{ndhtplain}
-\thispagestyle{ndhtplain}
 
 % --------------------------------------------------------------------
-% Epigraph
+% Custom title page (mirrors the N-DHT whitepaper's half-title)
+% --------------------------------------------------------------------
+\thispagestyle{empty}
+\null\vfill
+\begin{center}
+{\fontsize{48}{52}\selectfont \textsc{N-DHT}\par}
+\vspace{0.6em}
+{\Large\itshape Neuromorphic Distributed Hash Table\par}
+\vspace{4em}
+{\large David A.~Smith\par}
+{\itshape\small YZ.social\par}
+\vspace{2em}
+{\small An N-DHT Explainer \quad v0.3.48 \quad 2026-05-05\par}
+\end{center}
+\vfill
+\null
+\newpage
+
+% --------------------------------------------------------------------
+% Mission epigraph page
+% --------------------------------------------------------------------
+\thispagestyle{empty}
+\null\vfill
+\begin{flushright}
+\itshape The technology is shaped by the mission.\par
+\end{flushright}
+\vfill
+\null\newpage
+
+% --------------------------------------------------------------------
+% Body opens with page numbers
+% --------------------------------------------------------------------
+\pagestyle{ndhtplain}
+\thispagestyle{ndhtplain}
+\setcounter{page}{1}
+
+% --------------------------------------------------------------------
+% Hebb body epigraph
 % --------------------------------------------------------------------
 \begin{quote}
   \itshape Neurons that fire together, wire together.\\[0.3em]
   \normalfont\textsc{\footnotesize Donald Hebb} \,$\cdot$\, 1949
 \end{quote}
 
-\vspace{0.4em}
-\begin{flushright}
-\textit{\footnotesize An N-DHT Explainer\quad v0.3.48\quad 2026-05-05}
-\end{flushright}
-
 \vspace{1em}
 
 % =====================================================================
-% I. THE PROBLEM
+% I. THE MISSION  (copied from N-DHT whitepaper, Chapter 1)
+% =====================================================================
+\section{The Mission}
+
+\newthought{N-DHT is the engineering substrate} for a privacy-first
+decentralized internet. The protocol is designed for a specific job:
+to carry the routing and publish/subscribe workload of that internet,
+on consumer devices, in real browsers, against the actual physics of
+the network it runs on. Everything else about the design---the
+architecture, the algorithms, the simulator, the red team, the
+deployment path, the application analysis---is shaped by that job.
+
+The job is hard for an unfamiliar reason. The internet of 2026 has
+no shortage of clever distributed systems, but almost all of them
+are \emph{distributed underneath, central on top}: a constellation
+of servers that the user reaches through a single corporate
+gateway.\sidenote{The pattern is so common we have stopped noticing
+it. CDNs, federated identity providers, cloud auth, app stores, the
+``serverless'' frameworks that run on three or four hyperscaler
+clouds---all examples of distribution-as-implementation-detail
+sitting under a single point of decision.} A real peer-to-peer
+internet---one where two strangers can find each other, exchange a
+message, and route around an outage without asking permission of any
+intermediary---requires a different kind of substrate. The substrate
+must be \emph{federation-free at every layer}: addressing, routing,
+discovery, group communication, eventual delivery under churn.
+
+\textbf{A distributed hash table is the addressing layer of that
+substrate.} Without one, every other peer-to-peer primitive
+collapses back into a centralized service: there is no way to find
+the user you want to talk to, no way to discover the file you want
+to download, no way to subscribe to the channel you want to follow,
+without somebody telling you where it lives. With one, those
+operations are mechanical: the network itself routes you to the
+right peer.
+
+The mission is to build the addressing layer that a real
+peer-to-peer internet needs. The protocol described here is what
+that addressing layer looks like.
+
+% =====================================================================
+% II. THE PROBLEM
 % =====================================================================
 \section{The Problem}
 
@@ -91,7 +161,7 @@ The math is clean: each step at least \emph{halves} the remaining distance, so y
 There's just one problem.
 
 % =====================================================================
-% II. THE LATENCY TAX
+% III. THE LATENCY TAX
 % =====================================================================
 \section{The Latency Tax}
 
@@ -104,7 +174,7 @@ For real-time applications---voice calls, online games, live messaging, push not
 This paper attacks the latency problem with two ideas, one of which is borrowed straight from neuroscience.
 
 % =====================================================================
-% III. G-DHT
+% IV. G-DHT
 % =====================================================================
 \section{Putting the Address in the Address}
 
@@ -167,7 +237,7 @@ Total: about 91~ms instead of 2~seconds. \textbf{Roughly 20$\times$ faster} for 
 The cost: nodes can lie about where they are. This is a ``cooperative trust'' assumption.\marginnote{An attacker who falsifies their geographic prefix degrades the locality benefit but not routing correctness. Mitigations exist---learned coordinates, geographic proof-of-work, IP--ASN binding---but G-DHT trades some defense against location-spoofing for a large speedup.} Mitigations exist, but for now G-DHT trades some defense against location-spoofing for a large speedup.
 
 % =====================================================================
-% IV. NH-1
+% V. NH-1
 % =====================================================================
 \section{A Network That Learns Like a Brain}
 
@@ -300,7 +370,7 @@ The previous version of this system (called NX-17) had \textbf{18 different rule
 NH-1 replaces all of that with the single vitality function plus \textbf{12 rules and 12 parameters}. Letting the connections themselves learn through reinforcement collapses a tangle of rules into one principle.
 
 % =====================================================================
-% V. THE FIVE OPERATIONS
+% VI. THE FIVE OPERATIONS
 % =====================================================================
 \section{The Five Operations}
 
@@ -326,7 +396,7 @@ NH-1 replaces all of that with the single vitality function plus \textbf{12 rule
 The template is universal: act, learn from feedback, forget the obsolete, occasionally try something new, maintain basic structure. This is how any good adaptive system has to work.
 
 % =====================================================================
-% VI. AXONAL PUB/SUB
+% VII. AXONAL PUB/SUB
 % =====================================================================
 \section{Axonal Pub/Sub}
 
@@ -348,7 +418,7 @@ That part is standard. The useful property is that \textbf{the tree heals itself
 Result: under 5\% churn (5\% of nodes joining and leaving constantly), NH-1 still delivers 100\% of messages. After three refresh cycles, it recovers from any disruption.
 
 % =====================================================================
-% VII. THE THEORETICAL FLOOR
+% VIII. THE THEORETICAL FLOOR
 % =====================================================================
 \section{Hitting the Theoretical Floor}
 
@@ -413,7 +483,7 @@ NH-1's predecessor, NX-17, hits \textbf{$1.16\times$ the floor} at 25{,}000 node
 For comparison, plain Kademlia \emph{gets worse} as the network grows: $2.01\times$ the floor at 5{,}000 nodes, $2.65\times$ at 50{,}000. It scales the wrong way.
 
 % =====================================================================
-% VIII. ABLATION
+% IX. ABLATION
 % =====================================================================
 \section{Is It the Learning, or the Geography?}
 
@@ -426,7 +496,7 @@ Result: with \textbf{zero geographic information}, NX-17 still routes \textbf{26
 This is the kind of clean control experiment that should accompany any claim of this kind.
 
 % =====================================================================
-% IX. SLICE WORLD
+% X. SLICE WORLD
 % =====================================================================
 \section{Slice World}
 
@@ -583,7 +653,7 @@ The bridge becomes a \textbf{seed crystal}. After just 10 lookups through the pa
 The protocol doesn't keep finding the bridge---it \emph{uses} the bridge to rebuild the bridges that were cut. Like a brain forming new pathways around damaged tissue.
 
 % =====================================================================
-% X. THE HONEST FOOTNOTES
+% XI. THE HONEST FOOTNOTES
 % =====================================================================
 \section{What the Simulator Doesn't Model}
 
@@ -601,7 +671,7 @@ The simulator runs about 25{,}000 lines of JavaScript code modeling the network,
 These get called out in a ``red team'' appendix.\sidenote{The companion red-team analysis ranks thirteen deployment-relevant gaps by severity and time-to-fix.} The paper's results show \textbf{the brain working perfectly}; the \emph{body}---actually deploying it on real internet conditions---still needs work.
 
 % =====================================================================
-% XI. PLASTICITY OF PLASTICITY
+% XII. PLASTICITY OF PLASTICITY
 % =====================================================================
 \section{Plasticity of Plasticity}
 
@@ -612,7 +682,7 @@ NH-1's parameters---decay rate, protection window, exploration rate---are curren
 That's the next layer of brain-inspired self-organization, and the natural endpoint of the path the paper lays out.
 
 % =====================================================================
-% XII. WHY THIS MATTERS
+% XIII. WHY THIS MATTERS
 % =====================================================================
 \section{Why This Matters}
 

@@ -2,6 +2,18 @@
 
 *An N-DHT explainer · v0.3.48 · 2026-05-05 · David A. Smith · YZ.social*
 
+> *The technology is shaped by the mission.*
+
+## The Mission
+
+N-DHT is the engineering substrate for a privacy-first decentralized internet. The protocol is designed for a specific job: to carry the routing and publish/subscribe workload of that internet, on consumer devices, in real browsers, against the actual physics of the network it runs on. Everything else about the design — the architecture, the algorithms, the simulator, the red team, the deployment path, the application analysis — is shaped by that job.
+
+The job is hard for an unfamiliar reason. The internet of 2026 has no shortage of clever distributed systems, but almost all of them are *distributed underneath, central on top*: a constellation of servers that the user reaches through a single corporate gateway. (The pattern is so common we have stopped noticing it. CDNs, federated identity providers, cloud auth, app stores, the "serverless" frameworks that run on three or four hyperscaler clouds — all examples of distribution-as-implementation-detail sitting under a single point of decision.) A real peer-to-peer internet — one where two strangers can find each other, exchange a message, and route around an outage without asking permission of any intermediary — requires a different kind of substrate. The substrate must be *federation-free at every layer*: addressing, routing, discovery, group communication, eventual delivery under churn.
+
+**A distributed hash table is the addressing layer of that substrate.** Without one, every other peer-to-peer primitive collapses back into a centralized service: there is no way to find the user you want to talk to, no way to discover the file you want to download, no way to subscribe to the channel you want to follow, without somebody telling you where it lives. With one, those operations are mechanical: the network itself routes you to the right peer.
+
+The mission is to build the addressing layer that a real peer-to-peer internet needs. The protocol described here is what that addressing layer looks like.
+
 ## The Problem: Finding Stuff on a Network Without a Boss
 
 Imagine you and a million strangers each hold one piece of a giant jigsaw puzzle. Someone walks up and asks for piece #438,291. How do you find it?
