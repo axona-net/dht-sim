@@ -64,7 +64,7 @@ The cost: nodes can lie about where they are. This is a "cooperative trust" assu
 
 ## Idea #2: A Network That Learns Like a Brain
 
-The second idea, **NH-1**, is the heart of the protocol. It asks a different question:
+The second idea — neuromorphic routing, which we call **N-DHT** — is the heart of the protocol. It asks a different question:
 
 **What if, instead of *engineering* shortcuts into the network, the network *learned* its own shortcuts based on which paths actually work?**
 
@@ -104,7 +104,11 @@ Every artificial neural network you've ever heard of — every part of ChatGPT, 
 
 ### Translating Neurons into Network Routing
 
-The brain's mechanism translates *literally* to peer-to-peer routing — no metaphor needed:
+The brain's mechanism translates *literally* to peer-to-peer routing — no metaphor needed.
+
+**NH-1 is the current state-of-the-art N-DHT implementation.** It is the result of a long sequence of experiments (NX-1 through NX-17) collapsing into twelve rules and twelve parameters governed by a single biology-derived equation. When this document refers to a specific number — a parameter value, a measured benchmark, a rule count — it is a number from NH-1. When it refers to the family of neuromorphic routing protocols generically, it says **N-DHT**.
+
+The mapping from neurons to NH-1's routing logic:
 
 | In the brain... | In NH-1... |
 |---|---|
@@ -141,9 +145,9 @@ NH-1 replaces all of that with the single vitality function plus **12 rules and 
 
 ## The Five Operations
 
-Every behavior in NH-1 falls into one of five categories — and the categories mirror how *any* adaptive system works:
+Every behavior in N-DHT falls into one of five categories — and the categories mirror how *any* adaptive system works:
 
-**1. NAVIGATE** — pick the next hop for a lookup. NH-1 scores each candidate by combining XOR distance progress, learned weight, and observed latency. The latency factor halves the score every 100 ms — so a peer that's mathematically a *bit* further but physically a *lot* closer wins.
+**1. NAVIGATE** — pick the next hop for a lookup. N-DHT scores each candidate by combining XOR distance progress, learned weight, and observed latency. The latency factor halves the score every 100 ms — so a peer that's mathematically a *bit* further but physically a *lot* closer wins.
 
 **2. LEARN** — strengthen what works. Four learning mechanisms run on every successful lookup:
 
@@ -154,7 +158,7 @@ Every behavior in NH-1 falls into one of five categories — and the categories 
 
 **3. FORGET** — decay everything that isn't reinforced; evict by vitality.
 
-**4. EXPLORE** — inject occasional randomness. A purely greedy router would lock onto the first decent shortcut and never find better ones. NH-1 has two exploration tricks: a "temperature" that decays over time but spikes when something breaks (heat up when surprised, cool down when stable), and an "epsilon-greedy" rule that picks a random first hop 5% of the time, just to keep options alive.
+**4. EXPLORE** — inject occasional randomness. A purely greedy router would lock onto the first decent shortcut and never find better ones. N-DHT has two exploration tricks: a "temperature" that decays over time but spikes when something breaks (heat up when surprised, cool down when stable), and an "epsilon-greedy" rule that picks a random first hop 5% of the time, just to keep options alive.
 
 **5. STRUCTURE** — bootstrap and maintain the basic shape of the network when new nodes join.
 
@@ -166,7 +170,7 @@ A real peer-to-peer network needs more than just "find the node holding key X." 
 
 This is publish/subscribe, or "pub/sub." Think of how YouTube notifies subscribers of a new video — except without YouTube being in the middle.
 
-In neuroscience, the *output* of a neuron — the long branching cable that delivers signals to many downstream targets — is called an **axon**. NH-1 builds axonal delivery trees:
+In neuroscience, the *output* of a neuron — the long branching cable that delivers signals to many downstream targets — is called an **axon**. N-DHT builds axonal delivery trees:
 
 - A topic has an ID, derived from the publisher's location and the topic name.
 - Subscribers send a message routed through the DHT toward that topic ID.
@@ -221,7 +225,7 @@ The simulator runs about 25,000 lines of JavaScript code modeling the network, b
 
 - **Connection setup time.** Real WebRTC connections take 1.5–3 seconds to negotiate. The simulator treats them as instant, so real-world recovery from partitions will be slower than the simulator suggests.
 - **Timeout windows.** Real RPCs to dead nodes stall for seconds before failing. The simulator detects death instantly.
-- **Bandwidth saturation.** A popular peer will get overloaded. The simulator's latency model doesn't capture this. Real systems risk "success disasters" — everyone routes through the fastest peer until it collapses, then abandons it, then floods back when it recovers, in oscillations that are hard to dampen.
+- **Bandwidth saturation.** Initially feared as a *success-disaster* failure mode for adaptive routing — that AP scoring's preference for fast peers might funnel traffic onto a few overloaded nodes, oscillating as they collapse and recover. Recent simulations measure the per-node traffic distribution directly and the result is the opposite: at every tested scale (5K–50K nodes), N-DHT distributes load broadly across the population while plain Kademlia and G-DHT concentrate it. At 50,000 nodes, *zero* N-DHT nodes process more than 100× the network mean traffic; K-DHT produces 56 such nodes, G-DHT produces 62. Bandwidth concentration is much less of an issue for N-DHT than for K-DHT — not a non-issue, but not the deploy blocker first feared.
 - **Latency jitter.** Real round-trip times vary by ±30% from queuing and congestion. The simulator's latencies are clean and monotone.
 
 These get called out in a separate red-team analysis. The protocol's measured results show **the brain working perfectly**; the *body* — actually deploying it on real internet conditions — still needs work.
