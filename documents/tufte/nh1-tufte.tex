@@ -17,6 +17,16 @@
 \usepackage{booktabs}
 \usepackage{microtype}
 \usepackage{fancyhdr}
+\usepackage{etoolbox}
+\usepackage{needspace}
+
+% v0.3.48 hotfix: prevent section-heading orphans (heading at the
+% bottom of a page with body on the next).  \needspace reserves at
+% least 6 baselines of vertical room before each section heading;
+% if there isn't that much left on the current page, LaTeX inserts
+% a page break before the heading instead of after it.
+\pretocmd{\section}{\needspace{6\baselineskip}}{}{}
+\pretocmd{\subsection}{\needspace{4\baselineskip}}{}{}
 
 \definecolor{rust}{RGB}{185,78,54}
 \definecolor{rustsoft}{RGB}{212,168,150}
