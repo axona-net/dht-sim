@@ -4,7 +4,7 @@ theme: default
 size: 16:9
 paginate: true
 header: "N-DHT"
-footer: "v0.3.48 · sim v0.70.05 · 2026-05-05"
+footer: "v0.3.49 · sim v0.70.05 · 2026-05-06"
 style: |
   section {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;

@@ -1,6 +1,6 @@
 # Neuromorphic Distributed Hash Table
 
-*An N-DHT explainer · v0.3.48 · 2026-05-05 · David A. Smith · YZ.social*
+*An N-DHT explainer · v0.3.49 · 2026-05-06 · David A. Smith · YZ.social*
 
 > *The technology is shaped by the mission.*
 

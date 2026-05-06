@@ -4,7 +4,7 @@ theme: default
 size: 16:9
 paginate: true
 header: "The Federated Nervous System"
-footer: "v0.3.48 · 2026-05-05 · YZ.social"
+footer: "v0.3.49 · 2026-05-06 · YZ.social"
 style: |
   section {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
