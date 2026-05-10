@@ -115,7 +115,13 @@ async function main() {
   if (delivered < subs.length - 1) { console.error('  FAIL: pub/sub coverage regressed'); process.exit(1); }
 
   // Larger lookup sweep: 200 random pairs to exercise the recursive
-  // lookup_step chain across many synaptome configurations.
+  // lookup_step chain across many synaptome configurations.  Also
+  // captures observability events to verify the contract surface
+  // (commit 15) is firing.
+  const eventCounts = new Map();
+  const unsubscribe = dht.onEvent((ev) => {
+    eventCounts.set(ev.type, (eventCounts.get(ev.type) || 0) + 1);
+  });
   let bigOk = 0;
   let totalHops = 0;
   for (let i = 0; i < 200; i++) {
@@ -125,8 +131,30 @@ async function main() {
     const r = await dht.lookup(src.id, dst.id);
     if (r && r.found) { bigOk++; totalHops += r.hops; }
   }
+  unsubscribe();
   console.log(`  big lookup: ${bigOk}/200 succeeded, avg hops ${(totalHops/Math.max(1,bigOk)).toFixed(2)}`);
   if (bigOk < 195) { console.error('  FAIL: large-sweep success rate regressed'); process.exit(1); }
+
+  // Verify observability fired
+  const lookupEvents = eventCounts.get('lookup-completed') || 0;
+  console.log(`  events: lookup-completed=${lookupEvents}, anneal-fired=${eventCounts.get('anneal-fired')||0}`);
+  if (lookupEvents < 200) { console.error('  FAIL: lookup-completed events missing'); process.exit(1); }
+
+  // Verify getMetrics shape on a sample node
+  const metrics = dht.getMetrics(nodes[0].id);
+  if (!metrics || typeof metrics.synaptomeSize !== 'number' || !metrics.cycleStats) {
+    console.error('  FAIL: getMetrics shape wrong'); process.exit(1);
+  }
+  console.log(`  metrics[node0]: syn=${metrics.synaptomeSize} temp=${metrics.temperature.toFixed(3)} sent=${metrics.traffic.msgsSent}`);
+
+  // Verify getSynaptome returns SynapseSnapshot[] shape
+  const synSnap = dht.getSynaptome(nodes[0].id);
+  if (!Array.isArray(synSnap) || synSnap.length === 0
+      || typeof synSnap[0].peerId !== 'bigint'
+      || typeof synSnap[0].weight !== 'number') {
+    console.error('  FAIL: getSynaptome shape wrong'); process.exit(1);
+  }
+  console.log(`  synaptome[node0]: ${synSnap.length} entries, first peer=${synSnap[0].peerId.toString(16).padStart(16, '0')}`);
 
   console.log('  OK');
 }

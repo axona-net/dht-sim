@@ -2,7 +2,7 @@
 
 *Generated against contracts at `src/contracts/` (sim v0.70.06).*
 
-## 0. Status (sim v0.70.20, refactor commits 1-14 done)
+## 0. Status (sim v0.70.21, refactor commits 1-15 done — sequence complete)
 
 The 15-commit migration is partially complete.  Production target NH-1
 is now V1+V2-clean in the routing path (lookup main loop, two-hop
@@ -25,7 +25,7 @@ primitives).
 | 12     | ✅     | NX-15/NX-17 scope clarification (not migrated)          |
 | 13     | ✅     | NX-6 lineage scope clarification (not migrated)         |
 | 14     | ✅     | NeuronNode cleanup — `_nodeMapRef` retired              |
-| 15     | ⏳     | DHT.getMetrics / getSynaptome / onEvent observability   |
+| 15     | ✅     | DHT.getMetrics / getSynaptome / onEvent observability   |
 
 Scope decision (commit 12): NX-15, NX-17, and NX-6 are research /
 comparison protocols.  They REMAIN on the simulator's god's-eye

@@ -133,6 +133,20 @@ export class NeuromorphicDHTNH1 extends DHT {
     // sendDirect drain-loop state was removed in v0.70.16 (refactor
     // commit 10): notifications now run as transport.notify microtasks,
     // which don't blow the stack on deep fan-out trees.
+
+    // ── Observability surface (refactor commit 15, v0.70.21) ────────────
+    // Listeners registered via `onEvent(handler)`.  Events are fired
+    // from the protocol body via `_emit(event)` at canonical sites:
+    // peer-joined / peer-left / lookup-completed / dead-peer-detected
+    // / anneal-fired / cycle-snapshot.  See `src/contracts/types.js`
+    // for the ProtocolEvent union.
+    /** @type {Set<(event: object) => void>} */
+    this._eventListeners = new Set();
+
+    // Per-node lookup counters used by getMetrics().cycleStats.  Updated
+    // by lookup() and reset by snapshotMetrics().  Keyed by NeuronNode.
+    /** @type {Map<object, {attempted: number, succeeded: number, sumHops: number, sumLatency: number}>} */
+    this._nodeStats = new Map();
   }
 
   /**
@@ -177,6 +191,10 @@ export class NeuromorphicDHTNH1 extends DHT {
       await node.transport.start();
       this._registerNH1Handlers(node);
     }
+    this._emit({
+      type: 'peer-joined', timestamp: Date.now(),
+      peerId: node.id, addedBy: 'addNode',
+    });
     return node;
   }
 
@@ -433,7 +451,12 @@ export class NeuromorphicDHTNH1 extends DHT {
     // heartbeat.  Kept as a `Set` for O(1) candidate-filter lookup.
     if (!node._deadPeers) node._deadPeers = new Set();
     node.transport.onPeerDied((peerId) => {
+      if (node._deadPeers.has(peerId)) return;
       node._deadPeers.add(peerId);
+      this._emit({
+        type: 'dead-peer-detected', timestamp: Date.now(),
+        observerId: node.id, peerId,
+      });
     });
   }
 
@@ -443,6 +466,10 @@ export class NeuromorphicDHTNH1 extends DHT {
     node.alive = false;
     this.network.removeNode(nodeId);
     this.nodeMap.delete(nodeId);
+    this._emit({
+      type: 'peer-left', timestamp: Date.now(),
+      peerId: nodeId, reason: 'remove',
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -762,9 +789,17 @@ export class NeuromorphicDHTNH1 extends DHT {
       }
     }
 
+    const hops = result.path.length - 1;
+    this._bumpLookupStats(source, result.found, hops, result.totalTimeMs);
+    this._emit({
+      type: 'lookup-completed', timestamp: Date.now(),
+      sourceId: sourceId, targetKey,
+      hops, time: result.totalTimeMs, found: result.found,
+    });
+
     return {
       path:  result.path,
-      hops:  result.path.length - 1,
+      hops,
       time:  result.totalTimeMs,
       found: result.found,
     };
@@ -1236,6 +1271,10 @@ export class NeuromorphicDHTNH1 extends DHT {
     syn.weight    = 0.1;
     syn._addedBy  = 'anneal';
     node.addSynapse(syn);
+    this._emit({
+      type: 'anneal-fired', timestamp: Date.now(),
+      observerId: node.id, evicted: victim.peerId, admitted: candidate.id,
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1394,6 +1433,145 @@ export class NeuromorphicDHTNH1 extends DHT {
       ? (nodes.reduce((a, n) => a + (n.temperature ?? this.T_INIT), 0) / nodes.length).toFixed(3)
       : '—';
     return { ...base, protocol: 'Neuromorphic-NH1', epoch: this.simEpoch, avgSynapses: avgSyn, avgTemp };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Observability surface (DHT contract, refactor commit 15)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // The DHT contract at src/contracts/DHT.js mandates four read-only
+  // observability methods: getNodeId(), getSynaptome(), getMetrics(),
+  // onEvent().  In production each DHT instance is one node, so those
+  // methods take no argument.  In the simulator one
+  // NeuromorphicDHTNH1 manages many nodes (legacy collapse for
+  // performance), so we accept an optional `nodeOrId` argument that
+  // selects which node to report on.  Production wiring will simply
+  // omit the argument and the methods will resolve to the local node.
+
+  /**
+   * @param {object|bigint|string} [nodeOrId]  defaults to first live node
+   * @returns {bigint}
+   */
+  getNodeId(nodeOrId) {
+    const node = nodeOrId !== undefined
+      ? this._resolveNode(nodeOrId)
+      : this._anyAliveNode();
+    if (!node) throw new Error('NH-1: getNodeId — no live node found');
+    return node.id;
+  }
+
+  /**
+   * Read-only snapshot of the local synaptome.
+   *
+   * @param {object|bigint|string} [nodeOrId]
+   * @returns {Array<object>}  SynapseSnapshot[] per types.js
+   */
+  getSynaptome(nodeOrId) {
+    const node = nodeOrId !== undefined
+      ? this._resolveNode(nodeOrId)
+      : this._anyAliveNode();
+    if (!node) return [];
+    return node.getSynaptomeSnapshot();
+  }
+
+  /**
+   * Aggregate per-node metrics.  Read-only — safe at any frequency.
+   *
+   * @param {object|bigint|string} [nodeOrId]
+   * @returns {object}  Metrics per types.js
+   */
+  getMetrics(nodeOrId) {
+    const node = nodeOrId !== undefined
+      ? this._resolveNode(nodeOrId)
+      : this._anyAliveNode();
+    if (!node) return null;
+    const stats = this._nodeStats.get(node) ||
+      { attempted: 0, succeeded: 0, sumHops: 0, sumLatency: 0 };
+    const cycleStats = {
+      lookupsAttempted: stats.attempted,
+      lookupsSucceeded: stats.succeeded,
+      avgHops:    stats.succeeded > 0 ? stats.sumHops    / stats.succeeded : 0,
+      avgLatency: stats.succeeded > 0 ? stats.sumLatency / stats.succeeded : 0,
+    };
+    const traffic = {
+      msgsSent:     node.msgsSent     | 0,
+      msgsReceived: node.msgsReceived | 0,
+      byType:       node.msgsByType ? { ...node.msgsByType } : {},
+    };
+    return {
+      simEpoch:             this.simEpoch,
+      synaptomeSize:        node.synaptome.size,
+      incomingSynapsesSize: node.incomingSynapses.size,
+      temperature:          node.temperature ?? this.T_INIT,
+      cycleStats,
+      traffic,
+    };
+  }
+
+  /**
+   * Subscribe to protocol events.
+   *
+   * @param {(event: object) => void} handler
+   * @returns {() => void}  unsubscribe
+   */
+  onEvent(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('NH-1.onEvent: handler must be a function');
+    }
+    this._eventListeners.add(handler);
+    return () => this._eventListeners.delete(handler);
+  }
+
+  /**
+   * Walk every live node and emit a 'cycle-snapshot' event per node.
+   * The simulator Engine fires this once per training cycle so
+   * downstream consumers (load-balance plots, dashboards) get a
+   * point-in-time aggregation that doesn't require god's-eye nodeMap
+   * walks.  After emission, per-node lookup counters are reset so the
+   * next cycle starts clean.
+   */
+  snapshotMetrics(opts = {}) {
+    const { reset = true } = opts;
+    const ts = Date.now();
+    for (const node of this.nodeMap.values()) {
+      if (!node.alive) continue;
+      const metrics = this.getMetrics(node);
+      this._emit({ type: 'cycle-snapshot', timestamp: ts, peerId: node.id, metrics });
+      if (reset) {
+        const s = this._nodeStats.get(node);
+        if (s) { s.attempted = 0; s.succeeded = 0; s.sumHops = 0; s.sumLatency = 0; }
+        node.msgsSent     = 0;
+        node.msgsReceived = 0;
+        node.msgsByType   = Object.create(null);
+      }
+    }
+  }
+
+  /** @private */
+  _emit(event) {
+    if (this._eventListeners.size === 0) return;
+    for (const h of this._eventListeners) {
+      try { h(event); }
+      catch (err) { console.error('NH-1: event listener threw:', err); }
+    }
+  }
+
+  /** @private */
+  _anyAliveNode() {
+    for (const n of this.nodeMap.values()) if (n.alive) return n;
+    return null;
+  }
+
+  /** @private */
+  _bumpLookupStats(node, found, hops, latency) {
+    let s = this._nodeStats.get(node);
+    if (!s) { s = { attempted: 0, succeeded: 0, sumHops: 0, sumLatency: 0 }; this._nodeStats.set(node, s); }
+    s.attempted++;
+    if (found) {
+      s.succeeded++;
+      s.sumHops    += hops;
+      s.sumLatency += latency;
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
