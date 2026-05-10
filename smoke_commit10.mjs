@@ -113,6 +113,21 @@ async function main() {
 
   if (lookupOk < 18) { console.error('  FAIL: lookup quality regressed'); process.exit(1); }
   if (delivered < subs.length - 1) { console.error('  FAIL: pub/sub coverage regressed'); process.exit(1); }
+
+  // Larger lookup sweep: 200 random pairs to exercise the recursive
+  // lookup_step chain across many synaptome configurations.
+  let bigOk = 0;
+  let totalHops = 0;
+  for (let i = 0; i < 200; i++) {
+    const src = nodes[Math.floor(Math.random() * nodes.length)];
+    const dst = nodes[Math.floor(Math.random() * nodes.length)];
+    if (src.id === dst.id) { i--; continue; }
+    const r = await dht.lookup(src.id, dst.id);
+    if (r && r.found) { bigOk++; totalHops += r.hops; }
+  }
+  console.log(`  big lookup: ${bigOk}/200 succeeded, avg hops ${(totalHops/Math.max(1,bigOk)).toFixed(2)}`);
+  if (bigOk < 195) { console.error('  FAIL: large-sweep success rate regressed'); process.exit(1); }
+
   console.log('  OK');
 }
 

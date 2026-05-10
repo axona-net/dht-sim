@@ -392,11 +392,45 @@ export class NeuromorphicDHTNH1 extends DHT {
       return top.map(t => t.peerId);
     });
 
-    // Dead-peer callback.  Future commits convert this to fire reheat
-    // + _evictAndReplace; for now record events for verification.
+    // ── lookup_step (commit 11) ──────────────────────────────────────
+    // Recursive-forwarding routing-tick handler.  Receiver runs the
+    // entire per-hop logic on its OWN local state (synaptome,
+    // incomingSynapses, transitCache, temperature) and either:
+    //   - reports `found: true` when it IS the target,
+    //   - reports `found: false, terminal: true` when no candidate
+    //     synapse makes XOR progress AND iterative fallback finds
+    //     nothing, or
+    //   - picks a next hop (direct / epsilon / two-hop AP), records
+    //     the LEARN side-effects (incoming promotion, hop caching,
+    //     triadic closure, anneal) locally, and forwards to nextHop
+    //     via another lookup_step request.  The chain bubbles back the
+    //     final outcome unchanged through every awaiter.
+    //
+    // This is the structural V1 + V2 cleanup for the routing tick:
+    // the source no longer holds any reference to intermediate Node
+    // objects; only the receiver reads or writes its own state.
+    node.transport.onRequest('lookup_step', async (_fromId, payload) => {
+      return await this._lookupStep(node, {
+        sourceId:    payload.sourceId,
+        targetKey:   payload.targetKey,
+        hops:        payload.hops,
+        path:        payload.path,
+        trace:       payload.trace,
+        queried:     payload.queried,
+        totalTimeMs: payload.totalTimeMs,
+      });
+    });
+
+    // Dead-peer callback.  v0.70.17 (refactor commit 11) — populates a
+    // local Set of known-dead peer ids that the lookup_step handler
+    // consults when filtering candidate synapses.  Replaces the legacy
+    // `nodeMap.get(s.peerId)?.alive` god's-eye liveness check; now the
+    // protocol learns about deaths the same way a real deployment does
+    // — through transport-level peer-died notifications driven by the
+    // heartbeat.  Kept as a `Set` for O(1) candidate-filter lookup.
+    if (!node._deadPeers) node._deadPeers = new Set();
     node.transport.onPeerDied((peerId) => {
-      if (!node._deadPeerEvents) node._deadPeerEvents = [];
-      node._deadPeerEvents.push(peerId);
+      node._deadPeers.add(peerId);
     });
   }
 
@@ -656,6 +690,43 @@ export class NeuromorphicDHTNH1 extends DHT {
   // Routing — The Five Operations
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /**
+   * Recursive-forwarding routing tick.  v0.70.17 (refactor commit 11).
+   *
+   * The legacy source-orchestrated walk (a for-loop on the source side
+   * that did `current = nodeMap.get(currentId)` to read every
+   * intermediate's synaptome / incomingSynapses / temperature) is gone.
+   * Instead, the source kicks off a chain of `lookup_step` requests:
+   * each peer in the walk runs the entire per-hop logic on its OWN
+   * local state, then forwards to the next hop via another
+   * `transport.send('lookup_step', ...)`.  The chain bubbles the
+   * outcome (`{found, path, trace, totalTimeMs, hops}`) back up.
+   *
+   * V violations cleared in the routing path:
+   *   - V1: every `nodeMap.get(currentId)` /
+   *         `nodeMap.get(s.peerId)?.alive` site retired.  Liveness is
+   *         now consulted via the per-node `_deadPeers` Set, populated
+   *         by `transport.onPeerDied` callbacks (the production
+   *         heartbeat-driven death notification).
+   *   - V2: cross-peer state reads (peer.synaptome, peer.temperature,
+   *         peer.incomingSynapses, peer.transitCache) all gone — every
+   *         per-hop access is on the receiver's OWN local node.
+   *
+   * What stays on source:
+   *   - First-step kick-off (source's own _lookupStep call: the source
+   *     IS a node and its first-hop selection is locally-justified).
+   *   - EMA bookkeeping for the protocol-wide latency / hop-count
+   *     averages.
+   *   - Reinforce-wave dispatch on fast paths (still a per-trace fan
+   *     of 'reinforce' notifies).
+   *
+   * Wire-counter rename: per-hop traffic now bumps under type
+   * 'lookup_step' (the SimulatedTransport bumps msgsByType[type] on
+   * both sides of every send).  The legacy `_msg(current, nextNode,
+   * 'find_node')` counter is gone.  Total wire-message count
+   * unchanged; per-type breakdown shifts from 'find_node' to
+   * 'lookup_step'.
+   */
   async lookup(sourceId, targetKey) {
     const source = this.nodeMap.get(sourceId);
     if (!source || !source.alive) return null;
@@ -666,144 +737,216 @@ export class NeuromorphicDHTNH1 extends DHT {
       this.lookupsSinceDecay = 0;
     }
 
-    const path = [sourceId], trace = [], queried = new Set([sourceId]);
-    let currentId = sourceId, totalTimeMs = 0, reached = false;
-
-    for (let hop = 0; hop < this.MAX_HOPS; hop++) {
-      const current = this.nodeMap.get(currentId);
-      if (!current || !current.alive) break;
-
-      const currentDist = current.id ^ targetKey;
-      if (currentDist === 0n) { reached = true; break; }
-
-      // ── NAVIGATE: collect forward-progress candidates ──────────────────
-      const deadSynapses = [], candidates = [];
-
-      for (const s of current.synaptome.values()) {
-        if ((s.peerId ^ targetKey) >= currentDist) continue;
-        const peer = this.nodeMap.get(s.peerId);
-        if (!peer?.alive) { deadSynapses.push(s); s.weight = 0; continue; }
-        candidates.push(s);
-      }
-      for (const s of current.incomingSynapses.values()) {
-        if ((s.peerId ^ targetKey) >= currentDist) continue;
-        if (this.nodeMap.get(s.peerId)?.alive) candidates.push(s);
-      }
-
-      // ── FORGET: dead-synapse eviction + replacement ────────────────────
-      if (deadSynapses.length > 0) {
-        current.temperature = Math.max(current.temperature, this.T_REHEAT);
-        for (const syn of deadSynapses) {
-          // v0.70.14 — _evictAndReplace is async (commits 6+8); await it
-          // so the replacement synapse is in the synaptome before we
-          // continue building the candidate set for this hop.
-          const repl = await this._evictAndReplace(current, syn);
-          if (repl && (repl.peerId ^ targetKey) < currentDist) candidates.push(repl);
-        }
-      }
-
-      // ── NAVIGATE: iterative fallback ───────────────────────────────────
-      if (candidates.length === 0) {
-        let bestSyn = null, bestDist = null;
-        const scan = (s) => {
-          if (queried.has(s.peerId)) return;
-          const peer = this.nodeMap.get(s.peerId);
-          if (!peer?.alive) return;
-          const d = s.peerId ^ targetKey;
-          if (bestDist === null || d < bestDist) { bestDist = d; bestSyn = s; }
-        };
-        for (const s of current.synaptome.values()) scan(s);
-        for (const s of current.incomingSynapses.values()) scan(s);
-        if (!bestSyn) break;
-        candidates.push(bestSyn);
-      }
-
-      // ── NAVIGATE: select next hop ──────────────────────────────────────
-      let nextSyn;
-
-      const direct = current.synaptome.get(targetKey)
-                  ?? current.incomingSynapses.get(targetKey);
-      if (direct && this.nodeMap.get(targetKey)?.alive) nextSyn = direct;
-
-      if (!nextSyn && hop === 0 && Math.random() < this.EPSILON) {
-        nextSyn = candidates[Math.floor(Math.random() * candidates.length)];
-      }
-
-      if (!nextSyn) {
-        nextSyn = await this._bestByTwoHopAP(current, candidates, targetKey, currentDist);
-      }
-
-      const nextId = nextSyn.peerId;
-      if (!this.nodeMap.get(nextId)) break;
-
-      // ── LEARN: incoming promotion ──────────────────────────────────────
-      if (current.incomingSynapses.has(nextId) && !current.synaptome.has(nextId)) {
-        const inc = current.incomingSynapses.get(nextId);
-        inc.useCount = (inc.useCount ?? 0) + 1;
-        if (inc.useCount >= this.PROMOTE_THRESHOLD) {
-          const syn = new Synapse({ peerId: nextId, latencyMs: inc.latency, stratum: inc.stratum });
-          syn.weight = 0.5;
-          syn.inertia = this.simEpoch;  // fresh recency
-          syn._addedBy = 'promote';
-          if (await this._addByVitality(current, syn)) current.incomingSynapses.delete(nextId);
-        }
-      }
-
-      queried.add(nextId);
-      path.push(nextId);
-      trace.push({ fromId: currentId, synapse: nextSyn });
-      totalTimeMs += nextSyn.latency;
-
-      // ── TRAFFIC: count the actual hop (find_node-equivalent) ───────────
-      // NH-1 bypasses SimulatedNetwork.send() (it accesses peers via
-      // nodeMap directly), so the v0.70.00 traffic counters on send()
-      // never fire for neuromorphic routing. We re-establish parity here:
-      // every conceptual on-the-wire interaction calls _msg().
-      const nextNode = this.nodeMap.get(nextId);
-      this._msg(current, nextNode, 'find_node');
-
-      // ── LEARN: hop caching ─────────────────────────────────────────────
-      // v0.70.15 (commit 9) — hop caching is now a real wire notify
-      // from source to current.  Current's hop_cache notify handler
-      // installs a synapse for `target` and fires lateral_spread
-      // notifications to its geographic neighbours.  Fire-and-forget;
-      // off the routing critical path.
-      if (currentId !== targetKey) {
-        source.transport.notify(currentId, 'hop_cache', { target: targetKey, depth: 0 })
-          .catch(err => console.error('NH-1: hop_cache notify failed:', err));
-      }
-
-      // ── LEARN: triadic closure ─────────────────────────────────────────
-      if (currentId !== sourceId) this._recordTransit(current, sourceId, nextId);
-
-      // ── EXPLORE: annealing ─────────────────────────────────────────────
-      current.temperature = Math.max(this.T_MIN, current.temperature * this.ANNEAL_COOLING);
-      // v0.70.03 — multiply trigger probability by ANNEAL_RATE_SCALE so
-      // ablations can throttle the dominant local_probe source without
-      // disturbing the temperature-reheat semantics on dead-peer detection.
-      // v0.70.12 — anneal is fire-and-forget per the contract design:
-      // it runs as a background task off the lookup's critical path.
-      // Stray rejections are logged but do not propagate (the lookup
-      // has already moved on to the next hop before anneal completes).
-      if (Math.random() < current.temperature * this.ANNEAL_RATE_SCALE) {
-        const annealNode = current;
-        this._tryAnneal(annealNode).catch(err => {
-          console.error(`NH-1: anneal failed at ${annealNode.id.toString(16)}:`, err);
-        });
-      }
-
-      currentId = nextId;
-    }
+    const result = await this._lookupStep(source, {
+      sourceId,
+      targetKey,
+      hops:        0,
+      path:        [sourceId],
+      trace:       [],
+      queried:     new Set([sourceId]),
+      totalTimeMs: 0,
+    });
 
     // ── LEARN: LTP reinforcement on fast paths ───────────────────────────
-    if (reached) {
-      const hopCount = path.length - 1;
-      this._emaHops = this._emaHops === null ? hopCount : 0.9 * this._emaHops + 0.1 * hopCount;
-      this._emaTime = this._emaTime === null ? totalTimeMs : 0.9 * this._emaTime + 0.1 * totalTimeMs;
-      if (trace.length > 0 && totalTimeMs <= this._emaTime) this._reinforceWave(source, trace);
+    if (result.found && result.trace.length > 0) {
+      const hopCount = result.trace.length;
+      this._emaHops = this._emaHops === null
+        ? hopCount : 0.9 * this._emaHops + 0.1 * hopCount;
+      this._emaTime = this._emaTime === null
+        ? result.totalTimeMs : 0.9 * this._emaTime + 0.1 * result.totalTimeMs;
+      if (result.totalTimeMs <= this._emaTime) {
+        this._reinforceWave(source, result.trace);
+      }
     }
 
-    return { path, hops: path.length - 1, time: totalTimeMs, found: reached };
+    return {
+      path:  result.path,
+      hops:  result.path.length - 1,
+      time:  result.totalTimeMs,
+      found: result.found,
+    };
+  }
+
+  /**
+   * Single-hop step in the recursive lookup chain.  Runs entirely on
+   * `node`'s local state.  See lookup() for the architectural
+   * commentary.
+   *
+   * `ctx` is mutated in place (queried set, path/trace arrays,
+   * totalTimeMs, hops counter) — the simulator transport passes the
+   * same reference through to the receiver, so the mutation chain is
+   * coherent.  In a production transport this object would be
+   * serialized at every hop; the receiver would see a fresh copy and
+   * mutate that.  Either way the final result bubbles up correctly
+   * because each handler returns the post-mutation ctx.
+   */
+  async _lookupStep(node, ctx) {
+    if (!node || !node.alive) {
+      return this._lookupResult(ctx, false);
+    }
+
+    const { sourceId, targetKey } = ctx;
+    const currentDist = node.id ^ targetKey;
+    if (currentDist === 0n) {
+      return this._lookupResult(ctx, true);
+    }
+    if (ctx.hops >= this.MAX_HOPS) {
+      return this._lookupResult(ctx, false);
+    }
+
+    const dead = node._deadPeers || new Set();
+
+    // ── NAVIGATE: collect forward-progress candidates ──────────────────
+    const deadSynapses = [];
+    const candidates   = [];
+    for (const s of node.synaptome.values()) {
+      if ((s.peerId ^ targetKey) >= currentDist) continue;
+      if (dead.has(s.peerId)) { deadSynapses.push(s); s.weight = 0; continue; }
+      candidates.push(s);
+    }
+    for (const s of node.incomingSynapses.values()) {
+      if ((s.peerId ^ targetKey) >= currentDist) continue;
+      if (dead.has(s.peerId)) continue;
+      candidates.push(s);
+    }
+
+    // ── FORGET: dead-synapse eviction + replacement ────────────────────
+    if (deadSynapses.length > 0) {
+      node.temperature = Math.max(node.temperature, this.T_REHEAT);
+      for (const syn of deadSynapses) {
+        const repl = await this._evictAndReplace(node, syn);
+        if (repl && (repl.peerId ^ targetKey) < currentDist) candidates.push(repl);
+      }
+    }
+
+    // ── NAVIGATE: iterative fallback ───────────────────────────────────
+    if (candidates.length === 0) {
+      let bestSyn = null, bestDist = null;
+      const scan = (s) => {
+        if (ctx.queried.has(s.peerId)) return;
+        if (dead.has(s.peerId)) return;
+        const d = s.peerId ^ targetKey;
+        if (bestDist === null || d < bestDist) { bestDist = d; bestSyn = s; }
+      };
+      for (const s of node.synaptome.values())         scan(s);
+      for (const s of node.incomingSynapses.values()) scan(s);
+      if (!bestSyn) return this._lookupResult(ctx, false);
+      candidates.push(bestSyn);
+    }
+
+    // ── NAVIGATE: select next hop ──────────────────────────────────────
+    let nextSyn;
+
+    const direct = node.synaptome.get(targetKey)
+                ?? node.incomingSynapses.get(targetKey);
+    if (direct && !dead.has(targetKey)) nextSyn = direct;
+
+    // Epsilon-greedy first-hop (only when this IS the source's own step).
+    if (!nextSyn && node.id === sourceId
+        && Math.random() < this.EPSILON) {
+      nextSyn = candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
+    if (!nextSyn) {
+      nextSyn = await this._bestByTwoHopAP(node, candidates, targetKey, currentDist);
+    }
+
+    const nextId = nextSyn.peerId;
+
+    // ── LEARN: incoming promotion ──────────────────────────────────────
+    if (node.incomingSynapses.has(nextId) && !node.synaptome.has(nextId)) {
+      const inc = node.incomingSynapses.get(nextId);
+      inc.useCount = (inc.useCount ?? 0) + 1;
+      if (inc.useCount >= this.PROMOTE_THRESHOLD) {
+        const syn = new Synapse({
+          peerId: nextId, latencyMs: inc.latency, stratum: inc.stratum,
+        });
+        syn.weight   = 0.5;
+        syn.inertia  = this.simEpoch;
+        syn._addedBy = 'promote';
+        if (await this._addByVitality(node, syn)) {
+          node.incomingSynapses.delete(nextId);
+        }
+      }
+    }
+
+    // ── Update ctx (mutable in-place forward through the chain) ────────
+    ctx.queried.add(nextId);
+    ctx.path.push(nextId);
+    ctx.trace.push({ fromId: node.id, synapse: nextSyn });
+    ctx.totalTimeMs += nextSyn.latency;
+    ctx.hops += 1;
+
+    // ── LEARN: hop caching (local self-install) ────────────────────────
+    // v0.70.17 — the running node IS what was previously the recipient
+    // of a 'hop_cache' notify.  Self-install for `targetKey` directly,
+    // then fire 'lateral_spread' notifies to geo-neighbours so the
+    // cache replicates.
+    if (node.id !== targetKey && !node.synaptome.has(targetKey)) {
+      const stratum = clz64(node.id ^ targetKey);
+      const syn = new Synapse({
+        peerId: targetKey, latencyMs: 0, stratum,
+      });
+      syn.weight   = 0.5;
+      syn.inertia  = this.simEpoch;
+      syn._addedBy = 'hopCache';
+      const added = await this._addByVitality(node, syn);
+      if (added && this.EN_LATERAL_SPREAD) {
+        const nodeRegion = node.id >> BigInt(64 - this.GEO_REGION_BITS);
+        const regional   = [];
+        for (const s of node.synaptome.values()) {
+          if (s.peerId === targetKey) continue;
+          if ((s.peerId >> BigInt(64 - this.GEO_REGION_BITS)) === nodeRegion) {
+            regional.push(s);
+          }
+        }
+        regional.sort((a, b) => b.weight - a.weight);
+        for (let i = 0; i < Math.min(this.LATERAL_K, regional.length); i++) {
+          node.transport.notify(regional[i].peerId, 'lateral_spread',
+                                { target: targetKey, depth: 1 })
+            .catch(err => console.error('NH-1: lateral_spread notify failed:', err));
+        }
+      }
+    }
+
+    // ── LEARN: triadic closure (only on intermediates) ─────────────────
+    if (node.id !== sourceId) this._recordTransit(node, sourceId, nextId);
+
+    // ── EXPLORE: annealing (fire-and-forget) ───────────────────────────
+    node.temperature = Math.max(this.T_MIN, node.temperature * this.ANNEAL_COOLING);
+    if (Math.random() < node.temperature * this.ANNEAL_RATE_SCALE) {
+      this._tryAnneal(node).catch(err =>
+        console.error(`NH-1: anneal failed at ${node.id.toString(16)}:`, err));
+    }
+
+    // ── Forward to nextHop via transport.send('lookup_step') ────────────
+    try {
+      const downstream = await node.transport.send(nextId, 'lookup_step', {
+        sourceId, targetKey,
+        hops:        ctx.hops,
+        path:        ctx.path,
+        trace:       ctx.trace,
+        queried:     ctx.queried,
+        totalTimeMs: ctx.totalTimeMs,
+      });
+      return downstream;
+    } catch {
+      // Receiver unreachable / handler missing.  Treat as terminal at
+      // the current node — the chain returns a not-found result with
+      // the path / trace accumulated so far.
+      return this._lookupResult(ctx, false);
+    }
+  }
+
+  /** @private  Build the bubble-up result object from a chain context. */
+  _lookupResult(ctx, found) {
+    return {
+      found,
+      path:        ctx.path,
+      trace:       ctx.trace,
+      totalTimeMs: ctx.totalTimeMs,
+      hops:        ctx.hops,
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
