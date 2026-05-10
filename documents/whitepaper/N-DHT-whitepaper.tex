@@ -70,7 +70,7 @@
 {\large David A.~Smith\par}
 {\itshape\small YZ.social\par}
 \vspace{2em}
-{\small Version 0.3.49 \quad Simulator v0.70.05 \quad 2026-05-06\par}
+{\small Version 0.3.50 \quad Simulator v0.70.22 \quad 2026-05-10\par}
 \vfill
 \end{fullwidth}
 \newpage
@@ -6372,6 +6372,210 @@ the deployment-staging plan that ties them together. Each
 extension is described at the level of ``what it does and where
 it goes,'' with detailed implementation deferred to the
 engineering phase.
+
+% --------------------------------------------------------------------
+\section{The Two-Layer API}
+\label{sec:production-two-layer-api}
+% --------------------------------------------------------------------
+
+\newthought{Before any of these extensions} the codebase had to
+be unbound from its harness. A working DHT has two interfaces,
+not one: the \emph{application} above wants to publish,
+subscribe, and look things up; the \emph{network} below wants to
+open a channel, send a message, and notice when a peer goes
+silent. The protocol is the thing in between. \NDHT is now
+structured so the protocol code is genuinely between those two
+layers --- neither the application nor the network is hardwired
+into the routing logic --- which is what makes the same body of
+code reusable in both the simulator and the deployed system.
+
+\subsection{The DHT contract: application-facing}
+
+The application sees one running node. The contract has eight
+verbs across three bands:
+
+\begin{itemize}\itemsep2pt
+\item \textbf{Lifecycle.} \texttt{start}, \texttt{stop},
+  \texttt{join(sponsor)}, \texttt{leave}.
+\item \textbf{Operations.} \texttt{lookup(targetKey)},
+  \texttt{subscribe(topic, h)}, \texttt{unsubscribe(sub)},
+  \texttt{publish(topic, payload)}.
+\item \textbf{Identity \& observability.} \texttt{getNodeId},
+  \texttt{getSynaptome}, \texttt{getMetrics},
+  \texttt{onEvent(handler)}.
+\end{itemize}
+
+The \emph{forbidden} methods are as instructive as the present
+ones. There is no method that enumerates ``all nodes,'' no
+method that takes a peer-id and returns that peer's state, no
+method that lets the application mutate the routing table. A DHT
+instance is responsible for one node's view of the network; the
+simulator's Engine creates many DHT instances and orchestrates
+them, but that orchestration is a simulator concern --- it does
+not appear in the contract.
+
+\subsection{The Transport contract: network-facing}
+
+One Transport instance per running node; the protocol calls
+\emph{into} it. Twelve methods in four bands:
+
+\begin{itemize}\itemsep2pt
+\item \textbf{Lifecycle.} \texttt{start(localNodeId)},
+  \texttt{stop()}, \texttt{getLocalNodeId()}.
+\item \textbf{Channel pool.} \texttt{openConnection(peerId)},
+  \texttt{closeConnection(peerId)},
+  \texttt{isConnected(peerId)}. This maps directly onto
+  synaptome semantics: protocol admits peer to synaptome
+  $\Rightarrow$ \texttt{openConnection}; protocol evicts peer
+  $\Rightarrow$ \texttt{closeConnection}. The bilateral
+  connection cap is enforced \emph{inside} the transport ---
+  \texttt{openConnection} resolves with \texttt{false} if the
+  remote refused. Connection-setup cost (WebRTC ICE/DTLS
+  handshake in production, free in the simulator) is paid here,
+  once per peer, not per message.
+\item \textbf{Messaging.} \texttt{send(peerId, type,
+  payload)}, \texttt{notify(peerId, type, payload)},
+  \texttt{onRequest(type, h)}, \texttt{onNotification(type, h)}.
+  Two outbound primitives: request/response and fire-and-forget.
+  The split matters because production transports pay round-trip
+  latency for \texttt{send} but not for \texttt{notify}. \NDHT
+  uses \texttt{send} for the routing-tick chain
+  (\texttt{lookup\_step}, \texttt{lookahead\_probe},
+  \texttt{find\_closest\_set}, \texttt{local\_probe}) and
+  \texttt{notify} for the LEARN side-effects
+  (\texttt{reinforce}, \texttt{hop\_cache},
+  \texttt{lateral\_spread}, \texttt{triadic\_introduce}).
+  Canonical pattern for parallel probes:
+  \texttt{Promise.allSettled} over \texttt{transport.send(...)}
+  --- a slow or dead peer in one probe should not fail the whole
+  batch.
+\item \textbf{Liveness \& latency.} \texttt{onPeerDied(handler)},
+  \texttt{getLatency(peerId)}. The transport runs a $1$\,Hz
+  ping/pong heartbeat on every open channel; missed pongs
+  (default $3$-second timeout) trigger channel close and an
+  \texttt{onPeerDied} event. The protocol consumes
+  \texttt{getLatency} for AP scoring and registers an
+  \texttt{onPeerDied} callback that populates a per-node
+  \texttt{\_deadPeers} set. The candidate-enumeration step in
+  every routing tick filters against that set --- the same
+  mechanism a real deployment uses, retiring the legacy god's-eye
+  \texttt{nodeMap.get(p)?.alive} check.
+\end{itemize}
+
+The Transport contract \emph{forbids} the protocol from
+reaching around it: no \texttt{nodeMap.get(peerId)}, no
+\texttt{peer.synaptome.values()} reads, no cross-peer field
+access. Every cross-peer read happens via \texttt{send} or
+\texttt{notify}.
+
+\subsection{BootstrapService: cold start}
+
+A third, smaller contract. A new node starts with no peers;
+bootstrap is how it gets its first channel.
+
+\begin{verbatim}
+BootstrapService.bootstrap(sponsor)
+  -> { sponsorId: bigint, transport: Transport }
+\end{verbatim}
+
+The \texttt{sponsor} is a discriminated union:
+\texttt{\{ kind:'simulator', sim, sponsorId \}} for in-process
+pointers, \texttt{\{ kind:'rendezvous', url, manifestSig \}} for
+WebSocket signaling with a signed manifest, and
+\texttt{\{ kind:'qr', sponsorAddr \}} for direct device pairing.
+The contract returns the sponsor's id and a Transport with that
+one channel open. The DHT's \texttt{join(sponsor)} then runs a
+self-lookup through the sponsor and proceeds with stratified
+bootstrap on top of the freshly-opened transport.
+
+Splitting BootstrapService out of Transport matters because
+production bootstrap is an out-of-band concern (signature
+verification, manifest fetching, signaling-server handshake)
+that the routing protocol shouldn't see. Once \texttt{bootstrap}
+returns, the DHT just has a transport with a channel open; it
+doesn't know whether that channel came from a QR code or a
+rendezvous server.
+
+\subsection{The simulator as deployment vehicle}
+
+The simulator's \texttt{SimulatedNetwork} and the production
+\texttt{WebRTCTransport} both implement the same Transport
+contract. Twelve methods, one signature each. The simulator
+runs handlers synchronously inside the call (in-process, no
+real RTT); production runs them through WebRTC data channels
+with real RTT. \emph{The protocol code does not know which it
+is talking to.}
+
+This is the property that lets the simulator be the deployment
+vehicle. Years of \NDHT benchmark numbers --- the hop counts,
+latency distributions, pub/sub coverage, churn-resilience curves
+in Chapter~\ref{ch:performance-results} --- transfer directly
+to production because the same code path runs in both worlds.
+The 25\,K-node parity-gate benchmark (post-refactor sim
+v0.70.22 against the pre-refactor v0.70.04 reference) confirmed
+every protocol within a 10\% target band: \NDHT within
+$5$--$8\%$ on hops, $1$--$4\%$ on latency; Kademlia, \GDHT,
+NX-17 within $0.5$--$3\%$. The protocol's central algorithm ---
+the recursive-forwarding \texttt{lookup\_step} chain --- is
+free of cross-peer state reads; the remaining
+\texttt{nodeMap.get(peerId)} sites in the protocol code are
+all sim-only orchestration (Engine bookkeeping for node
+creation/destruction, the simulator's god's-eye stratified
+bootstrap, and the local self-resolution in
+\texttt{lookup(sourceId, ...)}).
+
+\subsection{Migration: fifteen commits}
+
+The codebase reached this shape over fifteen commits between
+sim v0.70.06 and v0.70.22. The first three introduced the
+contracts and converted Kademlia's iterative lookup to
+\texttt{await transport.send}. Commits four through nine walked
+\NDHT's routing primitives one at a time onto the Transport:
+hop-by-hop liveness via \texttt{onPeerDied}, two-hop lookahead
+via parallel \texttt{lookahead\_probe} RPCs, dead-synapse
+eviction via \texttt{\_localCandidate} over
+\texttt{local\_probe}, the admission gate via
+\texttt{openConnection} and \texttt{getLatency}, and the LEARN
+side-effects via \texttt{notify}. Commit ten lifted the pub/sub
+primitives onto the Transport and made \texttt{AxonManager}
+async-aware while preserving its sync external API. Commit
+eleven was the structural endgame for the routing tick: the
+legacy source-orchestrated walk became a recursive-forwarding
+chain where each receiver runs the entire per-hop logic on its
+own local state and forwards via another
+\texttt{lookup\_step}. Commits twelve and thirteen documented
+the deliberate scope decision to leave NX-15, NX-17, and NX-6
+on the legacy path as research/comparison protocols. Commit
+fourteen retired \texttt{\_nodeMapRef} and the last
+protocol-layer \texttt{nodeMap.get} sites. Commit fifteen
+implemented the DHT contract's observability surface:
+\texttt{getMetrics}, \texttt{getSynaptome}, \texttt{onEvent},
+\texttt{snapshotMetrics}, with canonical event-emit sites at
+\texttt{peer-joined}, \texttt{peer-left},
+\texttt{lookup-completed}, \texttt{dead-peer-detected},
+\texttt{anneal-fired}, and \texttt{cycle-snapshot}.
+
+\paragraph{What this gets us, operationally.}
+
+\begin{itemize}\itemsep2pt
+\item The same body of routing code runs in the simulator and
+  on the deployed mesh. No ``production fork'' of \NDHT; no
+  separate code path for ``real'' networks.
+\item Async is the universal acid test. Every cross-peer
+  interaction is async even in the simulator, so the
+  recursive-forwarding lookup chain handles a dropped peer
+  mid-walk (rejected Promise $\rightarrow$ \texttt{exhausted:
+  true}) the same way in both worlds.
+\item Observability is contract-level, not back-channel. Smoke
+  tests, the simulator's traffic distribution plot, and
+  production load-balance dashboards all consume
+  \texttt{getMetrics()} and \texttt{onEvent()}. Same fields,
+  same event shapes.
+\item The production transport is one file. Swapping
+  \texttt{SimulatedTransport} for \texttt{WebRTCTransport} is
+  the deployment migration. The DHT contract, the protocol
+  body, and \texttt{AxonManager} stay.
+\end{itemize}
 
 % --------------------------------------------------------------------
 \section{Friction-Realistic Simulator Extensions}

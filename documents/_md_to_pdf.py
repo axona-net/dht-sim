@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Convert Neuromorphic-DHT-Architecture.md to PDF using reportlab."""
+"""Convert a markdown document to PDF using reportlab.
+
+Usage:
+    python3 _md_to_pdf.py <input.md> <output.pdf> [--title "..."] [--footer "..."]
+
+Defaults (when invoked with no args, for back-compat):
+    INPUT  = Neuromorphic-DHT-Architecture.md
+    OUTPUT = Neuromorphic-DHT-Architecture.pdf
+"""
 
 import re
 import os
+import sys
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -13,8 +22,19 @@ from reportlab.platypus import (
     Table, TableStyle, KeepTogether
 )
 
-INPUT = os.path.join(os.path.dirname(__file__), "Neuromorphic-DHT-Architecture.md")
+INPUT  = os.path.join(os.path.dirname(__file__), "Neuromorphic-DHT-Architecture.md")
 OUTPUT = os.path.join(os.path.dirname(__file__), "Neuromorphic-DHT-Architecture.pdf")
+TITLE  = "Neuromorphic DHT Architecture"
+FOOTER = "Neuromorphic DHT Architecture v0.56.00"
+
+if len(sys.argv) >= 3:
+    INPUT  = sys.argv[1]
+    OUTPUT = sys.argv[2]
+    for i, a in enumerate(sys.argv[3:], start=3):
+        if a == '--title' and i + 1 < len(sys.argv):
+            TITLE = sys.argv[i + 1]
+        elif a == '--footer' and i + 1 < len(sys.argv):
+            FOOTER = sys.argv[i + 1]
 
 # ── Styles ────────────────────────────────────────────────────────────────────
 
@@ -304,7 +324,7 @@ def build_pdf():
         rightMargin=1*inch,
         topMargin=0.75*inch,
         bottomMargin=0.75*inch,
-        title="Neuromorphic DHT Architecture",
+        title=TITLE,
         author="DHT Research",
     )
 
@@ -322,7 +342,7 @@ def build_pdf():
         canvas.drawString(
             1*inch,
             0.5*inch,
-            "Neuromorphic DHT Architecture v0.56.00"
+            FOOTER,
         )
         canvas.restoreState()
 
