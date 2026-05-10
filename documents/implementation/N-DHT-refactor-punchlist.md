@@ -2,7 +2,7 @@
 
 *Generated against contracts at `src/contracts/` (sim v0.70.06).*
 
-## 0. Status (sim v0.70.19, refactor commits 1-13 done)
+## 0. Status (sim v0.70.20, refactor commits 1-14 done)
 
 The 15-commit migration is partially complete.  Production target NH-1
 is now V1+V2-clean in the routing path (lookup main loop, two-hop
@@ -24,7 +24,7 @@ primitives).
 | 11     | ✅     | NH-1 lookup() recursive forwarding wrap-up              |
 | 12     | ✅     | NX-15/NX-17 scope clarification (not migrated)          |
 | 13     | ✅     | NX-6 lineage scope clarification (not migrated)         |
-| 14     | ⏳     | NeuronNode cleanup — drop `_nodeMapRef`                 |
+| 14     | ✅     | NeuronNode cleanup — `_nodeMapRef` retired              |
 | 15     | ⏳     | DHT.getMetrics / getSynaptome / onEvent observability   |
 
 Scope decision (commit 12): NX-15, NX-17, and NX-6 are research /
@@ -36,20 +36,25 @@ exclusively.  AxonManager's async-aware refactor (commit 10) is
 backward-compatible with NX-15/17's sync primitives, so they keep
 working in the simulator without any changes.
 
-Remaining V1 sites in NH-1 (after commit 11):
-  - bootstrap (`buildRoutingTables` / `bootstrapJoin`) — sim-only
-    enumerator path; will be replaced by the production
-    `BootstrapService.bootstrap(sponsor)` flow when the deployment
-    pathway lands.
-  - `postChurnHeal` liveness sweep — to be replaced by
-    `transport.onPeerDied → _evictAndReplace` fan-out in commit 14.
-  - `_pickRecruitPeer` / `_pickRelayPeer` (in pub/sub) — addressed by
-    NeuronNode cleanup in commit 14.
-  - `_nodeShim.getAlivePeer` (consumed by AxonManager) — addressed by
-    AxonManager's peer-died model in commit 14.
+Remaining V1 sites in NH-1 (after commit 14):
+  - `lookup(sourceId, ...)` — local self-resolution: `nodeMap.get(sourceId)`.
+    This is unavoidable: a DHT instance must turn its own caller-supplied
+    id into the live `NeuronNode` that owns the request.  Conceptually V1
+    only, no V2 (no peer state read).
+  - `addNode` / `removeNode` (sim Engine API): `nodeMap.set` /
+    `nodeMap.delete` are the simulator's "node creation/destruction"
+    bookkeeping, not protocol routing.
+  - `bootstrapJoin` (sim-only god's-eye join): replaced by the production
+    `BootstrapService.bootstrap(sponsor)` flow when the deployment pathway
+    lands.  Not a routing-tick concern.
+  - `_resolveNode` shim utility (axonFor's hex/Node disambiguation):
+    invoked once per AxonManager creation; sim-only.
 
-The lookup main loop itself — the protocol's central routing tick —
-is V1/V2-free as of v0.70.17.
+After commit 14, NH-1's protocol routing layer (lookup, candidate
+enumeration, two-hop probes, LEARN side-effects, pub/sub, peer
+admission/eviction, churn-heal) is V1/V2/V3-free.  Every cross-peer
+read goes through the Transport contract.  The remaining `nodeMap.get`
+sites are all sim-only orchestration.
 
 ---
 

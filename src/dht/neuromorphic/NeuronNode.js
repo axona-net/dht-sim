@@ -42,8 +42,13 @@ export class NeuronNode extends DHTNode {
      */
     this.transitCache = new Map();
 
-    /** Injected by NeuromorphicDHT after buildRoutingTables(). */
-    this._nodeMapRef = null;
+    // v0.70.20 (refactor commit 14) — `_nodeMapRef` retired.  The
+    // visualisation accessor `getRoutingTableEntries` no longer needs
+    // a back-pointer into the protocol-level `nodeMap`; it derives
+    // peer-id proxies directly from the local synaptome.  The legacy
+    // assignment site in NeuromorphicDHT*.addNode is kept as a no-op
+    // setter (assigning to an undeclared field is harmless) so we don't
+    // need to touch every legacy NX-{3..11} class in this commit.
   }
 
   // ── Synaptome management ──────────────────────────────────────────────────
@@ -129,15 +134,43 @@ export class NeuronNode extends DHTNode {
   // ── Globe visualisation ───────────────────────────────────────────────────
 
   /**
-   * Compatible with the existing globe click-to-show-routing-table feature.
+   * Snapshot of the local synaptome — pure local-state read, no
+   * cross-peer reach.  Returns an array of plain objects matching the
+   * `SynapseSnapshot` typedef in `src/contracts/types.js`.  Production
+   * observability (DHT.getSynaptome) and the simulator's globe-click
+   * routing-table viewer both consume this.
+   *
+   * v0.70.20 (refactor commit 14) — replaces the legacy
+   * `getRoutingTableEntries()` whose nodeMap-walk was the single V2
+   * site in NeuronNode.  Visualisation can resolve peer ids to nodes
+   * via the engine-side `dht.getNodes()` enumeration.
+   */
+  getSynaptomeSnapshot() {
+    const snapshot = [];
+    for (const s of this.synaptome.values()) {
+      snapshot.push({
+        peerId:   s.peerId,
+        weight:   s.weight,
+        latency:  s.latency ?? s.latencyMs ?? 0,
+        stratum:  s.stratum,
+        inertia:  s.inertia ?? 0,
+        useCount: s.useCount ?? 0,
+      });
+    }
+    return snapshot;
+  }
+
+  /**
+   * Back-compat shim for the simulator's globe-click viewer.  Returns
+   * shallow `{ id: peerId }` proxies so callers that only consume `.id`
+   * (eg. main.js's `entries.map(n => n.id)`) continue to work.  Pure
+   * local-state read — no `_nodeMapRef`.
+   *
+   * @deprecated Prefer `getSynaptomeSnapshot()` for new code.
    */
   getRoutingTableEntries() {
-    if (!this._nodeMapRef) return [];
     const entries = [];
-    for (const s of this.synaptome.values()) {
-      const n = this._nodeMapRef.get(s.peerId);
-      if (n) entries.push(n);
-    }
+    for (const s of this.synaptome.values()) entries.push({ id: s.peerId });
     return entries;
   }
 

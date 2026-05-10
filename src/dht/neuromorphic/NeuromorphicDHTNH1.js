@@ -159,7 +159,10 @@ export class NeuromorphicDHTNH1 extends DHT {
     const randBits = randomU64() & ((1n << BigInt(shift)) - 1n);
     const id       = (BigInt(prefix) << BigInt(shift)) | randBits;
     const node = new NeuronNode({ id, lat, lng });
-    node._nodeMapRef = this.nodeMap;
+    // v0.70.20 (refactor commit 14) — `_nodeMapRef` is no longer
+    // assigned: NeuronNode.getRoutingTableEntries / getSynaptomeSnapshot
+    // both derive their answer from the local synaptome.  No back-
+    // pointer into the protocol-level nodeMap is needed.
     node.temperature = this.T_INIT;
     this.nodeMap.set(id, node);
     this.network.addNode(node);
@@ -516,7 +519,7 @@ export class NeuromorphicDHTNH1 extends DHT {
         this._msg(node, peer, 'bootstrap');
       }
       }
-      node._nodeMapRef = this.nodeMap;
+      // v0.70.20 — `_nodeMapRef` retired (commit 14).
     }
     // Cap-enforcement audit happens via DHT.verifyConnectionCap in main.js
     // after this method returns, so every protocol gets the same check.
@@ -598,7 +601,7 @@ export class NeuromorphicDHTNH1 extends DHT {
         this._msg(newNode, peer, 'bootstrap');   // TRAFFIC: handshake
       }
     }
-    newNode._nodeMapRef = this.nodeMap;
+    // v0.70.20 — `_nodeMapRef` retired (commit 14).
   }
 
   bootstrapJoin(newNodeId, sponsorId) {
@@ -681,7 +684,7 @@ export class NeuromorphicDHTNH1 extends DHT {
     for (let bit = 0; bit < this.GEO_BITS; bit++) {
       iterLookup(newNodeId ^ (1n << (shift + BigInt(bit))), newNode, 2);
     }
-    newNode._nodeMapRef = this.nodeMap;
+    // v0.70.20 — `_nodeMapRef` retired (commit 14).
     newNode.temperature = this.T_INIT;
     return newNode.synaptome.size;
   }
@@ -1304,29 +1307,42 @@ export class NeuromorphicDHTNH1 extends DHT {
     }
     if (candidates.length === 0) return null;
 
+    // v0.70.20 (refactor commit 14) — return a BigInt peer-id, not
+    // a Node.  Callers (`_tryAnneal`, `_evictAndReplace`) only ever
+    // consumed `.id` from the result; the bilateral-cap check and
+    // latency measurement go through the Transport contract.  No
+    // nodeMap.get reach.
     const chosenId = candidates[Math.floor(Math.random() * candidates.length)];
-    // V1 violation kept until commit 8 — the callers (_tryAnneal,
-    // _evictAndReplace) still need the Node object for tryConnect's
-    // bilateral-cap check and roundTripLatency. Commit 8 replaces
-    // those with transport.openConnection + transport.getLatency.
-    const chosen = this.nodeMap.get(chosenId);
-    return chosen?.alive ? chosen : null;
+    return { id: chosenId };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Honest Churn Heal (each node checks its own synapses)
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /**
+   * Per-node sweep that asks each live node to evict synapses pointing
+   * at peers it has been notified are dead.  Called by the simulator
+   * Engine after a churn batch.
+   *
+   * v0.70.20 (refactor commit 14) — uses each node's transport-driven
+   * `_deadPeers` Set (populated by `transport.onPeerDied` callbacks
+   * during `removeNode`).  No `this.nodeMap.get(syn.peerId)?.alive`
+   * god's-eye reach.  The outer enumeration over `this.nodeMap.values()`
+   * is the simulator's legitimate "every alive node" walk — Engine
+   * orchestration, not protocol-level peer access.
+   */
   async postChurnHeal() {
     for (const node of this.nodeMap.values()) {
       if (!node.alive) continue;
+      const deadSet = node._deadPeers || new Set();
       const dead = [];
       for (const syn of node.synaptome.values()) {
-        if (!this.nodeMap.get(syn.peerId)?.alive) dead.push(syn);
+        if (deadSet.has(syn.peerId)) dead.push(syn);
       }
       for (const syn of dead) await this._evictAndReplace(node, syn);
-      for (const [peerId] of node.incomingSynapses) {
-        if (!this.nodeMap.get(peerId)?.alive) node.incomingSynapses.delete(peerId);
+      for (const peerId of [...node.incomingSynapses.keys()]) {
+        if (deadSet.has(peerId)) node.incomingSynapses.delete(peerId);
       }
       if (dead.length > 0) {
         node.temperature = Math.max(node.temperature, this.T_REHEAT);
@@ -1450,14 +1466,11 @@ export class NeuromorphicDHTNH1 extends DHT {
     return {
       get nodeId()   { return nodeIdToHex(node.id); },
       getSelfId()    { return nodeIdToHex(node.id); },
-      getAlivePeer(peerId) {
-        // Used by AxonManager only as a liveness check — preserved
-        // for now; commit 14 (NeuronNode cleanup) will remove this
-        // entry from the shim once AxonManager stops reaching for
-        // peer.alive directly.
-        const peer = self.nodeMap.get(topicToBigInt(peerId));
-        return peer?.alive ? peer : null;
-      },
+      // v0.70.20 (refactor commit 14) — `getAlivePeer` retired.
+      // AxonManager never consumed it (verified via grep across the
+      // codebase).  The shim now exposes only what AxonManager
+      // actually depends on.  NX-15 still publishes the method for
+      // its own legacy contract — that's NX-15's choice.
       routeMessage(targetId, type, payload, opts) {
         return self.routeMessage(node, targetId, type, payload, opts);
       },
@@ -1845,12 +1858,14 @@ export class NeuromorphicDHTNH1 extends DHT {
     if (role.children.size === 0) return null;
     const selfHex   = nodeIdToHex(node.id);
     const forwarder = meta.fromId;
+    const dead      = node._deadPeers || new Set();
 
     // Index synaptome weights by hex peerId for quick lookup.
+    // v0.70.20 (refactor commit 14) — liveness via local `_deadPeers`
+    // Set populated by transport.onPeerDied callbacks; no nodeMap.get.
     const synapseWeights = new Map();
     for (const syn of node.synaptome.values()) {
-      const peer = this.nodeMap.get(syn.peerId);
-      if (!peer?.alive) continue;
+      if (dead.has(syn.peerId)) continue;
       synapseWeights.set(nodeIdToHex(syn.peerId), {
         weight:  syn.weight,
         latency: syn.latency ?? syn.latencyMs ?? 0,
@@ -1895,19 +1910,24 @@ export class NeuromorphicDHTNH1 extends DHT {
     if (!node?.alive) return null;
     const selfHex = nodeIdToHex(node.id);
     const subBig  = topicToBigInt(subscriberId);
+    const dead    = node._deadPeers || new Set();
 
-    const considered = new Map();   // hexId → { peer, distToSub }
-    const consider = (peer) => {
-      if (!peer?.alive) return;
-      const hex = nodeIdToHex(peer.id);
-      if (hex === selfHex)       return;
-      if (hex === forwarderId)   return;
-      if (hex === subscriberId)  return;
-      if (role.children.has(hex)) return;
-      if (considered.has(hex))    return;
-      considered.set(hex, { peer, distToSub: peer.id ^ subBig });
-    };
-    for (const syn of node.synaptome.values()) consider(this.nodeMap.get(syn.peerId));
+    // v0.70.20 (refactor commit 14) — pure synaptome scan; no
+    // nodeMap.get.  We work in (peerId BigInt, hex) pairs derived
+    // from the local synaptome and skip dead peers via the
+    // transport-driven `_deadPeers` Set.
+    const considered = new Map();   // hexId → { peerId, distToSub }
+    for (const syn of node.synaptome.values()) {
+      const peerId = syn.peerId;
+      if (dead.has(peerId)) continue;
+      const hex = nodeIdToHex(peerId);
+      if (hex === selfHex)       continue;
+      if (hex === forwarderId)   continue;
+      if (hex === subscriberId)  continue;
+      if (role.children.has(hex)) continue;
+      if (considered.has(hex))    continue;
+      considered.set(hex, { peerId, distToSub: peerId ^ subBig });
+    }
     if (considered.size === 0) return null;
 
     let bestHex = null, bestDist = null;
