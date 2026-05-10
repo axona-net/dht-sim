@@ -232,10 +232,77 @@ export class NeuromorphicDHTNH1 extends DHT {
       return peerIds;
     });
 
-    // Dead-peer callback.  In commits 5+ this will trigger
-    // _evictAndReplace on the affected synapse and reheat the local
-    // node's temperature.  For now we just record that the event
-    // arrived so the wiring is verifiable end-to-end.
+    // ── reinforce (commit 9) ──────────────────────────────────────────
+    // Source-of-a-successful-path notifies each peer along the path:
+    // "the synapse you used to reach {synapsePeerId} delivered.  Update
+    // your local weight + inertia."  Receiver runs the LTP update on
+    // its local synaptome entry.  No reply expected — fire-and-forget.
+    node.transport.onNotification('reinforce', (_fromId, payload) => {
+      const syn = node.synaptome.get(payload.synapsePeerId);
+      if (!syn) return;
+      syn.reinforce(this.simEpoch, this.INERTIA_DURATION);
+      syn.useCount = (syn.useCount ?? 0) + 1;
+    });
+
+    // ── triadic_introduce (commit 9) ──────────────────────────────────
+    // Transit-observer notifies the source: "I keep seeing you and
+    // {peerId} go through me — you should know each other.  Add a
+    // synapse to {peerId}."  Receiver runs the local introduce logic
+    // (admission via _addByVitality).
+    node.transport.onNotification('triadic_introduce', async (_fromId, payload) => {
+      if (node.synaptome.has(payload.peerId)) return;
+      const stratum = clz64(node.id ^ payload.peerId);
+      const syn = new Synapse({ peerId: payload.peerId, latencyMs: 0, stratum });
+      syn.weight   = 0.5;
+      syn.inertia  = this.simEpoch;
+      syn._addedBy = 'triadic';
+      await this._addByVitality(node, syn);
+    });
+
+    // ── hop_cache + lateral_spread (commit 9) ─────────────────────────
+    // After a successful hop A→B→C, source notifies B: "you should
+    // know about C directly — install a hop-cache synapse."  Same
+    // handler also serves the lateral-spread chain (depth=1) where
+    // the original hop_cache receiver propagates to its
+    // geo-neighbours.  Two different message types route here so the
+    // per-type traffic breakdown preserves the depth distinction.
+    const hopCacheHandler = async (_fromId, payload) => {
+      const targetId = payload.target;
+      const depth    = payload.depth ?? 0;
+      if (node.synaptome.has(targetId)) return;
+      const stratum = clz64(node.id ^ targetId);
+      const syn = new Synapse({ peerId: targetId, latencyMs: 0, stratum });
+      syn.weight   = 0.5;             // NX-6 parity
+      syn.inertia  = this.simEpoch;
+      syn._addedBy = depth === 0 ? 'hopCache' : 'lateralSpread';
+      const added  = await this._addByVitality(node, syn);
+      if (!added) return;
+
+      // Lateral spread: receiver tells its geographic neighbours about
+      // the new target.  Only fires for depth=0; depth=1 receivers
+      // do not propagate further.
+      if (this.EN_LATERAL_SPREAD && depth === 0) {
+        const nodeRegion = node.id >> BigInt(64 - this.GEO_REGION_BITS);
+        const regional = [];
+        for (const s of node.synaptome.values()) {
+          if (s.peerId === targetId) continue;
+          if ((s.peerId >> BigInt(64 - this.GEO_REGION_BITS)) === nodeRegion) {
+            regional.push(s);
+          }
+        }
+        regional.sort((a, b) => b.weight - a.weight);
+        for (let i = 0; i < Math.min(this.LATERAL_K, regional.length); i++) {
+          node.transport.notify(regional[i].peerId, 'lateral_spread',
+            { target: targetId, depth: 1 })
+            .catch(err => console.error('NH-1: lateral_spread notify failed:', err));
+        }
+      }
+    };
+    node.transport.onNotification('hop_cache',      hopCacheHandler);
+    node.transport.onNotification('lateral_spread', hopCacheHandler);
+
+    // Dead-peer callback.  Future commits convert this to fire reheat
+    // + _evictAndReplace; for now record events for verification.
     node.transport.onPeerDied((peerId) => {
       if (!node._deadPeerEvents) node._deadPeerEvents = [];
       node._deadPeerEvents.push(peerId);
@@ -605,13 +672,14 @@ export class NeuromorphicDHTNH1 extends DHT {
       this._msg(current, nextNode, 'find_node');
 
       // ── LEARN: hop caching ─────────────────────────────────────────────
-      // v0.70.14 — _hopCache is now async; fire-and-forget since it is
-      // a learning side-effect that does not block the routing critical
-      // path.  The synapse + lateral-spread land in subsequent ticks.
+      // v0.70.15 (commit 9) — hop caching is now a real wire notify
+      // from source to current.  Current's hop_cache notify handler
+      // installs a synapse for `target` and fires lateral_spread
+      // notifications to its geographic neighbours.  Fire-and-forget;
+      // off the routing critical path.
       if (currentId !== targetKey) {
-        this._hopCache(currentId, targetKey).catch(err => {
-          console.error(`NH-1: _hopCache failed:`, err);
-        });
+        source.transport.notify(currentId, 'hop_cache', { target: targetKey, depth: 0 })
+          .catch(err => console.error('NH-1: hop_cache notify failed:', err));
       }
 
       // ── LEARN: triadic closure ─────────────────────────────────────────
@@ -641,7 +709,7 @@ export class NeuromorphicDHTNH1 extends DHT {
       const hopCount = path.length - 1;
       this._emaHops = this._emaHops === null ? hopCount : 0.9 * this._emaHops + 0.1 * hopCount;
       this._emaTime = this._emaTime === null ? totalTimeMs : 0.9 * this._emaTime + 0.1 * totalTimeMs;
-      if (trace.length > 0 && totalTimeMs <= this._emaTime) this._reinforceWave(trace);
+      if (trace.length > 0 && totalTimeMs <= this._emaTime) this._reinforceWave(source, trace);
     }
 
     return { path, hops: path.length - 1, time: totalTimeMs, found: reached };
@@ -800,20 +868,22 @@ export class NeuromorphicDHTNH1 extends DHT {
   // LEARN: LTP Reinforcement
   // ═══════════════════════════════════════════════════════════════════════════
 
-  _reinforceWave(trace) {
+  _reinforceWave(source, trace) {
+    // v0.70.15 (refactor commit 9) — LTP reinforcement via real wire
+    // notifications.  The source of the successful lookup walks the
+    // trace and fires a 'reinforce' notify to each step's `fromId`.
+    // Each receiver runs the LTP update on its own local synaptome
+    // entry (handler registered in _registerNH1Handlers).
+    //
+    // Notify is fire-and-forget.  If a receiver is dead or unreachable,
+    // the notification drops silently — LTP missing on one step of a
+    // historical successful path is a non-fatal benign loss.  The
+    // counter still bumps on the SimulatedTransport side under
+    // 'reinforce'.
     for (let i = trace.length - 1; i >= 0; i--) {
       const { fromId, synapse } = trace[i];
-      const node = this.nodeMap.get(fromId);
-      if (!node) continue;
-      const syn = node.synaptome.get(synapse.peerId);
-      if (syn) {
-        syn.reinforce(this.simEpoch, this.INERTIA_DURATION);
-        syn.useCount = (syn.useCount ?? 0) + 1;
-        // TRAFFIC: LTP feedback walks back along the path — each step is a
-        // small "your synapse to me delivered" ack from peer → node.
-        const peer = this.nodeMap.get(synapse.peerId);
-        if (peer) this._msg(peer, node, 'reinforce');
-      }
+      source.transport.notify(fromId, 'reinforce', { synapsePeerId: synapse.peerId })
+        .catch(err => console.error('NH-1: reinforce notify failed:', err));
     }
   }
 
@@ -822,109 +892,35 @@ export class NeuromorphicDHTNH1 extends DHT {
   // ═══════════════════════════════════════════════════════════════════════════
 
   _recordTransit(node, originId, nextId) {
+    // v0.70.15 (refactor commit 9) — triadic introduction is now a real
+    // wire notification.  The transit-observer fires
+    // 'triadic_introduce' at the origin; the origin's notify handler
+    // runs the local introduce logic (admission via _addByVitality).
+    //
+    // The legacy central _introduce dispatcher is removed — the
+    // handler in _registerNH1Handlers is the only home for that logic
+    // now.
     const key   = `${originId}_${nextId}`;
     const count = (node.transitCache.get(key) ?? 0) + 1;
     if (count >= this.TRIADIC_THRESHOLD) {
       node.transitCache.delete(key);
-      // TRAFFIC: the transit observer (`node`) sends an "introduce" hint
-      // back to the original source. One wire message per fired triadic.
-      const nodeA = this.nodeMap.get(originId);
-      if (nodeA) this._msg(node, nodeA, 'triadic_introduce');
-      // v0.70.14 — _introduce is now async.  Triadic introduction is a
-      // background side effect (it does not block the routing path that
-      // observed the transit), so fire-and-forget per the contract
-      // design.  Stray rejections are logged.
-      this._introduce(originId, nextId).catch(err => {
-        console.error(`NH-1: triadic _introduce failed (${originId} ${nextId}):`, err);
-      });
+      node.transport.notify(originId, 'triadic_introduce', { peerId: nextId })
+        .catch(err => console.error('NH-1: triadic_introduce notify failed:', err));
     } else {
       node.transitCache.set(key, count);
-    }
-  }
-
-  async _introduce(aId, cId) {
-    // V1 violation kept here (this.nodeMap.get(aId)) until commit 14
-    // restructures NH-1 around per-node local execution.  In production
-    // _introduce runs *at* node A, triggered by a 'triadic_introduce'
-    // notification from B.  In the simulator's god's-eye walk we
-    // dispatch centrally with both ids and resolve nodeA via the
-    // simulator-only nodeMap.
-    const nodeA = this.nodeMap.get(aId);
-    if (!nodeA?.alive) return;
-    if (nodeA.synaptome.has(cId)) return;
-
-    const stratum = clz64(nodeA.id ^ cId);
-    const syn     = new Synapse({ peerId: cId, latencyMs: 0, stratum });
-    syn.weight    = 0.5;
-    syn.inertia   = this.simEpoch;          // fresh recency
-    syn._addedBy  = 'triadic';
-    const added  = await this._addByVitality(nodeA, syn);
-    if (added) {
-      // Legacy 'triadic_probe' counter.  Commit 9 will retire this in
-      // favour of a real transport.notify for the cross-peer LEARN
-      // side-effects; for now we keep the counter for parity with the
-      // v0.70.04 bandwidth study's per-type breakdown.
-      const nodeC = this.nodeMap.get(cId);
-      if (nodeC) this._msg(nodeA, nodeC, 'triadic_probe');
     }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LEARN: Hop Caching
   // ═══════════════════════════════════════════════════════════════════════════
-
-  async _hopCache(nodeId, targetId, depth = 0) {
-    // V1 cleanup deferred to commit 14 — _hopCache will execute *at*
-    // the local node in production (no nodeMap lookup needed).  For
-    // now the simulator's god's-eye dispatch resolves both nodeId and
-    // targetId through nodeMap so legacy callers (lookup + recursive
-    // lateral-spread) continue to work unchanged.
-    const node   = this.nodeMap.get(nodeId);
-    if (!node?.alive) return;
-    if (!node.synaptome.has(targetId)) {
-      const stratum = clz64(node.id ^ targetId);
-      const syn     = new Synapse({ peerId: targetId, latencyMs: 0, stratum });
-      syn.weight    = 0.5;             // NX-6 parity (was 0.3 — too low to displace bootstrap)
-      syn.inertia   = this.simEpoch;   // fresh recency so vitality comparison is fair
-      syn._addedBy  = depth === 0 ? 'hopCache' : 'lateralSpread';
-      const added   = await this._addByVitality(node, syn);
-
-      // TRAFFIC: when a synapse is added, the node had to probe target to
-      // confirm it's alive and learn its latency — count one wire message.
-      // (Legacy counter; commit 9 retires this in favor of transport.notify.)
-      if (added) {
-        const target = this.nodeMap.get(targetId);
-        if (target) this._msg(node, target, depth === 0 ? 'hop_cache' : 'hop_cache_lateral');
-      }
-
-      // Lateral spread: propagate to geographic neighbors (same top-4 geo bits)
-      if (this.EN_LATERAL_SPREAD && added && depth === 0) {
-        const nodeRegion = node.id >> BigInt(64 - this.GEO_REGION_BITS);
-        const regional = [];
-        for (const s of node.synaptome.values()) {
-          if (s.peerId === targetId) continue;
-          const peer = this.nodeMap.get(s.peerId);
-          if (!peer?.alive) continue;
-          if ((s.peerId >> BigInt(64 - this.GEO_REGION_BITS)) === nodeRegion) {
-            regional.push(s);
-          }
-        }
-        regional.sort((a, b) => b.weight - a.weight);
-        for (let i = 0; i < Math.min(this.LATERAL_K, regional.length); i++) {
-          // TRAFFIC: the lateral-spread tells the regional peer about target.
-          // That's a wire message from node → regional peer.
-          const lateralPeer = this.nodeMap.get(regional[i].peerId);
-          if (lateralPeer) this._msg(node, lateralPeer, 'lateral_spread');
-          // v0.70.14 — recursive call now async; fire-and-forget per
-          // contract design (lateral spread is a side effect, not on
-          // the routing critical path).
-          this._hopCache(regional[i].peerId, targetId, 1).catch(err => {
-            console.error(`NH-1: lateral _hopCache failed:`, err);
-          });
-        }
-      }
-    }
-  }
+  //
+  // The central _hopCache(nodeId, targetId, depth) dispatcher was
+  // removed in commit 9.  Its body now lives entirely inside the
+  // 'hop_cache' / 'lateral_spread' notification handler in
+  // _registerNH1Handlers.  Source fires the notify directly from the
+  // lookup hop body; receiver runs the local hop-cache + recursive
+  // lateral-spread chain in its handler.
 
   // ═══════════════════════════════════════════════════════════════════════════
   // FORGET: Periodic Decay + Vitality Pruning
