@@ -1344,47 +1344,53 @@ export class NeuromorphicDHTNH1 extends DHT {
    * Returns the closest node strictly closer than `node`, or null if no
    * such 2-hop peer exists (true terminal).
    */
-  _findCloserInTwoHops(node, targetId) {
+  async _findCloserInTwoHops(node, targetId) {
+    // v0.70.13 (refactor commit 7) — clears the third V2 violation in
+    // NH-1.  The terminal-globality check now reuses the lookahead_probe
+    // RPC handler registered in commit 5: ask each first-hop peer "what
+    // is your closest forward synapse to target?" (with fromDist set to
+    // *node*'s own distance to target, so the receiver only returns
+    // peers strictly closer than us).  Aggregate the responses and pick
+    // the globally-closest 2-hop peer.
+    //
+    // Wire-counter rename: the legacy _msg(node, p1, 'two_hop_probe')
+    // counter is dropped.  These RPCs now bump 'lookahead_probe' (same
+    // type the lookup-side uses), unifying the per-type instrumentation
+    // for what is structurally the same operation.  Total wire-message
+    // count is unchanged; the per-type breakdown now has zero
+    // 'two_hop_probe' entries and a higher 'lookahead_probe' total.
+
     const target = topicToBigInt(targetId);
     const myDist = node.id ^ target;
     let bestPeer = null;
     let bestDist = myDist;
 
-    // v0.66.06: restructured as an explicit per-peer query to mirror
-    // real-network semantics. For each 1-hop peer p1, we simulate p1's
-    // single-shot RPC response to "what is your closest peer to target?"
-    // — p1 reports one candidate from its own local routing table. We
-    // then take the minimum across all p1 responses. Mathematically
-    // equivalent to the previous flat double-loop (same cost, same
-    // result); the structure now makes the bounded-RPC pattern explicit.
-    const queryP1 = (p1) => {
-      let p1Best = null, p1BestDist = null;
-      for (const syn2 of p1.synaptome.values()) {
-        if (syn2.peerId === node.id) continue;     // skip self
-        const d2 = syn2.peerId ^ target;
-        if (p1BestDist !== null && d2 >= p1BestDist) continue;
-        const p2 = this.nodeMap.get(syn2.peerId);
-        if (!p2?.alive) continue;
-        p1BestDist = d2;
-        p1Best = p2;
-      }
-      if (p1Best && p1BestDist < bestDist) {
-        bestDist = p1BestDist;
-        bestPeer = p1Best;
-      }
-    };
-    for (const syn of node.synaptome.values()) {
-      const p1 = this.nodeMap.get(syn.peerId);
-      if (p1?.alive) {
-        // TRAFFIC: each 1-hop probe used by the terminal-globality check
-        // is a bounded "your closest peer to target?" RPC.
-        this._msg(node, p1, 'two_hop_probe');
-        queryP1(p1);
+    const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
+    if (probeTargets.length > 0) {
+      const settled = await Promise.allSettled(
+        probeTargets.map(peerId =>
+          node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
+        )
+      );
+      for (const r of settled) {
+        if (r.status !== 'fulfilled' || !r.value || r.value.terminal) continue;
+        const d = r.value.peerId ^ target;
+        if (d < bestDist) {
+          // V1 violation kept until commit 14: routeMessage still
+          // takes a Node object for `current = nextHop` advancement.
+          const candidate = this.nodeMap.get(r.value.peerId);
+          if (candidate?.alive) {
+            bestDist = d;
+            bestPeer = candidate;
+          }
+        }
       }
     }
 
-    // Also consider incoming peers as a reverse-routing option (incoming
-    // peers point AT us, so we can route via them to whatever they reach).
+    // Incoming peers as a reverse-routing option (they point AT us, so
+    // we can route via them to whatever they reach).  Liveness still
+    // checked via nodeMap.get — V1 cleanup in commit 14 (NeuronNode
+    // cleanup) will replace this with transport-side semantics.
     for (const syn of node.incomingSynapses.values()) {
       const peer = this.nodeMap.get(syn.peerId);
       if (!peer?.alive) continue;
@@ -1428,7 +1434,7 @@ export class NeuromorphicDHTNH1 extends DHT {
       let isTerminal = nextHop === null;
 
       if (isTerminal) {
-        const globalClosest = this._findCloserInTwoHops(current, targetId);
+        const globalClosest = await this._findCloserInTwoHops(current, targetId);
         if (globalClosest
             && globalClosest.id !== current.id
             && !visitedTerminalCheck.has(globalClosest.id)) {
