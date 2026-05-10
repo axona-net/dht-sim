@@ -1434,7 +1434,7 @@ export class SimulationEngine {
             for (let r = 0; r < rounds; r++) {
               for (const node of refreshSet) {
                 if (!node.alive) continue;
-                dht.axonFor(node).refreshTick();
+                await dht.axonFor(node).refreshTick();
                 if (++opsSinceYield >= 2000) {
                   await this._yield();
                   opsSinceYield = 0;
@@ -2149,7 +2149,7 @@ export class SimulationEngine {
     for (let r = 0; r < 2; r++) {
       for (const node of aliveNodes) {
         if (!node.alive) continue;
-        dht.axonFor(node).refreshTick();
+        await dht.axonFor(node).refreshTick();
       }
     }
 
@@ -2215,13 +2215,13 @@ export class SimulationEngine {
     for (let r = 0; r < refreshRounds; r++) {
       for (const e of entries.values()) {
         if (!e.node.alive) continue;
-        dht.axonFor(e.node).refreshTick();
+        await dht.axonFor(e.node).refreshTick();
       }
       // Also refresh axons on any live node that's not in entries
       // (intermediate nodes that captured subscribe traffic):
       for (const node of dht.getNodes()) {
         if (!node.alive || entries.has(node.id)) continue;
-        dht.axonFor(node).refreshTick();
+        await dht.axonFor(node).refreshTick();
       }
     }
 

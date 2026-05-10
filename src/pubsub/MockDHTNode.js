@@ -272,8 +272,10 @@ export class MockDHTNode {
       const nextHop = currentNode._greedyNextHopToward(targetId);
       const isTerminal = nextHop === null;
 
-      // Invoke this node's handler (if any).
-      const result = currentNode._deliverRouted(type, payload, {
+      // Invoke this node's handler (if any).  Handlers may be async
+      // (AxonManager became async-aware in v0.70.16), so we await the
+      // result before deciding whether the message was consumed.
+      const result = await currentNode._deliverRouted(type, payload, {
         fromId:    previousId,
         targetId,
         hopCount:  hops,
@@ -312,12 +314,16 @@ export class MockDHTNode {
     return { consumed: false, atNode: currentNode.id, hops, exhausted: true };
   }
 
-  /** Invoke the registered handler for a routed type; returns the handler's result. */
-  _deliverRouted(type, payload, meta) {
+  /** Invoke the registered handler for a routed type; returns the handler's
+   *  result.  Async-aware (v0.70.16): awaits the handler so the
+   *  'consumed'/'forward' decision reflects the post-await state. */
+  async _deliverRouted(type, payload, meta) {
     const handler = this._routedMessageHandlers.get(type);
     if (!handler) return 'forward';
-    try { return handler(payload, meta); }
-    catch (err) {
+    try {
+      const r = await handler(payload, meta);
+      return r ?? 'forward';
+    } catch (err) {
       console.error(`MockDHTNode ${this.id}: handler error for routed '${type}':`, err);
       return 'forward';
     }
@@ -357,11 +363,16 @@ export class MockDHTNode {
     return true;
   }
 
-  _deliverDirect(type, payload, meta) {
+  /** v0.70.16 — `async` so that async handlers (AxonManager became
+   *  async-aware) drain to completion before the setTimeout callback
+   *  resolves.  Without the await, fan-out chains lag behind the
+   *  test's `await sleep(...)` window, causing flaky timing-dependent
+   *  assertions in test_axon.js. */
+  async _deliverDirect(type, payload, meta) {
     if (!this.isAlive()) return;
     const handler = this._directMessageHandlers.get(type);
     if (!handler) return;
-    try { handler(payload, meta); }
+    try { await handler(payload, meta); }
     catch (err) {
       console.error(`MockDHTNode ${this.id}: handler error for direct '${type}':`, err);
     }

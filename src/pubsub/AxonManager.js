@@ -183,13 +183,13 @@ export class AxonManager {
    * node still computes its own answer on first miss using only its
    * local routing table; no inter-node sharing of results.
    */
-  _findKClosest(topicId, K) {
+  async _findKClosest(topicId, K) {
     const key = `${typeof topicId === 'string' ? topicId : topicId.toString(16).padStart(16, '0')}_${K}`;
     const entry = this._kClosestCache.get(key);
     if (entry && entry.epoch === this._kClosestEpoch) {
       return entry.value;
     }
-    const value = this.dht.findKClosest(topicId, K);
+    const value = await this.dht.findKClosest(topicId, K);
     this._kClosestCache.set(key, { epoch: this._kClosestEpoch, value });
     return value;
   }
@@ -251,46 +251,50 @@ export class AxonManager {
    * exponential duplication when the fan-out tree has overlapping paths
    * (common under K-closest replication + sub-axon recruitment).
    */
+  /**
+   * v0.70.16 — pubsubPublish is sync from the caller's perspective: it
+   * stamps publishId + timestamp synchronously and returns the
+   * publishId immediately so `entry.adapter.publish(...)` keeps its
+   * old contract.  The actual DHT sendDirect/routeMessage primitives
+   * run in the background as a fire-and-forget Promise chain — this
+   * matches v0.70.15 behavior (the underlying network transport
+   * — SimulatedNetwork — was already async via setTimeout, but the
+   * AxonManager wrapper presented a sync API).
+   */
   pubsubPublish(topicId, json) {
     const publishId = `${this.nodeId}:${++this._publishCounter}`;
-    // Publisher's wall-clock timestamp, propagated through the tree and
-    // echoed back to the publisher as `lastSeenTs` in future subscribes
-    // so relays can reconstruct "messages you missed since ts" from
-    // their replay cache.
     const publishTs = this._now();
+    this._asyncPublish(topicId, json, publishId, publishTs)
+      .catch(err => console.error('AxonManager: publish failed:', err));
+    return publishId;
+  }
+
+  /**
+   * @private
+   * Burst-send: once findKClosest resolves we issue all sendDirect calls
+   * synchronously in a single microtask so concurrent publishes don't
+   * interleave at the wire layer.  Critical for tests like
+   * test_integration's gap-detection that drop the first publish's
+   * full K-fan-out as a contiguous prefix of wire transactions.
+   */
+  async _asyncPublish(topicId, json, publishId, publishTs) {
     if (this._useKClosestMode()) {
-      const roots = this._findKClosest(topicId, this.rootSetSize);
+      const roots = await this._findKClosest(topicId, this.rootSetSize);
       if (roots.length > 0) {
         for (const target of roots) {
           this.dht.sendDirect(target, 'pubsub:publish-k', {
             topicId, json, publishId, publishTs,
           });
         }
-        return publishId;
+        return;
       }
     }
 
-    // NX-17 axonal mode with cross-fragment redundancy.
-    //
-    // Under a bilateral physical-connection cap, routed-walk convergence
-    // weakens: different sources can land at different "globally closest"
-    // terminals, each opening its own root for the same topic. Pre-fix,
-    // recovered delivery dropped from 100 % → 64 % at cap=100 / 5 % churn.
-    //
-    // Strategy: send via direct messages to the top-K closest peers
-    // (K = crossFragmentRoots + 1, default 3). findKClosest is set-stable
-    // across sources (K-overlap measured at 100 % under our test
-    // conditions), so publisher and subscribers agree on the same K
-    // peers. Each recipient is either a role-holder (fan out to children)
-    // or — via _onPublishDirect's existing fallback — routes onward to
-    // find one. publishId dedup at every receiver prevents duplicate
-    // delivery if multiple direct sends land at overlapping subtrees.
-    //
-    // K=1 reduces to the legacy single-routed-walk mode. K>=2 gives
-    // multi-root resilience under cap pressure.
+    // NX-17 axonal mode with cross-fragment redundancy.  See v0.66.x
+    // commit notes for the K-overlap rationale.
     const K = (this.crossFragmentRoots ?? 0) + 1;
     if (K > 1 && typeof this.dht.findKClosest === 'function') {
-      const targets = this._findKClosest(topicId, K);
+      const targets = await this._findKClosest(topicId, K);
       if (targets.length > 0) {
         for (const target of targets) {
           if (target === this.nodeId) continue;
@@ -298,14 +302,13 @@ export class AxonManager {
             topicId, json, publishId, publishTs,
           });
         }
-        return publishId;
+        return;
       }
     }
     // Fallback (K=1 or no findKClosest): single routed walk.
     this.dht.routeMessage(topicId, 'pubsub:publish', {
       topicId, json, publishId, publishTs,
     });
-    return publishId;
   }
 
   /**
@@ -314,33 +317,34 @@ export class AxonManager {
    * any one of them and still find us. Falls back to a routed subscribe
    * when the transport doesn't expose findKClosest.
    */
+  /**
+   * v0.70.16 — sync wrapper around an async _asyncSubscribe chain.
+   * Records mySubscriptions immediately so callers that read it on
+   * the next line see the subscription before the network ops drain.
+   */
   pubsubSubscribe(topicId) {
     this.mySubscriptions.set(topicId, { subscribedAt: this._now() });
     const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
+    this._asyncSubscribe(topicId, lastSeenTs)
+      .catch(err => console.error('AxonManager: subscribe failed:', err));
+  }
 
+  /** @private — burst-send pattern; see _asyncPublish doc. */
+  async _asyncSubscribe(topicId, lastSeenTs) {
     if (this._useKClosestMode()) {
-      const roots = this._findKClosest(topicId, this.rootSetSize);
+      const roots = await this._findKClosest(topicId, this.rootSetSize);
       if (roots.length > 0) {
         for (const peerId of roots) {
           this.dht.sendDirect(peerId, 'pubsub:subscribe-k', {
-            topicId,
-            subscriberId: this.nodeId,
-            peerRoots:    roots,
-            lastSeenTs,
+            topicId, subscriberId: this.nodeId, peerRoots: roots, lastSeenTs,
           });
         }
         return;
       }
     }
-
-    // NX-17 axonal mode: subscribe via direct sends to top-K closest
-    // peers (mirrors pubsubPublish). Both sides target the SAME K via
-    // findKClosest, which is set-stable across sources, so subscribers
-    // and publisher agree on the same K peers regardless of cap-induced
-    // routing-walk divergence.
     const K = (this.crossFragmentRoots ?? 0) + 1;
     if (K > 1 && typeof this.dht.findKClosest === 'function') {
-      const targets = this._findKClosest(topicId, K);
+      const targets = await this._findKClosest(topicId, K);
       if (targets.length > 0) {
         for (const target of targets) {
           if (target === this.nodeId) continue;
@@ -351,21 +355,24 @@ export class AxonManager {
         return;
       }
     }
-    // Fallback (K=1 or no findKClosest): single routed walk.
     this.dht.routeMessage(topicId, 'pubsub:subscribe',
                           { topicId, subscriberId: this.nodeId, lastSeenTs });
   }
 
   pubsubUnsubscribe(topicId) {
     this.mySubscriptions.delete(topicId);
+    this._asyncUnsubscribe(topicId)
+      .catch(err => console.error('AxonManager: unsubscribe failed:', err));
+  }
 
+  /** @private — burst-send pattern. */
+  async _asyncUnsubscribe(topicId) {
     if (this._useKClosestMode()) {
-      const roots = this._findKClosest(topicId, this.rootSetSize);
+      const roots = await this._findKClosest(topicId, this.rootSetSize);
       if (roots.length > 0) {
         for (const peerId of roots) {
           this.dht.sendDirect(peerId, 'pubsub:unsubscribe-k', {
-            topicId,
-            subscriberId: this.nodeId,
+            topicId, subscriberId: this.nodeId,
           });
         }
         return;
@@ -396,7 +403,7 @@ export class AxonManager {
    * - If we are the terminal (closest-to-hash) and no axon exists: become root.
    * - Otherwise: forward along the route.
    */
-  _onSubscribe(payload, meta) {
+  async _onSubscribe(payload, meta) {
     const { topicId, subscriberId, lastSeenTs } = payload;
     const role = this.axonRoles.get(topicId);
     const now = this._now();
@@ -416,11 +423,11 @@ export class AxonManager {
       //     a new root with us as its first child, and subscribers
       //     eventually re-route through the same mechanism.
       if (subscriberId === this.nodeId) return 'forward';
-      this._addOrRecruitChild(topicId, role, subscriberId, meta.fromId);
+      await this._addOrRecruitChild(topicId, role, subscriberId, meta.fromId);
       // Reply with any cached publishes the subscriber missed since
       // lastSeenTs. If lastSeenTs is omitted (brand-new subscriber),
       // replay the whole cache.
-      this._maybeSendReplay(topicId, role, subscriberId, lastSeenTs);
+      await this._maybeSendReplay(topicId, role, subscriberId, lastSeenTs);
       return 'consumed';
     }
 
@@ -457,7 +464,7 @@ export class AxonManager {
    * receive repeated promote-axon messages accumulate subscribers past
    * the cap because the recruit-check was only in the subscribe paths.
    */
-  _addOrRecruitChild(topicId, role, subscriberId, forwarderId = null) {
+  async _addOrRecruitChild(topicId, role, subscriberId, forwarderId = null) {
     const now = this._now();
     const existing = role.children.get(subscriberId);
     if (existing) { existing.lastRenewed = now; return; }
@@ -515,7 +522,7 @@ export class AxonManager {
           role.children.set(relayId, {
             createdAt: now, lastRenewed: now, isSubaxon: true,
           });
-          this.dht.sendDirect(relayId, 'pubsub:adopt-subscribers', {
+          await this.dht.sendDirect(relayId, 'pubsub:adopt-subscribers', {
             topicId,
             subscriberIds: batch,
           });
@@ -530,7 +537,7 @@ export class AxonManager {
       const reuseId = this._pickExistingSubAxon(role, subscriberId, forwarderId);
       if (reuseId) {
         role.children.get(reuseId).lastRenewed = now;
-        this.dht.sendDirect(reuseId, 'pubsub:promote-axon', {
+        await this.dht.sendDirect(reuseId, 'pubsub:promote-axon', {
           topicId,
           newSubscriberId: subscriberId,
           parentId:        this.nodeId,
@@ -549,7 +556,7 @@ export class AxonManager {
         const child = role.children.get(recruitId);
         child.lastRenewed = now;
         child.isSubaxon = true;
-        this.dht.sendDirect(recruitId, 'pubsub:promote-axon', {
+        await this.dht.sendDirect(recruitId, 'pubsub:promote-axon', {
           topicId,
           newSubscriberId: subscriberId,
           parentId:        this.nodeId,
@@ -701,7 +708,7 @@ export class AxonManager {
    * unsubscribe semantics uniform with TTL expiry and avoids flapping on
    * rapid subscribe/unsubscribe churn.
    */
-  _onUnsubscribe(payload, meta) {
+  async _onUnsubscribe(payload, meta) {
     const { topicId, subscriberId } = payload;
     const role = this.axonRoles.get(topicId);
     if (role && role.children.has(subscriberId)) {
@@ -718,7 +725,7 @@ export class AxonManager {
    * If we are the axon for this topic, fan out to all children via
    * sendDirect. Otherwise, forward along the route.
    */
-  _onPublish(payload, meta) {
+  async _onPublish(payload, meta) {
     const { topicId, json, publishId, publishTs } = payload;
     const role = this.axonRoles.get(topicId);
     if (!role) return 'forward';
@@ -750,8 +757,8 @@ export class AxonManager {
         if (this._deliveryCallback) this._deliveryCallback(topicId, json, publishId, publishTs);
         continue;
       }
-      const ok = this.dht.sendDirect(childId, 'pubsub:deliver',
-                                      { topicId, json, publishId, publishTs });
+      const ok = await this.dht.sendDirect(childId, 'pubsub:deliver',
+                                           { topicId, json, publishId, publishTs });
       if (!ok) deadChildren.push(childId);
     }
     for (const dead of deadChildren) role.children.delete(dead);
@@ -828,7 +835,7 @@ export class AxonManager {
    * Leaves (no role) and sub-axons (role.isRoot === false) still deliver
    * locally + fan down appropriately.
    */
-  _onDeliver(payload, meta) {
+  async _onDeliver(payload, meta) {
     const { topicId, json, publishId, publishTs } = payload;
     if (this._alreadySeenPublish(publishId)) return;
 
@@ -849,8 +856,8 @@ export class AxonManager {
         for (const [childId] of role.children) {
           if (childId === meta.fromId) continue;
           if (childId === this.nodeId) continue;
-          this.dht.sendDirect(childId, 'pubsub:deliver',
-                               { topicId, json, publishId, publishTs });
+          await this.dht.sendDirect(childId, 'pubsub:deliver',
+                                    { topicId, json, publishId, publishTs });
         }
       }
     }
@@ -873,7 +880,7 @@ export class AxonManager {
    * promoter. Our own refreshTick will issue subscribes upward so the
    * promoter keeps us in its children.
    */
-  _onPromoteAxon(payload, meta) {
+  async _onPromoteAxon(payload, meta) {
     const { topicId, newSubscriberId, parentId } = payload;
     const now = this._now();
 
@@ -891,15 +898,15 @@ export class AxonManager {
       this.axonRoles.set(topicId, role);
       // Immediately refresh upward so the promoter sees us as one of
       // their children right away (without waiting for the next tick).
-      this.dht.routeMessage(topicId, 'pubsub:subscribe',
-                            { topicId, subscriberId: this.nodeId });
+      await this.dht.routeMessage(topicId, 'pubsub:subscribe',
+                                  { topicId, subscriberId: this.nodeId });
     }
 
     // Use the shared add-or-recruit path so we cascade into our OWN
     // recruitment when at capacity, instead of hoarding subscribers past
     // maxDirectSubs. The parent in the payload tells us who promoted us,
     // but from the new subscriber's perspective WE are its parent.
-    this._addOrRecruitChild(topicId, role, newSubscriberId, meta.fromId);
+    await this._addOrRecruitChild(topicId, role, newSubscriberId, meta.fromId);
   }
 
   /**
@@ -916,7 +923,7 @@ export class AxonManager {
    * us and the root. Either way, we attach into the live tree and start
    * receiving publishes through the normal root→…→self cascade.
    */
-  _onAdoptSubscribers(payload, meta) {
+  async _onAdoptSubscribers(payload, meta) {
     const { topicId, subscriberIds } = payload;
     if (!Array.isArray(subscriberIds) || subscriberIds.length === 0) return;
     const now = this._now();
@@ -949,8 +956,8 @@ export class AxonManager {
     // Attach ourselves into the live tree. The routed subscribe falls
     // through to whichever live axon is on our path to topicId — may or
     // may not be the peer that just sent us the batch, per design.
-    this.dht.routeMessage(topicId, 'pubsub:subscribe',
-                          { topicId, subscriberId: this.nodeId });
+    await this.dht.routeMessage(topicId, 'pubsub:subscribe',
+                                { topicId, subscriberId: this.nodeId });
   }
 
   /**
@@ -966,15 +973,15 @@ export class AxonManager {
    * Leaf subscribers receive this too — they just re-issue via their
    * mySubscriptions entry.
    */
-  _onDissolveHint(payload, meta) {
+  async _onDissolveHint(payload, meta) {
     const { topicId } = payload;
 
     // Case 1: we are a direct subscriber (the hint lands here because the
     // dissolving axon had us as a leaf child). Re-route the subscribe via
     // our own pubsubSubscribe path if we still want this topic.
     if (this.mySubscriptions.has(topicId)) {
-      this.dht.routeMessage(topicId, 'pubsub:subscribe',
-                            { topicId, subscriberId: this.nodeId });
+      await this.dht.routeMessage(topicId, 'pubsub:subscribe',
+                                  { topicId, subscriberId: this.nodeId });
     }
 
     // Case 2: we are a sub-axon whose parent dissolved. Clear our parent
@@ -984,8 +991,8 @@ export class AxonManager {
     if (role && !role.isRoot) {
       role.parentId = null;
       if (role.children.size > 0) {
-        this.dht.routeMessage(topicId, 'pubsub:subscribe',
-                              { topicId, subscriberId: this.nodeId });
+        await this.dht.routeMessage(topicId, 'pubsub:subscribe',
+                                    { topicId, subscriberId: this.nodeId });
       }
     }
   }
@@ -998,7 +1005,7 @@ export class AxonManager {
   // below itself. These handlers mirror the routed versions but skip the
   // terminal-election check (caller already decided we're a root).
 
-  _onSubscribeDirect(payload, meta) {
+  async _onSubscribeDirect(payload, meta) {
     const { topicId, subscriberId, peerRoots, lastSeenTs } = payload;
     const now = this._now();
 
@@ -1025,8 +1032,8 @@ export class AxonManager {
       }
     }
 
-    this._addOrRecruitChild(topicId, role, subscriberId, subscriberId);
-    this._maybeSendReplay(topicId, role, subscriberId, lastSeenTs);
+    await this._addOrRecruitChild(topicId, role, subscriberId, subscriberId);
+    await this._maybeSendReplay(topicId, role, subscriberId, lastSeenTs);
   }
 
   /**
@@ -1039,7 +1046,7 @@ export class AxonManager {
    * tests (1 publish/sec × 100-entry cache), that's the difference
    * between 1 and 100 sendDirect calls per re-subscribe.
    */
-  _maybeSendReplay(topicId, role, subscriberId, lastSeenTs) {
+  async _maybeSendReplay(topicId, role, subscriberId, lastSeenTs) {
     if (!subscriberId || subscriberId === this.nodeId) return;
     const cache = role.replayCache;
     if (!cache || cache.length === 0) return;
@@ -1047,7 +1054,7 @@ export class AxonManager {
       ? cache.filter(m => m.publishTs > lastSeenTs)
       : cache.slice();
     if (missed.length === 0) return;
-    this.dht.sendDirect(subscriberId, 'pubsub:replay-batch', {
+    await this.dht.sendDirect(subscriberId, 'pubsub:replay-batch', {
       topicId,
       messages: missed,
     });
@@ -1085,7 +1092,7 @@ export class AxonManager {
     }
   }
 
-  _onPublishDirect(payload, meta) {
+  async _onPublishDirect(payload, meta) {
     const { topicId, json, publishId, publishTs } = payload;
     if (this._alreadySeenPublish(publishId)) return;
     const role = this.axonRoles.get(topicId);
@@ -1102,8 +1109,8 @@ export class AxonManager {
       // would converge more reliably; we have the primitives for that
       // in NX-6 but haven't wired them in as the K-closest fallback
       // path. Flagged as follow-up work in Phase 3 notes.
-      this.dht.routeMessage(topicId, 'pubsub:publish',
-                             { topicId, json, publishId, publishTs });
+      await this.dht.routeMessage(topicId, 'pubsub:publish',
+                                  { topicId, json, publishId, publishTs });
       return;
     }
 
@@ -1116,8 +1123,8 @@ export class AxonManager {
         if (this._deliveryCallback) this._deliveryCallback(topicId, json, publishId, publishTs);
         continue;
       }
-      const ok = this.dht.sendDirect(childId, 'pubsub:deliver',
-                                      { topicId, json, publishId, publishTs });
+      const ok = await this.dht.sendDirect(childId, 'pubsub:deliver',
+                                           { topicId, json, publishId, publishTs });
       if (!ok) deadChildren.push(childId);
     }
     for (const dead of deadChildren) role.children.delete(dead);
@@ -1135,60 +1142,20 @@ export class AxonManager {
    *
    * Exposed publicly so tests can drive the state machine deterministically.
    */
-  refreshTick() {
+  async refreshTick() {
     const now = this._now();
 
-    // 1. Leaf refresh — re-issue each of our own subscribes via the same
-    //    transport mode used at original subscribe time (K-closest, NX-17
-    //    multi-root, or routed). Refresh must mirror the subscribe path
-    //    or we'd drift between root sets across rounds.
-    const altK = (this.crossFragmentRoots ?? 0) + 1;
-    for (const topicId of this.mySubscriptions.keys()) {
-      const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
-      if (this._useKClosestMode()) {
-        const roots = this._findKClosest(topicId, this.rootSetSize);
-        for (const peerId of roots) {
-          this.dht.sendDirect(peerId, 'pubsub:subscribe-k', {
-            topicId, subscriberId: this.nodeId, peerRoots: roots, lastSeenTs,
-          });
-        }
-      } else if (altK > 1 && typeof this.dht.findKClosest === 'function') {
-        const targets = this._findKClosest(topicId, altK);
-        for (const target of targets) {
-          if (target === this.nodeId) continue;
-          this.dht.sendDirect(target, 'pubsub:subscribe-k', {
-            topicId, subscriberId: this.nodeId, peerRoots: targets, lastSeenTs,
-          });
-        }
-      } else {
-        this.dht.routeMessage(topicId, 'pubsub:subscribe',
-                              { topicId, subscriberId: this.nodeId, lastSeenTs });
-      }
-    }
+    // ── v0.70.16 ordering ────────────────────────────────────────────
+    // Sync bookkeeping (TTL sweep, hysteresis-dissolve marking, role
+    // GC) runs FIRST so callers that don't await — including
+    // test_axon.js's `root.refreshTick(); assert(...)` pattern — see
+    // a fully swept axonRoles map immediately on return-from-microtask.
+    // After bookkeeping, leaf + axon refresh subscribes are issued via
+    // fire-and-forget Promise chains so the public refreshTick can
+    // still be awaited but doesn't block the test's tight timing
+    // assumption.
 
-    // 2. Axon refresh — every axon role (root and non-root) periodically
-    //    re-issues a subscribe toward topicId so its own attachment
-    //    upward stays fresh. An axon with no children has no reason to
-    //    stay in the tree; skip the refresh and let the GC step remove it.
-    for (const [topicId, role] of this.axonRoles) {
-      if (role.children.size === 0) continue;
-      const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
-      if (altK > 1 && typeof this.dht.findKClosest === 'function') {
-        const targets = this._findKClosest(topicId, altK);
-        for (const target of targets) {
-          if (target === this.nodeId) continue;
-          this.dht.sendDirect(target, 'pubsub:subscribe-k', {
-            topicId, subscriberId: this.nodeId, peerRoots: targets, lastSeenTs,
-          });
-        }
-      } else {
-        this.dht.routeMessage(topicId, 'pubsub:subscribe',
-                              { topicId, subscriberId: this.nodeId, lastSeenTs });
-      }
-      role.parentLastSent = now;
-    }
-
-    // 3. TTL sweep — drop stale children.
+    // 1. TTL sweep — drop stale children.
     for (const role of this.axonRoles.values()) {
       for (const [childId, entry] of role.children) {
         if (now - entry.lastRenewed > this.maxSubscriptionAgeMs) {
@@ -1200,14 +1167,15 @@ export class AxonManager {
       }
     }
 
-    // 4. §5.8 hysteresis dissolve — a non-root axon whose child count has
+    // 2. §5.8 hysteresis dissolve — a non-root axon whose child count has
     //    been below minDirectSubs for one full refresh interval sends a
     //    dissolve-hint to its children and removes its own role. The
     //    parent's next TTL sweep will drop this (now-silent) axon.
     //    Root never dissolves via hysteresis — it's bound to the hash.
+    const dissolveHints = [];
     for (const [topicId, role] of this.axonRoles) {
       if (role.isRoot) continue;
-      if (role.children.size === 0) continue;  // handled in step 5
+      if (role.children.size === 0) continue;  // handled in step 3
       if (role.children.size >= this.minDirectSubs) {
         role.lowWaterSince = 0;
         continue;
@@ -1218,15 +1186,15 @@ export class AxonManager {
       }
       if (now - role.lowWaterSince > this.refreshIntervalMs) {
         for (const [childId] of role.children) {
-          this.dht.sendDirect(childId, 'pubsub:dissolve-hint', {
-            topicId, suggestedParent: role.parentId,
+          dissolveHints.push({
+            childId, topicId, suggestedParent: role.parentId,
           });
         }
         this.axonRoles.delete(topicId);
       }
     }
 
-    // 5. GC empty roles.
+    // 3. GC empty roles.
     for (const [topicId, role] of this.axonRoles) {
       if (role.children.size > 0) continue;
       if (!role.isRoot) {
@@ -1239,6 +1207,63 @@ export class AxonManager {
       if (role.emptiedAt > 0 && now - role.emptiedAt > this.rootGraceMs) {
         this.axonRoles.delete(topicId);
       }
+    }
+
+    // 4. Fire dissolve-hints from the queue collected in step 2.
+    //    Fire-and-forget; the dissolved role has already been removed
+    //    from axonRoles, so timing of the actual hint-delivery doesn't
+    //    affect future bookkeeping.
+    for (const hint of dissolveHints) {
+      const p = this.dht.sendDirect(hint.childId, 'pubsub:dissolve-hint', {
+        topicId: hint.topicId, suggestedParent: hint.suggestedParent,
+      });
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+
+    // 5. Leaf refresh — re-issue each of our own subscribes via the same
+    //    transport mode used at original subscribe time (K-closest, NX-17
+    //    multi-root, or routed). Refresh must mirror the subscribe path
+    //    or we'd drift between root sets across rounds.  Fired async so
+    //    the bookkeeping above is visible immediately.
+    const altK = (this.crossFragmentRoots ?? 0) + 1;
+    const issueSubscribe = async (topicId, lastSeenTs, role) => {
+      try {
+        if (this._useKClosestMode()) {
+          const roots = await this._findKClosest(topicId, this.rootSetSize);
+          for (const peerId of roots) {
+            const p = this.dht.sendDirect(peerId, 'pubsub:subscribe-k', {
+              topicId, subscriberId: this.nodeId, peerRoots: roots, lastSeenTs,
+            });
+            if (p?.catch) p.catch(() => {});
+          }
+        } else if (altK > 1 && typeof this.dht.findKClosest === 'function') {
+          const targets = await this._findKClosest(topicId, altK);
+          for (const target of targets) {
+            if (target === this.nodeId) continue;
+            const p = this.dht.sendDirect(target, 'pubsub:subscribe-k', {
+              topicId, subscriberId: this.nodeId, peerRoots: targets, lastSeenTs,
+            });
+            if (p?.catch) p.catch(() => {});
+          }
+        } else {
+          const p = this.dht.routeMessage(topicId, 'pubsub:subscribe',
+                                          { topicId, subscriberId: this.nodeId, lastSeenTs });
+          if (p?.catch) p.catch(() => {});
+        }
+        if (role) role.parentLastSent = now;
+      } catch (err) {
+        console.error('AxonManager refresh: subscribe issue failed:', err);
+      }
+    };
+
+    for (const topicId of this.mySubscriptions.keys()) {
+      const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
+      issueSubscribe(topicId, lastSeenTs, null);    // fire-and-forget
+    }
+    for (const [topicId, role] of this.axonRoles) {
+      if (role.children.size === 0) continue;
+      const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
+      issueSubscribe(topicId, lastSeenTs, role);    // fire-and-forget
     }
   }
 

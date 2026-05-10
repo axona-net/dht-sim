@@ -130,11 +130,9 @@ export class NeuromorphicDHTNH1 extends DHT {
       rootSetSize: 0,
     };
 
-    // sendDirect drain-loop state — see sendDirect() for the rationale (a
-    // synchronous fan-out through a 3-level axonal tree blows past Node's
-    // ~10K stack frame limit without iterative delivery).
-    this._sendQueue    = null;
-    this._sendDraining = false;
+    // sendDirect drain-loop state was removed in v0.70.16 (refactor
+    // commit 10): notifications now run as transport.notify microtasks,
+    // which don't blow the stack on deep fan-out trees.
   }
 
   /**
@@ -300,6 +298,99 @@ export class NeuromorphicDHTNH1 extends DHT {
     };
     node.transport.onNotification('hop_cache',      hopCacheHandler);
     node.transport.onNotification('lateral_spread', hopCacheHandler);
+
+    // ── route_msg (commit 10) ─────────────────────────────────────────
+    // Recursive-forwarding routed-message handler.  Receiver runs:
+    //   1. greedy 1-hop scan over its own synaptome (closer than self?)
+    //   2. if no 1-hop closer, run 2-hop terminal-globality check
+    //   3. dispatch the local routed handler for `type` (if any)
+    //   4. if handler returns 'consumed' → reply { consumed: true, ... }
+    //   5. if terminal (1-hop fail + 2-hop fail) → reply terminal
+    //   6. if maxHops reached → reply exhausted
+    //   7. otherwise forward to nextHop via route_msg request, await its
+    //      reply, and bubble up unchanged
+    //
+    // This replaces the source-orchestrated walk in routeMessage().
+    // Source no longer needs nodeMap.get(nextId) to advance current=Node;
+    // the walk now traverses via a chain of route_msg requests, each peer
+    // making its next-hop decision from its own local view (V1 cleared).
+    node.transport.onRequest('route_msg', async (fromId, msg) => {
+      const { type, payload, targetId, hops, originId } = msg;
+      const targetBig = (typeof targetId === 'bigint')
+        ? targetId : topicToBigInt(targetId);
+
+      // Greedy 1-hop forward
+      let nextHopId = null;
+      let bestDist  = node.id ^ targetBig;
+      for (const syn of node.synaptome.values()) {
+        const d = syn.peerId ^ targetBig;
+        if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
+      }
+
+      let isTerminal = nextHopId === null;
+      if (isTerminal) {
+        const closer = await this._findCloserInTwoHops(node, targetBig);
+        if (closer !== null && closer !== node.id) {
+          nextHopId  = closer;
+          isTerminal = false;
+        }
+      }
+
+      const meId = node.id;
+      const result = await this._deliverRouted(node, type, payload, {
+        fromId,
+        targetId: targetBig,
+        hopCount: hops,
+        isTerminal,
+        node,
+      });
+
+      if (result === 'consumed') {
+        return { consumed: true, atNode: meId, hops };
+      }
+      if (isTerminal) {
+        return { consumed: false, atNode: meId, hops, terminal: true };
+      }
+      if (hops + 1 >= this.MAX_HOPS) {
+        return { consumed: false, atNode: meId, hops, exhausted: true };
+      }
+
+      try {
+        const downstream = await node.transport.send(nextHopId, 'route_msg', {
+          type, payload, targetId: targetBig, hops: hops + 1, originId,
+        });
+        return downstream;
+      } catch {
+        return { consumed: false, atNode: meId, hops, exhausted: true };
+      }
+    });
+
+    // ── find_closest_set (commit 10) ──────────────────────────────────
+    // Iterative-search RPC: caller asks "what are your top-K closest
+    // peers to target?" and receiver replies with up to K peer-ids
+    // drawn from its own synaptome.  Insertion-sorted scan; cheap
+    // because synaptome.size is bounded by MAX_SYNAPTOME (~50).  The
+    // caller merges results across rounds in findKClosest().
+    node.transport.onRequest('find_closest_set', async (_fromId, payload) => {
+      const targetBig = (typeof payload.target === 'bigint')
+        ? payload.target : topicToBigInt(payload.target);
+      const K = payload.K ?? this._k;
+      const top = [];
+      for (const syn of node.synaptome.values()) {
+        const d = syn.peerId ^ targetBig;
+        if (top.length < K) {
+          let i = 0;
+          while (i < top.length && top[i].d < d) i++;
+          top.splice(i, 0, { peerId: syn.peerId, d });
+        } else if (d < top[K - 1].d) {
+          let i = 0;
+          while (i < top.length && top[i].d < d) i++;
+          top.splice(i, 0, { peerId: syn.peerId, d });
+          top.pop();
+        }
+      }
+      return top.map(t => t.peerId);
+    });
 
     // Dead-peer callback.  Future commits convert this to fire reheat
     // + _evictAndReplace; for now record events for verification.
@@ -1205,12 +1296,22 @@ export class NeuromorphicDHTNH1 extends DHT {
 
   /** Build the thin shim that exposes NH-1 primitives in the shape AxonManager
    *  expects, with `node` captured in closure. */
+  /**
+   * v0.70.16 (refactor commit 10) — three of the four primitives below
+   * are now async (routeMessage, sendDirect, findKClosest).  The shim
+   * methods just await/return; AxonManager is updated in the same
+   * commit to add `await` at every call site.
+   */
   _nodeShim(node) {
     const self = this;
     return {
       get nodeId()   { return nodeIdToHex(node.id); },
       getSelfId()    { return nodeIdToHex(node.id); },
       getAlivePeer(peerId) {
+        // Used by AxonManager only as a liveness check — preserved
+        // for now; commit 14 (NeuronNode cleanup) will remove this
+        // entry from the shim once AxonManager stops reaching for
+        // peer.alive directly.
         const peer = self.nodeMap.get(topicToBigInt(peerId));
         return peer?.alive ? peer : null;
       },
@@ -1226,9 +1327,9 @@ export class NeuromorphicDHTNH1 extends DHT {
       onDirectMessage(type, handler) {
         self.onDirectMessage(node, type, handler);
       },
-      findKClosest(targetId, K, opts) {
-        return self.findKClosest(node, targetId, K, opts)
-                   .map(peer => nodeIdToHex(peer.id));
+      async findKClosest(targetId, K, opts) {
+        const peerIds = await self.findKClosest(node, targetId, K, opts);
+        return peerIds.map(nodeIdToHex);
       },
     };
   }
@@ -1242,145 +1343,164 @@ export class NeuromorphicDHTNH1 extends DHT {
 
   // ── Handler registries ────────────────────────────────────────────────────
 
+  /**
+   * Register a routed-message handler for `type` on `node`.  Routed
+   * messages arrive at the receiver via the `route_msg` request handler
+   * (registered once per node in `_registerNH1Handlers`); that handler
+   * looks up `type` in this per-node table and dispatches.
+   *
+   * Result returned by the handler:
+   *   'consumed' — message handled here; do not forward
+   *   anything else — message not consumed; keep walking toward target
+   */
   onRoutedMessage(node, type, handler) {
     let table = this._routedHandlers.get(node);
     if (!table) { table = new Map(); this._routedHandlers.set(node, table); }
     table.set(type, handler);
   }
 
+  /**
+   * Register a direct-message handler for `type` on `node`.
+   *
+   * v0.70.16 (refactor commit 10) — bridges to a transport-level
+   * notification handler.  Each `direct_${type}` notification arriving
+   * at this node's transport dispatches into the per-node table.  We
+   * register the bridge once per (node, type) — duplicate calls
+   * (AxonManager re-registering on resetState) just overwrite the
+   * stored handler, since the notification handler reads the current
+   * entry from the table at delivery time.
+   */
   onDirectMessage(node, type, handler) {
     let table = this._directHandlers.get(node);
     if (!table) { table = new Map(); this._directHandlers.set(node, table); }
+    const wireType = `direct_${type}`;
+    if (!table.has(type)) {
+      // First registration for this type — install the transport bridge.
+      node.transport.onNotification(wireType, (fromId, payload) => {
+        const h = this._directHandlers.get(node)?.get(type);
+        if (!h) return;
+        const fromHex = (typeof fromId === 'bigint') ? nodeIdToHex(fromId) : fromId;
+        try {
+          h(payload, { fromId: fromHex, type });
+        } catch (err) {
+          console.error(`NH-1 direct handler error at ${node.id} for '${type}':`, err);
+        }
+      });
+    }
     table.set(type, handler);
   }
 
   // ── K-closest iterative lookup (used for terminal-globality verification
   // during routed messaging, and as a primitive AxonManager can call directly). ──
 
-  findKClosest(sourceNode, targetId, K = 5, { alpha = 3, maxRounds = 40 } = {}) {
+  /**
+   * v0.70.16 (refactor commit 10) — async iterative K-closest search
+   * driven by `find_closest_set` request RPCs.  Same hybrid termination
+   * (top-K all visited AND a full α-round added no new candidates).
+   * Returns BigInt peer-ids (the `_nodeShim` wrapper maps to hex).
+   *
+   * V1 violations cleared: source no longer materialises Node objects
+   * for the candidate pool.  It tracks (peerId → distance) and relies
+   * on `find_closest_set` responses to discover new peers.  The seed
+   * pool is still populated from `src.synaptome` + `src.incomingSynapses`
+   * (local state on the source — V1-clean).
+   *
+   * Wire-counter rename: per-RPC `_msg(src, peer, 'find_closest')` is
+   * gone; `transport.send(peerId, 'find_closest_set', …)` bumps the
+   * counter inside the transport adapter under that same per-type key.
+   */
+  async findKClosest(sourceNode, targetId, K = 5, { alpha = 3, maxRounds = 40 } = {}) {
     const src = this._resolveNode(sourceNode);
     if (!src) return [];
     const targetBig = topicToBigInt(targetId);
 
-    const candidates = new Map();
-    const distances  = new Map();
-    const addCandidate = (node) => {
-      if (!node?.alive || candidates.has(node.id)) return;
-      candidates.set(node.id, node);
-      distances.set(node.id, node.id ^ targetBig);
+    /** @type {Map<bigint, bigint>} peerId → distance */
+    const distances = new Map();
+    const addCandidate = (peerId) => {
+      if (typeof peerId !== 'bigint' || distances.has(peerId)) return;
+      distances.set(peerId, peerId ^ targetBig);
     };
 
-    // Seed with source + all its routing tiers (synaptome + incoming).
-    // Including incomingSynapses is important: in LTP-specialized networks
-    // the outgoing synaptome biases toward high-traffic destinations and
-    // can leave sparse-region targets unreachable through outgoing alone.
-    //
-    // v0.66.03: the 2-hop seed expansion that briefly lived here in
-    // v0.66.01 was reverted. It cost ~8ms per call (×3760 calls per
-    // pubsubmchurn diagnostic = ~30s of overhead) and the routing-side
-    // problem it tried to address — local-terminal misses during route
-    // walks — is now solved at the right place by `_findCloserInTwoHops`,
-    // which runs only when actually needed (terminal-globality check)
-    // instead of on every findKClosest call.
-    addCandidate(src);
-    const addTier = (tier) => {
-      if (!tier) return;
-      for (const syn of tier.values()) addCandidate(this.nodeMap.get(syn.peerId));
-    };
-    addTier(src.synaptome);
-    addTier(src.incomingSynapses);
+    // Seed: source + own synaptome + own incoming.  All local-state reads.
+    addCandidate(src.id);
+    for (const syn of src.synaptome.values())         addCandidate(syn.peerId);
+    for (const syn of src.incomingSynapses.values())  addCandidate(syn.peerId);
 
-    // Hybrid termination: stop when (a) every node in current top-K is
-    // queried AND (b) a full α-round added no new candidates. (a) alone
-    // can pin to a local optimum in LTP-specialized networks; (b) alone
-    // doesn't guarantee top-K probed. Both → real convergence.
     const visited = new Set();
     let lastPoolSize = 0;
     let stableRounds = 0;
-    for (let round = 0; round < maxRounds; round++) {
-      const sortedCands = [...candidates.values()]
-        .sort((a, b) => distances.get(a.id) < distances.get(b.id) ? -1 : 1);
-      const topK = sortedCands.slice(0, K);
-      const topKAllVisited = topK.every(n => visited.has(n.id));
 
-      let toQuery = topK.filter(n => !visited.has(n.id)).slice(0, alpha);
+    for (let round = 0; round < maxRounds; round++) {
+      const sorted = [...distances.entries()]
+        .sort((a, b) => a[1] < b[1] ? -1 : 1)
+        .map(([peerId]) => peerId);
+      const topK = sorted.slice(0, K);
+      const topKAllVisited = topK.every(p => visited.has(p));
+
+      let toQuery = topK.filter(p => !visited.has(p)).slice(0, alpha);
       if (toQuery.length < alpha) {
         const remaining = alpha - toQuery.length;
-        const beyond = sortedCands
-          .filter(n => !visited.has(n.id) && !topK.includes(n))
+        const beyond = sorted
+          .filter(p => !visited.has(p) && !topK.includes(p))
           .slice(0, remaining);
         toQuery = toQuery.concat(beyond);
       }
       if (toQuery.length === 0) break;
 
-      for (const peer of toQuery) {
-        visited.add(peer.id);
-        // v0.66.07: per-peer response bound is the BUCKET SIZE (this._k,
-        // typically 20), not the caller's K. Real Kademlia FIND_NODE
-        // responds with up to k nodes regardless of how many the caller
-        // ultimately wants — the bigger response gives the iterative
-        // search enough breadth to converge on the actual top-K.
-        // K-DHT does this same thing: `peer.findClosest(target, this.k)`.
-        // v0.66.06 used the caller's K (5) which was too small and hurt
-        // convergence quality (full-converge dropped 27pp on local
-        // 2000km). this._k=20 restores convergence with the same
-        // bounded-RPC honesty.
-        this._addPeerTopKToCandidates(peer, this._k, targetBig, addCandidate);
+      // Parallel find_closest_set RPCs.  Skip src.id (we don't RPC
+      // ourselves; we already seeded our own synaptome).  Use bucket
+      // size this._k as the per-peer response bound — see v0.66.07
+      // commentary in the prior implementation; bigger response = better
+      // convergence on local 2000km tests.
+      const probes = toQuery.filter(p => p !== src.id);
+      for (const p of toQuery) visited.add(p);
+
+      if (probes.length > 0) {
+        const settled = await Promise.allSettled(
+          probes.map(peerId =>
+            src.transport.send(peerId, 'find_closest_set',
+              { target: targetBig, K: this._k })
+          )
+        );
+        for (const r of settled) {
+          if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
+          for (const peerId of r.value) addCandidate(peerId);
+        }
       }
 
-      const grew = candidates.size > lastPoolSize;
-      lastPoolSize = candidates.size;
+      const grew = distances.size > lastPoolSize;
+      lastPoolSize = distances.size;
       stableRounds = grew ? 0 : stableRounds + 1;
       if (topKAllVisited && stableRounds >= 1) break;
     }
 
-    return [...candidates.values()]
-      .sort((a, b) => distances.get(a.id) < distances.get(b.id) ? -1 : 1)
-      .slice(0, K);
+    return [...distances.entries()]
+      .sort((a, b) => a[1] < b[1] ? -1 : 1)
+      .slice(0, K)
+      .map(([peerId]) => peerId);
   }
+
+  // ── Greedy single-step routing (used by routeMessage entry) ──────────────
 
   /**
-   * Simulate a FIND_NODE RPC response from `peer`: peer reports its K
-   * closest peers to `targetBig` from its own local view (synaptome
-   * only — NH-1 has no highway tier). Inserts those K nodes into the
-   * caller's candidate pool via `addCandidate`. Insertion-sort into a
-   * fixed-size top-K array; cheap because K is typically 5.
+   * v0.70.16 (refactor commit 10) — returns the BigInt peer-id of the
+   * closest 1-hop synapse to `target`, or null if no synapse is strictly
+   * closer than self.  No nodeMap.get / liveness check; the receiving
+   * peer's transport will fail the forward RPC if it is dead, and the
+   * chain bubbles `exhausted` upward.  Same V1-cleanup philosophy as
+   * `_findCloserInTwoHops`.
    */
-  _addPeerTopKToCandidates(peer, K, targetBig, addCandidate) {
-    const top = [];   // sorted asc by dist; size <= K
-    for (const syn of peer.synaptome.values()) {
-      const node = this.nodeMap.get(syn.peerId);
-      if (!node?.alive) continue;
-      const d = node.id ^ targetBig;
-      if (top.length < K) {
-        let i = 0;
-        while (i < top.length && top[i].d < d) i++;
-        top.splice(i, 0, { node, d });
-      } else if (d < top[K - 1].d) {
-        let i = 0;
-        while (i < top.length && top[i].d < d) i++;
-        top.splice(i, 0, { node, d });
-        top.pop();
-      }
-    }
-    for (const { node } of top) addCandidate(node);
-  }
-
-  // ── Greedy single-step routing (used by routeMessage) ────────────────────
-
   _greedyNextHopToward(node, targetId) {
     if (!node?.alive) return null;
-    const target = topicToBigInt(targetId);
-    let best = null;
-    let bestDist = node.id ^ target;
+    const target = (typeof targetId === 'bigint') ? targetId : topicToBigInt(targetId);
+    let bestPeerId = null;
+    let bestDist   = node.id ^ target;
     for (const syn of node.synaptome.values()) {
-      const peer = this.nodeMap.get(syn.peerId);
-      if (!peer?.alive) continue;
       const d = syn.peerId ^ target;
-      if (d < bestDist) { bestDist = d; best = peer; }
+      if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
     }
     // NH-1 has no `highway` tier, so no second loop.
-    return best;
+    return bestPeerId;
   }
 
   /**
@@ -1413,17 +1533,17 @@ export class NeuromorphicDHTNH1 extends DHT {
     // peers strictly closer than us).  Aggregate the responses and pick
     // the globally-closest 2-hop peer.
     //
-    // Wire-counter rename: the legacy _msg(node, p1, 'two_hop_probe')
-    // counter is dropped.  These RPCs now bump 'lookahead_probe' (same
-    // type the lookup-side uses), unifying the per-type instrumentation
-    // for what is structurally the same operation.  Total wire-message
-    // count is unchanged; the per-type breakdown now has zero
-    // 'two_hop_probe' entries and a higher 'lookahead_probe' total.
+    // v0.70.16 (refactor commit 10) — return type changed from Node to
+    // BigInt peer-id.  Callers (routeMessage, route_msg request handler)
+    // no longer dereference the result through nodeMap; they forward
+    // via transport.send(peerId, ...) which is enough.  Liveness check
+    // on incomingSynapses peers also dropped — if a peer is dead, the
+    // forward RPC fails and the chain bubbles up `exhausted`.
 
-    const target = topicToBigInt(targetId);
+    const target = (typeof targetId === 'bigint') ? targetId : topicToBigInt(targetId);
     const myDist = node.id ^ target;
-    let bestPeer = null;
-    let bestDist = myDist;
+    let bestPeerId = null;
+    let bestDist   = myDist;
 
     const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
     if (probeTargets.length > 0) {
@@ -1436,28 +1556,20 @@ export class NeuromorphicDHTNH1 extends DHT {
         if (r.status !== 'fulfilled' || !r.value || r.value.terminal) continue;
         const d = r.value.peerId ^ target;
         if (d < bestDist) {
-          // V1 violation kept until commit 14: routeMessage still
-          // takes a Node object for `current = nextHop` advancement.
-          const candidate = this.nodeMap.get(r.value.peerId);
-          if (candidate?.alive) {
-            bestDist = d;
-            bestPeer = candidate;
-          }
+          bestDist   = d;
+          bestPeerId = r.value.peerId;
         }
       }
     }
 
     // Incoming peers as a reverse-routing option (they point AT us, so
-    // we can route via them to whatever they reach).  Liveness still
-    // checked via nodeMap.get — V1 cleanup in commit 14 (NeuronNode
-    // cleanup) will replace this with transport-side semantics.
+    // we can route via them to whatever they reach).  Pure local-state
+    // read; no nodeMap.get.
     for (const syn of node.incomingSynapses.values()) {
-      const peer = this.nodeMap.get(syn.peerId);
-      if (!peer?.alive) continue;
-      const d = peer.id ^ target;
-      if (d < bestDist) { bestDist = d; bestPeer = peer; }
+      const d = syn.peerId ^ target;
+      if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
     }
-    return bestPeer;
+    return bestPeerId;
   }
 
   // ── Routed messaging ─────────────────────────────────────────────────────
@@ -1466,143 +1578,116 @@ export class NeuromorphicDHTNH1 extends DHT {
    * Walk a typed message from `originNode` toward `targetId`. Each hop may
    * inspect and optionally consume the message via its registered handler.
    * Returns { consumed, atNode, hops, terminal?, exhausted? }.
+   *
+   * v0.70.16 (refactor commit 10) — recursive-forwarding model.  This
+   * entry point dispatches the origin's own routed handler first
+   * (origin can be a subscriber/role-holder for `type`), then if the
+   * origin doesn't consume, forwards to the first hop via a `route_msg`
+   * transport request.  Each downstream peer runs the same logic in its
+   * own `route_msg` request handler (registered in `_registerNH1Handlers`),
+   * so the source no longer needs nodeMap.get to advance `current=Node`.
+   * V1 violations cleared in routeMessage proper; the only remaining
+   * read is `originNode.synaptome` / `originNode.incomingSynapses`,
+   * which is local state on the source.
+   *
+   * Wire-counter rename: `_msg(current, nextHop, 'route_msg')` is gone.
+   * Counter bumping now happens inside `transport.send`, which records
+   * the wire transaction in the same per-type aggregation
+   * (Engine.snapshotTrafficLoad consumes msgsByType from the receiver
+   * via SimulatedTransport's bumps).
    */
   async routeMessage(originNode, targetId, type, payload, opts = {}) {
-    const maxHops = opts.maxHops ?? 40;
-    const originId = opts.fromId ?? nodeIdToHex(originNode.id);
+    const originId  = opts.fromId ?? nodeIdToHex(originNode.id);
+    const targetBig = topicToBigInt(targetId);
 
-    let current = originNode;
-    let previousId = originId;
-    let hops = 0;
-
-    // Terminal-globality verification: if a greedy walk reaches a node that
-    // has no 1-hop synapse strictly closer to the target, we run a bounded
-    // 2-hop scan to detect whether ANY 2-hop peer is closer. Without this,
-    // different callers' greedy walks converge on different local terminals
-    // → multiple roots per topic → publishes miss subscribers attached to
-    // sibling roots.
-    //
-    // v0.66.03: replaced `findKClosest(current, target, 1)` (full iterative
-    // search, ~5-15ms at 25K) with `_findCloserInTwoHops` (bounded local
-    // scan, ~0.5-1ms). Same semantic answer — "is any reachable peer in 2
-    // hops closer than current?" — at ~10× lower cost. Was dominating
-    // refresh-phase wall-clock time.
-    const visitedTerminalCheck = new Set();
-
-    while (hops < maxHops) {
-      let nextHop = this._greedyNextHopToward(current, targetId);
-      let isTerminal = nextHop === null;
-
-      if (isTerminal) {
-        const globalClosest = await this._findCloserInTwoHops(current, targetId);
-        if (globalClosest
-            && globalClosest.id !== current.id
-            && !visitedTerminalCheck.has(globalClosest.id)) {
-          visitedTerminalCheck.add(current.id);
-          nextHop = globalClosest;
-          isTerminal = false;
-        }
+    // ── Step 1: origin's own greedy 1-hop / terminal check ──
+    let nextHopId = this._greedyNextHopToward(originNode, targetBig);
+    let isTerminal = nextHopId === null;
+    if (isTerminal) {
+      const closer = await this._findCloserInTwoHops(originNode, targetBig);
+      if (closer !== null && closer !== originNode.id) {
+        nextHopId  = closer;
+        isTerminal = false;
       }
-
-      const result = this._deliverRouted(current, type, payload, {
-        fromId:   previousId,
-        targetId,
-        hopCount: hops,
-        isTerminal,
-        node:     current,
-      });
-
-      if (result === 'consumed') return { consumed: true, atNode: current.id, hops };
-      if (isTerminal) return { consumed: false, atNode: current.id, hops, terminal: true };
-
-      // TRAFFIC: forward this routed message one hop along the wire.
-      this._msg(current, nextHop, 'route_msg');
-
-      previousId = nodeIdToHex(current.id);
-      current = nextHop;
-      hops++;
     }
-    return { consumed: false, atNode: current.id, hops, exhausted: true };
+
+    // ── Step 2: dispatch origin's local routed handler ──
+    const result = await this._deliverRouted(originNode, type, payload, {
+      fromId:   originId,
+      targetId: targetBig,
+      hopCount: 0,
+      isTerminal,
+      node:     originNode,
+    });
+
+    if (result === 'consumed') {
+      return { consumed: true, atNode: originNode.id, hops: 0 };
+    }
+    if (isTerminal) {
+      return { consumed: false, atNode: originNode.id, hops: 0, terminal: true };
+    }
+
+    // ── Step 3: forward to first hop via route_msg request chain ──
+    try {
+      const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
+        type, payload, targetId: targetBig, hops: 1, originId,
+      });
+      return downstream;
+    } catch {
+      return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
+    }
   }
 
-  _deliverRouted(node, type, payload, meta) {
+  /**
+   * v0.70.16 (refactor commit 10) — handlers can be async (AxonManager
+   * is now async-aware end-to-end).  We await the handler's return so
+   * the 'consumed'/'forward' decision reflects the post-await state.
+   * Sync handlers still work — `await` over a non-Promise is a no-op.
+   */
+  async _deliverRouted(node, type, payload, meta) {
     const handlers = this._routedHandlers.get(node);
     const handler = handlers?.get(type);
     if (!handler) return 'forward';
-    try { return handler(payload, meta) || 'forward'; }
-    catch (err) {
+    try {
+      const result = await handler(payload, meta);
+      return result || 'forward';
+    } catch (err) {
       console.error(`NH-1 routed handler error at ${node.id} for '${type}':`, err);
       return 'forward';
     }
   }
 
-  // ── Point-to-point with iterative drain loop ─────────────────────────────
+  // ── Point-to-point notify ───────────────────────────────────────────────
 
   /**
-   * Deliver `payload` directly to `peerId`. Returns true if peer is live,
-   * false if dropped. Uses an iterative FIFO drain so a fan-out through a
-   * deep axon tree doesn't blow Node's ~10K stack frame limit.
+   * Deliver `payload` directly to `peerId` as a fire-and-forget notify.
+   * Returns true if the transport accepted the notification (peer was
+   * live at send time), false if it was dropped.
    *
-   * Publish-time semantics preserved: all handlers triggered by a single
-   * top-level sendDirect complete before the call returns.
+   * v0.70.16 (refactor commit 10) — collapses to a thin
+   * `transport.notify(peerBig, 'direct_${type}', payload)` wrapper.
+   * Per-type wire counter is bumped inside the transport.  The legacy
+   * iterative drain loop (which existed because synchronous nested
+   * handler calls could blow Node's ~10K stack frame limit) is gone:
+   * notifications return immediately, and the receiver's notification
+   * handler runs as its own microtask, so deep fan-out trees no longer
+   * need a queue.
+   *
+   * V1 violations cleared: nodeMap.get + alive-check dropped — if peer
+   * is dead the transport returns false / throws and we surface that.
+   * The caller-side _directHandlers dispatch is now wired in
+   * `onDirectMessage` as a transport.onNotification bridge, so
+   * receiver-side dispatch is also free of nodeMap.
    */
-  sendDirect(fromNode, peerId, type, payload) {
-    const peer = this.nodeMap.get(topicToBigInt(peerId));
-    if (!peer?.alive) return false;
-    // TRAFFIC: every sendDirect is one wire message — count at the entry
-    // point so nested in-handler sendDirect calls (drain queue) are
-    // counted too. The drain loop is in-process delivery to handlers, not
-    // a separate wire send, so we count here exactly once per call.
-    this._msg(fromNode, peer, `direct_${type}`);
-    const handlers = this._directHandlers.get(peer);
-    const handler = handlers?.get(type);
-    if (!handler) return true;        // peer alive but no handler — no-op
-
-    const item = {
-      handler,
-      payload,
-      meta: { fromId: nodeIdToHex(fromNode.id), type },
-      peerId: peer.id,
-      type,
-    };
-
-    if (this._sendDraining) {
-      // Nested call from inside a handler — enqueue; outer loop picks up.
-      this._sendQueue.push(item);
-      return true;
-    }
-
-    this._sendQueue   = [item];
-    this._sendDraining = true;
-    let processed = 0;
-    let peakSize  = 1;
-    const ABORT_CAP = 200000;
+  async sendDirect(fromNode, peerId, type, payload) {
+    if (!fromNode?.alive || !fromNode.transport) return false;
+    const peerBig = topicToBigInt(peerId);
     try {
-      while (this._sendQueue.length > 0) {
-        if (this._sendQueue.length > peakSize) peakSize = this._sendQueue.length;
-        if (processed >= ABORT_CAP) {
-          const typeCounts = {};
-          for (const q of this._sendQueue) typeCounts[q.type] = (typeCounts[q.type] || 0) + 1;
-          console.error(
-            `NH-1 drain loop aborted after ${processed} items ` +
-            `(queue ${this._sendQueue.length}, peak ${peakSize}). ` +
-            `Top-level type='${item.type}'. Queue: ${JSON.stringify(typeCounts)}`,
-          );
-          break;
-        }
-        const next = this._sendQueue.shift();
-        processed++;
-        try {
-          next.handler(next.payload, next.meta);
-        } catch (err) {
-          console.error(`NH-1 direct handler error at peer ${next.peerId} for '${next.type}':`, err);
-        }
-      }
-    } finally {
-      this._sendDraining = false;
-      this._sendQueue    = null;
+      const ok = await fromNode.transport.notify(peerBig, `direct_${type}`, payload);
+      return ok !== false;
+    } catch {
+      return false;
     }
-    return true;
   }
 
   // ── Recruitment & relay policies (NX-15 / NX-17 parity) ──────────────────
