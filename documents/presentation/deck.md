@@ -4,7 +4,7 @@ theme: default
 size: 16:9
 paginate: true
 header: "N-DHT"
-footer: "v0.3.49 · sim v0.70.05 · 2026-05-06"
+footer: "v0.3.50 · sim v0.70.22 · 2026-05-10"
 style: |
   section {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -1611,6 +1611,69 @@ Both care about routing performance under *non-uniform* conditions. Different no
 - **Sybil resistance.** S2 cell prefix lightly discourages sybil swarms per-cell — not a full defense. Proof-of-location or a proof-of-work (**PoW**) join hurdle recommended for open deployments.
 - **Provisioning.** Bootstrap via a small published sponsor set; fully decentralized thereafter.
 - **Observability.** Nodes export local stats (synaptome health, LTP rate, role counts) for operator overlays.
+
+---
+
+## The two-layer API — how N-DHT becomes real software
+
+A working DHT has **two interfaces**, not one:
+
+- The **DHT contract** — what the application sees: lookup, subscribe, publish, getMetrics, onEvent.
+- The **Transport contract** — what the network exposes: openConnection, send, notify, onPeerDied, getLatency.
+
+The **protocol** sits between them and depends on neither side directly.
+
+```
+Application → DHT contract → Protocol (NH-1) → Transport contract → Network
+```
+
+The simulator's `SimulatedNetwork` and the production `WebRTCTransport` both implement the **same** Transport contract — twelve methods, one signature each. **The protocol code does not know which it is talking to.** This is the property that lets the simulator be the deployment vehicle.
+
+---
+
+## DHT contract — what the application sees
+
+Eight verbs, organized by role:
+
+| Band | Methods |
+|---|---|
+| Lifecycle | `start`, `stop`, `join(sponsor)`, `leave` |
+| Operations | `lookup(targetKey)`, `subscribe`, `unsubscribe`, `publish` |
+| Identity & observability | `getNodeId`, `getSynaptome`, `getMetrics`, `onEvent` |
+
+**Forbidden** by design: no method that enumerates "all nodes", no method that takes a peer-id and returns that peer's state, no method that mutates the routing table.
+
+A DHT instance owns *one node's view*. The simulator's Engine creates many DHT instances and orchestrates them — but that orchestration is not part of the contract.
+
+---
+
+## Transport contract — what the network exposes
+
+Twelve methods across four bands. Most interesting:
+
+- `openConnection(peerId)` / `closeConnection(peerId)` — **synaptome admit / evict are channel open / close.** Bilateral cap enforced inside the transport: `openConnection` returns `false` if the remote refused.
+- `send(peerId, type, payload)` for **request/response** (routing chain, two-hop probe).
+- `notify(peerId, type, payload)` for **fire-and-forget** (LTP reinforce, hop caching, triadic introduction). No round-trip cost.
+- `onPeerDied(handler)` + `getLatency(peerId)` — driven by a **1 Hz ping/pong heartbeat** on every open channel. Replaces the legacy god's-eye `nodeMap.get(p)?.alive` check with the same mechanism a real deployment uses.
+
+Canonical pattern for parallel probes: `Promise.allSettled(peers.map(p => transport.send(...)))`. A slow or dead peer in one probe doesn't fail the whole batch.
+
+---
+
+## Parity gate — same code path, both worlds
+
+Years of N-DHT benchmark numbers transfer directly to production because **the protocol code is unchanged** between simulator and deployment. Twelve transport methods are the entire surface that swaps.
+
+A 25 K-node parity-gate benchmark (post-refactor sim v0.70.22 vs pre-refactor v0.70.04 reference) confirmed every protocol within the 10 % target band:
+
+| Protocol | Hops Δ (global) | Latency Δ (global) |
+|---|---|---|
+| Kademlia | -2.8 % | -2.7 % |
+| G-DHT | -0.3 % | +0.4 % |
+| NX-17 | +0.05 % | -0.2 % |
+| **NH-1** | **+4.9 %** | **+1.3 %** |
+
+NH-1's small drift upward is the architecturally-honest cost: each peer makes its own next-hop decision from its own synaptome rather than a source-orchestrated walk reading across all intermediates. **It's the cost we pay in production anyway.**
 
 ---
 

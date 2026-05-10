@@ -32,17 +32,18 @@ This whitepaper documents the architecture, the empirical measurements, the arch
 6. **Axonal Pub/Sub**
 7. **Performance Characteristics**
 8. **Architectural Wins Beyond Geography**
-9. **Red Team — The Existing Five**
-10. **Red Team — The Extended Ten**
-11. **Operational Framework — Parameter Tuning**
-12. **Observability and Alerting**
-13. **Diagnosis Playbooks**
-14. **Production Readiness Checklist**
-15. **Reputation and Byzantine Resistance**
-16. **Deployment Timeline**
-17. **Comparison to Prior Art**
-18. **Future Work**
-19. **References**
+9. **The Two-Layer API — How NH-1 Becomes Real Software**
+10. **Red Team — The Existing Five**
+11. **Red Team — The Extended Ten**
+12. **Operational Framework — Parameter Tuning**
+13. **Observability and Alerting**
+14. **Diagnosis Playbooks**
+15. **Production Readiness Checklist**
+16. **Reputation and Byzantine Resistance**
+17. **Deployment Timeline**
+18. **Comparison to Prior Art**
+19. **Future Work**
+20. **References**
 
 ---
 
@@ -724,7 +725,93 @@ Future work: an embedded RTT-coordinate system (Vivaldi-style) could replace the
 
 ---
 
-## 9. Red Team — The Existing Five
+## 9. The Two-Layer API — How NH-1 Becomes Real Software
+
+A working DHT has two interfaces, not one. The application above wants to publish, subscribe, and look things up; the network below wants to open a channel, send a message, and notice when a peer goes silent. The protocol is the thing in between. NH-1 is structured so the protocol code is genuinely between those two layers — neither one is hardwired into the other — which is what makes the same body of code reusable in both the simulator and the deployed system.
+
+```
+                Application (chat client, file dist, sim Engine)
+                                  │
+                                  │   DHT contract
+                                  │   (lookup / subscribe / publish /
+                                  │    onEvent / getMetrics / …)
+                                  │
+                Protocol (NeuromorphicDHTNH1 + AxonManager)
+                                  │
+                                  │   Transport contract
+                                  │   (openConnection / send / notify /
+                                  │    onPeerDied / getLatency / …)
+                                  │
+                Network (SimulatedNetwork in sim,
+                         WebRTCTransport in production)
+```
+
+### 9.1 The DHT contract
+
+Defined at `src/contracts/DHT.js`. The application sees one running node; the contract has eight verbs, organized into lifecycle, operations, and observability:
+
+| Method | Purpose |
+|---|---|
+| `start()` / `stop()` | bring the node up and down |
+| `join(sponsor)` / `leave()` | add to / depart from the network |
+| `lookup(targetKey)` | walk the routing layer toward a key |
+| `subscribe(topic, handler)` / `unsubscribe(sub)` | join / leave a topic |
+| `publish(topic, payload)` | fan out to subscribers via the axonal tree |
+| `getNodeId()` | the local node's 64-bit identifier |
+| `getSynaptome()` | read-only synaptome snapshot for telemetry |
+| `getMetrics()` | aggregate counters: synaptome size, temperature, lookups, traffic |
+| `onEvent(handler)` | subscribe to `peer-joined`, `peer-left`, `lookup-completed`, `dead-peer-detected`, `anneal-fired`, `cycle-snapshot`, … |
+
+The forbidden methods are as instructive as the present ones. There is no method that enumerates "all nodes", no method that takes a peer-id and returns that peer's state, no method that lets the application mutate the routing table. A DHT instance is responsible for one node's view of the network; the simulator's Engine creates many DHT instances and orchestrates them, but that orchestration is a simulator concern — it does not appear in the contract.
+
+### 9.2 The Transport contract
+
+Defined at `src/contracts/Transport.js`. One Transport instance per running node; the protocol calls into it. Twelve methods in four bands:
+
+| Band | Methods |
+|---|---|
+| Lifecycle | `start(localNodeId)`, `stop()`, `getLocalNodeId()` |
+| Channel pool | `openConnection(peerId)`, `closeConnection(peerId)`, `isConnected(peerId)` |
+| Messaging | `send(peerId, type, payload)`, `notify(peerId, type, payload)`, `onRequest(type, h)`, `onNotification(type, h)` |
+| Liveness | `onPeerDied(handler)`, `getLatency(peerId)` |
+
+The channel pool maps directly onto synaptome semantics: `openConnection` is what the protocol calls when it admits a peer to the synaptome; `closeConnection` is what it calls when it evicts. Bilateral cap admission is enforced inside the transport — `openConnection` resolves with `false` if the remote refused — so the protocol does not need to know how the cap is implemented.
+
+The messaging split between `send` (request/response, awaits a return value) and `notify` (fire-and-forget, no response expected) matters because production transports pay round-trip latency for `send` but not for `notify`. NH-1 uses `send` for the routing-tick chain (`lookup_step`, `lookahead_probe`, `find_closest_set`, `local_probe`) and `notify` for the LEARN side-effects (`reinforce`, `hop_cache`, `lateral_spread`, `triadic_introduce`, `direct_pubsub:*`). The canonical pattern for parallel probes is `Promise.allSettled` over `transport.send(...)` — a slow or dead peer in one probe should not fail the whole batch.
+
+The liveness band is where the legacy god's-eye `nodeMap.get(s.peerId)?.alive` check finally retired. The transport runs a 1 Hz ping/pong heartbeat on every open channel; missed pongs (default 3-second timeout) trigger channel close and `onPeerDied`. The protocol registers a callback that populates a per-node `_deadPeers` set; the candidate-enumeration step in every routing tick filters against that set. Production gets exactly the same shape — a peer is alive if its heartbeat is responding, dead the moment we miss enough pongs in a row.
+
+### 9.3 BootstrapService — the cold-start path
+
+A third, smaller contract at `src/contracts/BootstrapService.js`. A new node starts with no peers; bootstrap is how it gets its first channel.
+
+```
+BootstrapService.bootstrap(sponsor)
+  → Promise<{ sponsorId: bigint, transport: Transport }>
+```
+
+The `sponsor` is a discriminated union: `{ kind: 'simulator', … }` for in-process pointers, `{ kind: 'rendezvous', url, manifestSig }` for WebSocket signaling with a signed manifest, `{ kind: 'qr', sponsorAddr }` for direct device pairing. The contract returns the sponsor's id and a Transport with that one channel open. The DHT's `join(sponsor)` then runs a self-lookup through the sponsor and proceeds with stratified bootstrap on top of the freshly-opened transport.
+
+Splitting BootstrapService out of Transport matters because production bootstrap is an out-of-band concern (signature verification, manifest fetching, signaling-server handshake) that the routing protocol shouldn't see. Once `bootstrap()` returns, the DHT just has a transport with a channel open; it doesn't know whether that channel came from a QR code or a rendezvous server.
+
+### 9.4 The simulator as deployment vehicle
+
+The simulator's `SimulatedNetwork` and the production `WebRTCTransport` both implement the same Transport contract — twelve methods, one signature each. The simulator runs handlers synchronously inside the call (in-process, no real RTT); production runs them through WebRTC data channels with real RTT. **The protocol code does not switch on which transport it is using.** Every cross-peer reach goes through `send` or `notify`; every liveness check goes through `_deadPeers` populated by `onPeerDied`.
+
+This is the property that lets the simulator be the deployment vehicle. Years of NH-1 benchmark numbers — the hop counts, latency distributions, pub/sub coverage, churn-resilience curves — transfer directly to production because the same code path runs in both worlds. The 25K-node parity-gate benchmark (post-refactor sim v0.70.22 vs pre-refactor v0.70.04 reference) confirmed every protocol within the 10% target band: NH-1 within 5–8% on hops, 1–4% on latency; Kademlia, G-DHT, NX-17 within 0.5–3%.
+
+The remaining `nodeMap.get(peerId)` sites in the protocol code are all sim-only orchestration: `addNode` / `removeNode` Engine bookkeeping, `bootstrapJoin`'s god's-eye stratified bootstrap (replaced by `BootstrapService.bootstrap` + self-lookup in production), and the local self-resolution in `lookup(sourceId, …)` (which production resolves via the DHT instance owning its own state). The protocol's central algorithm — the recursive-forwarding `lookup_step` chain — is V1/V2-free.
+
+### 9.5 What this gets us, operationally
+
+- **The same body of routing code runs in the simulator and on the deployed mesh.** No "production fork" of NH-1; no separate code path for "real" networks.
+- **Async is the universal acid test.** Every cross-peer interaction is async even in the simulator. The recursive-forwarding lookup chain handles a dropped peer mid-walk (rejected Promise → `exhausted: true`) the same way in both worlds.
+- **Observability is contract-level, not back-channel.** Smoke tests, the simulator's traffic distribution plot, and production load-balance dashboards all consume `getMetrics()` and `onEvent()`. Same fields, same event shapes.
+- **The production transport is one file.** Swapping `SimulatedTransport` for `WebRTCTransport` is the deployment migration. The DHT contract, the protocol body, and AxonManager stay.
+
+---
+
+## 10. Red Team — The Existing Five
 
 The protocol has improved. The environment it lives in has not. NH-1 over the real internet today would likely face cascading timeouts and congestion collapse before the routing logic ever gets to demonstrate itself.
 
@@ -750,7 +837,7 @@ The S2 prefix is self-declared. **An attacker can pick any prefix** and generate
 
 ---
 
-## 10. Red Team — The Extended Ten
+## 11. Red Team — The Extended Ten
 
 The five issues above are the explicit red-team list in the existing materials. Extended analysis identifies ten additional pre-deployment failure modes, organized into three tiers.
 
@@ -954,7 +1041,7 @@ These ten items, plus the five already in existing materials, form a complete pr
 
 ---
 
-## 11. Operational Framework — Parameter Tuning
+## 12. Operational Framework — Parameter Tuning
 
 The consolidation from NX-17's 44 parameters to NH-1's 12 is only valuable if those 12 can be tuned by operators without deep protocol knowledge.
 
@@ -1046,7 +1133,7 @@ Collect operational data. Every 2 weeks, measure whether current parameters stil
 
 ---
 
-## 12. Observability and Alerting
+## 13. Observability and Alerting
 
 ### 12.1 Per-Node Metrics (Tier 1)
 
@@ -1189,7 +1276,7 @@ Dial 4: Geographic Span
 
 ---
 
-## 13. Diagnosis Playbooks
+## 14. Diagnosis Playbooks
 
 ### 13.1 Playbook: Lookup Success Collapse (Critical Alert #2)
 
@@ -1276,7 +1363,7 @@ C. **Structural recovery (days):** Analyze synaptome stability. If > 20% turnove
 
 ---
 
-## 14. Production Readiness Checklist
+## 15. Production Readiness Checklist
 
 Before deploying NH-1 to production, verify:
 
@@ -1311,7 +1398,7 @@ Before deploying NH-1 to production, verify:
 
 ---
 
-## 15. Reputation and Byzantine Resistance
+## 16. Reputation and Byzantine Resistance
 
 All the playbooks above assume nodes are honest but fallible. NH-1 has no built-in Byzantine resilience.
 
@@ -1359,7 +1446,7 @@ This is Phase 3 of the red-team action plan; it's not blocking but it's necessar
 
 ---
 
-## 16. Deployment Timeline
+## 17. Deployment Timeline
 
 **Month 1: Simulator Hardening**
 - Complete OFAT sensitivity analysis (red-team item 10.8)
@@ -1438,7 +1525,7 @@ The parameters tuned for 5K nodes may not be optimal at 50K.
 
 ---
 
-## 17. Comparison to Prior Art
+## 18. Comparison to Prior Art
 
 ### 17.1 Coral DSHT
 
@@ -1497,7 +1584,7 @@ For NH-1: when an axon-tree root's request rate exceeds a permissible threshold,
 
 ---
 
-## 18. Future Work
+## 19. Future Work
 
 Three phases of next-step work, ordered from highest behavioral impact to security hardening.
 
@@ -1546,7 +1633,7 @@ The brain is production-ready. The body is not — but the body is now the next 
 
 ---
 
-## 19. References
+## 20. References
 
 **Whitepaper** — `documents/Neuromorphic-DHT-Architecture.md` (companion repository, v0.67)
 **Source + data** — `github.com/YZ-social/dht-sim`

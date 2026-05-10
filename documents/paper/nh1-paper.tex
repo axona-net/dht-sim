@@ -1600,6 +1600,109 @@ rather than a tangle of interacting mechanisms.
 becomes the lab bench for the next iteration.
 
 % ═════════════════════════════════════════════════════════════════════════════
+\section{Implementation Architecture: A Two-Layer API}
+\label{sec:architecture}
+
+A working DHT has two interfaces, not one. The application above
+wants to publish, subscribe, and look things up; the network below
+wants to open a channel, send a message, and notice when a peer
+goes silent. The protocol is the thing in between. \nhone is
+structured so the protocol code is genuinely between those two
+layers --- neither the application nor the network is hardwired
+into the routing logic --- which is what makes the same body of
+code reusable in both the simulator and the deployed system.
+
+\subsection{The DHT contract --- application-facing}
+
+The application sees one running node. The contract is small:
+eight verbs covering lifecycle, operations, and observability.
+\texttt{start} / \texttt{stop} bring the node up and down;
+\texttt{join(sponsor)} / \texttt{leave} add to and depart from the
+network. \texttt{lookup(targetKey)} walks the routing layer toward
+a key; \texttt{subscribe} / \texttt{unsubscribe} / \texttt{publish}
+ride on the axonal-tree primitive. \texttt{getNodeId},
+\texttt{getSynaptome}, \texttt{getMetrics}, and \texttt{onEvent}
+are the read-only observability surface.
+
+The forbidden methods are as instructive as the present ones.
+There is no method that enumerates ``all nodes,'' no method that
+takes a peer-id and returns that peer's state, no method that lets
+the application mutate the routing table. A DHT instance is
+responsible for one node's view of the network; the simulator's
+Engine creates many DHT instances and orchestrates them, but that
+orchestration is a simulator concern --- it does not appear in the
+contract.
+
+\subsection{The Transport contract --- network-facing}
+
+One Transport instance per running node; the protocol calls into
+it. Twelve methods in four bands:
+
+\begin{itemize}\itemsep2pt
+\item \textbf{Lifecycle} (\texttt{start}, \texttt{stop},
+  \texttt{getLocalNodeId}).
+\item \textbf{Channel pool} (\texttt{openConnection},
+  \texttt{closeConnection}, \texttt{isConnected}). This maps
+  directly onto synaptome semantics: admit-to-synaptome corresponds
+  to \texttt{openConnection}; evict corresponds to
+  \texttt{closeConnection}. The bilateral connection cap is enforced
+  inside the transport --- \texttt{openConnection} resolves with
+  \texttt{false} if the remote refused.
+\item \textbf{Messaging} (\texttt{send},
+  \texttt{notify}, \texttt{onRequest}, \texttt{onNotification}).
+  Two outbound primitives: request/response and fire-and-forget.
+  The split matters because production transports pay round-trip
+  latency for \texttt{send} but not for \texttt{notify}. \nhone
+  uses \texttt{send} for the routing-tick chain
+  (\texttt{lookup\_step}, \texttt{lookahead\_probe},
+  \texttt{find\_closest\_set}, \texttt{local\_probe}) and
+  \texttt{notify} for the LEARN side-effects (\texttt{reinforce},
+  \texttt{hop\_cache}, \texttt{lateral\_spread},
+  \texttt{triadic\_introduce}).
+\item \textbf{Liveness} (\texttt{onPeerDied},
+  \texttt{getLatency}). The transport runs a 1\,Hz ping/pong
+  heartbeat on every open channel; missed pongs trigger
+  \texttt{onPeerDied}. The protocol consumes \texttt{getLatency}
+  for AP scoring and registers an \texttt{onPeerDied} callback
+  that populates a per-node \texttt{\_deadPeers} set --- the same
+  candidate-filter mechanism a production deployment uses.
+\end{itemize}
+
+The Transport contract forbids the protocol from reaching around
+it: no \texttt{nodeMap.get(peerId)}, no
+\texttt{peer.synaptome.values()} reads, no cross-peer field
+access. Every cross-peer read happens via \texttt{send} or
+\texttt{notify}.
+
+\subsection{The simulator as deployment vehicle}
+
+The simulator's \texttt{SimulatedNetwork} and the production
+\texttt{WebRTCTransport} both implement the same Transport
+contract. Twelve methods, one signature each. The simulator runs
+handlers synchronously inside the call (in-process, no real RTT);
+production runs them through WebRTC data channels with real RTT.
+The protocol code does not switch on which transport it is using.
+
+This is the property that lets the simulator be the deployment
+vehicle. Years of \nhone benchmark numbers --- the hop counts,
+latency distributions, pub/sub coverage, churn-resilience curves
+in \S\ref{sec:eval} --- transfer directly to production because
+the same code path runs in both worlds. A 25\,K-node parity-gate
+benchmark (post-refactor v0.70.22 against the pre-refactor
+v0.70.04 reference) confirmed every protocol within a 10\% target
+band: \nhone within 5--8\% on hops, 1--4\% on latency; Kademlia,
+\GDHT, NX-17 within 0.5--3\%. The protocol's central algorithm
+--- the recursive-forwarding \texttt{lookup\_step} chain --- is
+free of cross-peer state reads; the remaining
+\texttt{nodeMap.get(peerId)} sites are sim-only orchestration
+(node creation/destruction bookkeeping, the simulator's god's-eye
+stratified bootstrap, and the local self-resolution in
+\texttt{lookup}). Production replaces the bootstrap path with a
+\texttt{BootstrapService} contract that handles signaling,
+manifest signature verification, and QR-code pairing
+out-of-band.
+
+% ═════════════════════════════════════════════════════════════════════════════
 \section{Future Work}
 \label{sec:future}
 

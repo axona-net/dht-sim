@@ -217,6 +217,28 @@ The bridge becomes a **seed crystal**. After just 10 lookups through the partiti
 
 The protocol doesn't keep finding the bridge — it *uses* the bridge to rebuild the bridges that were cut. Like a brain forming new pathways around damaged tissue.
 
+## How Does This Become Real Software?
+
+The simulator is the lab — fifty thousand simulated peers in a single browser tab, no real network underneath. The same code has to eventually run on the actual internet, where messages take real milliseconds and connections occasionally die. How do you get there?
+
+The trick is keeping two things separate that everyone *wants* to merge: **the protocol** (the rules of routing — AP scoring, hop caching, vitality, axonal trees) and **the network** (the actual machinery that moves bytes between machines). If you tangle them together, the simulator becomes useless the moment you deploy, because the protocol code was wired into a fake network. If you keep them apart, the simulator becomes the deployment vehicle: same protocol, different network underneath.
+
+N-DHT keeps them apart with **two contracts**.
+
+The first contract — call it the **DHT contract** — is what the application above sees. An app like a chat client doesn't care how routing works internally; it just wants to *do things*. So the DHT exposes eight verbs: `start`, `stop`, `join`, `leave` (lifecycle); `lookup`, `subscribe`, `unsubscribe`, `publish` (the actual operations); plus `getMetrics`, `getSynaptome`, and `onEvent` for telemetry — a way for the application to *watch* what the protocol is doing without being able to mess with it.
+
+The second contract — the **Transport contract** — is what the network underneath has to provide. It's deliberately small: open a channel to a peer, close a channel, send a message and wait for the reply, send a message and don't wait, register a callback for when a peer dies, ask for a peer's measured latency. Twelve methods. That's it.
+
+The protocol — the routing logic, the learning rules, all the brain-inspired machinery — sits in between. It calls *down* into the Transport ("send this peer a message asking for its closest synapses to target X") and emits events *up* through the DHT contract ("a lookup just completed; here's the result"). It doesn't know whether the Transport beneath it is the simulator's in-process fake or a real WebRTC connection over the internet. **It can't tell the difference**, by design.
+
+That last point is what matters. When the simulator says "NH-1 takes about 5 hops on average to find a target in a 25,000-node network," that number isn't a simulator artifact. It's a property of the protocol code, which is the same code that will run when this gets deployed. The Transport changes; the protocol doesn't. The simulator's hop counts, latency curves, churn-resilience numbers — they all transfer to the real internet because the routing decisions that produce those numbers are made in code that doesn't know it's being simulated.
+
+The legacy version of N-DHT did *not* have this property. The simulator code was god-like — it could reach into any node's internal state and read it, because they were all in the same process. The first version of the protocol exploited that, because of course it did. Then we spent fifteen commits unbinding the protocol from the god's-eye view: every cross-peer read had to go through the Transport contract, every liveness check had to come from a real heartbeat, every routing decision had to be made by the peer that owns the data, not by the source of the lookup. By the end, the only places the protocol still touches the global node-map are sim-only orchestration — the simulator's equivalent of "spin up a node" and "destroy a node," which production replaces with operating-system-level process startup and shutdown.
+
+The benchmark check at the end of that fifteen-commit pass: 25,000 simulated nodes, before and after. NH-1 came out within five percent on hop counts and one percent on latency — the small drift upward is the architecturally-honest cost of letting each peer make its own decisions instead of having the source orchestrate the walk. The other protocols (Kademlia, G-DHT, NX-17) came out within one percent across the board.
+
+So the simulator is now the deployment vehicle. The next step — which is just plumbing — is to write a Transport that runs on real WebRTC instead of an in-process fake, and a Bootstrap service that handles the cold-start problem of finding your first peer when you've never been on the network before. The protocol, the routing logic, the brain — all of that stays exactly as it is. You can read it in the simulator and you'll be reading the production code.
+
 ## The Honest Footnotes
 
 It is worth being explicit about what *isn't* measured.
