@@ -536,7 +536,10 @@ export class NeuromorphicDHTNH1 extends DHT {
       if (deadSynapses.length > 0) {
         current.temperature = Math.max(current.temperature, this.T_REHEAT);
         for (const syn of deadSynapses) {
-          const repl = this._evictAndReplace(current, syn);
+          // v0.70.14 — _evictAndReplace is async (commits 6+8); await it
+          // so the replacement synapse is in the synaptome before we
+          // continue building the candidate set for this hop.
+          const repl = await this._evictAndReplace(current, syn);
           if (repl && (repl.peerId ^ targetKey) < currentDist) candidates.push(repl);
         }
       }
@@ -584,7 +587,7 @@ export class NeuromorphicDHTNH1 extends DHT {
           syn.weight = 0.5;
           syn.inertia = this.simEpoch;  // fresh recency
           syn._addedBy = 'promote';
-          if (this._addByVitality(current, syn)) current.incomingSynapses.delete(nextId);
+          if (await this._addByVitality(current, syn)) current.incomingSynapses.delete(nextId);
         }
       }
 
@@ -602,7 +605,14 @@ export class NeuromorphicDHTNH1 extends DHT {
       this._msg(current, nextNode, 'find_node');
 
       // ── LEARN: hop caching ─────────────────────────────────────────────
-      if (currentId !== targetKey) this._hopCache(currentId, targetKey);
+      // v0.70.14 — _hopCache is now async; fire-and-forget since it is
+      // a learning side-effect that does not block the routing critical
+      // path.  The synapse + lateral-spread land in subsequent ticks.
+      if (currentId !== targetKey) {
+        this._hopCache(currentId, targetKey).catch(err => {
+          console.error(`NH-1: _hopCache failed:`, err);
+        });
+      }
 
       // ── LEARN: triadic closure ─────────────────────────────────────────
       if (currentId !== sourceId) this._recordTransit(current, sourceId, nextId);
@@ -732,39 +742,56 @@ export class NeuromorphicDHTNH1 extends DHT {
   }
 
   /** Add synapse, honouring bilateral cap and evicting lowest-vitality if full. */
-  _addByVitality(node, newSyn) {
-    // Physical-transport gate (bilateral cap). If either side is at cap,
-    // refuse silently — caller will retry on a future lookup. This matches
-    // NX-6's _stratifiedAdd discipline; aggressive eviction without this
-    // gate produced thrashing in v0.63.05.
-    const peer = this.nodeMap?.get(newSyn.peerId);
-    if (peer && !node.tryConnect(peer)) return false;
+  async _addByVitality(node, newSyn) {
+    // v0.70.14 (refactor commit 8) — admission gate now goes entirely
+    // through the Transport contract.  The bilateral-cap check moves
+    // from node.tryConnect(peer) (which required a peer Node object
+    // looked up via nodeMap) to await transport.openConnection(peerId)
+    // (which only needs the id).  The synapse latency is filled in
+    // from transport.getLatency() instead of roundTripLatency() with
+    // peer's lat/lng — same haversine value in the simulator, real
+    // heartbeat-measured RTT in production.
+    //
+    // Local capacity is checked *first* (purely local computation, no
+    // network cost) so we don't open a remote channel only to
+    // immediately close it if no eviction is possible.
 
-    // Per-node synaptome cap (v0.66.13): highway nodes get a larger cap
-    // so they can act as transit hubs. Falls back to the global default
-    // for nodes that don't have _maxSynaptome set (e.g. churn replacements
-    // before they pick up their per-node cap).
     const cap = node._maxSynaptome ?? this.MAX_SYNAPTOME;
-    if (node.synaptome.size < cap) {
-      node.addSynapse(newSyn);
-      return true;
+
+    // Pre-pick eviction victim if local synaptome is at capacity.
+    let victim = null;
+    if (node.synaptome.size >= cap) {
+      let minV = Infinity, minVAny = Infinity, victimAny = null;
+      for (const s of node.synaptome.values()) {
+        if (s.inertia > this.simEpoch) continue;  // LTP-locked: protected
+        const v = this._vitality(node, s);
+        if (v < minVAny) { minVAny = v; victimAny = s; }
+        if (!s.bootstrap && v < minV) { minV = v; victim = s; }
+      }
+      victim = victim ?? victimAny;
+      if (!victim) return false;   // no evictable target — abort before opening anything
     }
 
-    // Vitality-based eviction with bootstrap preference (NX-6 simple-eviction parity):
-    // pick lowest-vitality non-bootstrap; fall back to lowest-vitality overall
-    // if every victim is a bootstrap synapse.
-    let victim = null, minV = Infinity;
-    let victimAny = null, minVAny = Infinity;
-    for (const s of node.synaptome.values()) {
-      if (s.inertia > this.simEpoch) continue;  // LTP-locked: protected
-      const v = this._vitality(node, s);
-      if (v < minVAny) { minVAny = v; victimAny = s; }
-      if (!s.bootstrap && v < minV) { minV = v; victim = s; }
-    }
-    const evictTarget = victim ?? victimAny;
-    if (!evictTarget) return false;
+    // Network-side bilateral cap check.  Returns false if remote
+    // refused or unreachable.  Same semantic as the legacy tryConnect
+    // failure path.  In production this opens a real WebRTC channel;
+    // in the simulator it is a synchronous liveness check.
+    const opened = await node.transport.openConnection(newSyn.peerId);
+    if (!opened) return false;
 
-    node.synaptome.delete(evictTarget.peerId);
+    // Latency from the transport contract.  In production: -1 until
+    // the first heartbeat fires (~1 second after openConnection); fall
+    // back to a 200ms default until then so AP scoring has a usable
+    // value.  Subsequent reinforcement events update the synapse's
+    // latency from the same source.
+    const measuredLat = node.transport.getLatency(newSyn.peerId);
+    newSyn.latency = (measuredLat >= 0) ? measuredLat : 200;
+
+    if (victim) {
+      node.synaptome.delete(victim.peerId);
+      node.connections?.delete(victim.peerId);
+      await node.transport.closeConnection(victim.peerId);
+    }
     node.addSynapse(newSyn);
     return true;
   }
@@ -803,50 +830,72 @@ export class NeuromorphicDHTNH1 extends DHT {
       // back to the original source. One wire message per fired triadic.
       const nodeA = this.nodeMap.get(originId);
       if (nodeA) this._msg(node, nodeA, 'triadic_introduce');
-      this._introduce(originId, nextId);
+      // v0.70.14 — _introduce is now async.  Triadic introduction is a
+      // background side effect (it does not block the routing path that
+      // observed the transit), so fire-and-forget per the contract
+      // design.  Stray rejections are logged.
+      this._introduce(originId, nextId).catch(err => {
+        console.error(`NH-1: triadic _introduce failed (${originId} ${nextId}):`, err);
+      });
     } else {
       node.transitCache.set(key, count);
     }
   }
 
-  _introduce(aId, cId) {
+  async _introduce(aId, cId) {
+    // V1 violation kept here (this.nodeMap.get(aId)) until commit 14
+    // restructures NH-1 around per-node local execution.  In production
+    // _introduce runs *at* node A, triggered by a 'triadic_introduce'
+    // notification from B.  In the simulator's god's-eye walk we
+    // dispatch centrally with both ids and resolve nodeA via the
+    // simulator-only nodeMap.
     const nodeA = this.nodeMap.get(aId);
-    const nodeC = this.nodeMap.get(cId);
-    if (!nodeA || !nodeC || !nodeA.alive || !nodeC.alive) return;
+    if (!nodeA?.alive) return;
     if (nodeA.synaptome.has(cId)) return;
-    const latMs   = roundTripLatency(nodeA, nodeC);
-    const stratum = clz64(nodeA.id ^ nodeC.id);
-    const syn     = new Synapse({ peerId: cId, latencyMs: latMs, stratum });
+
+    const stratum = clz64(nodeA.id ^ cId);
+    const syn     = new Synapse({ peerId: cId, latencyMs: 0, stratum });
     syn.weight    = 0.5;
-    syn.inertia   = this.simEpoch;  // fresh recency
+    syn.inertia   = this.simEpoch;          // fresh recency
     syn._addedBy  = 'triadic';
-    const added = this._addByVitality(nodeA, syn);
-    // TRAFFIC: the introduction probe — A reaches out to C to confirm it's
-    // alive and learn the actual latency. Count only on successful add so
-    // we don't credit messages that the bilateral cap silently refused.
-    if (added) this._msg(nodeA, nodeC, 'triadic_probe');
+    const added  = await this._addByVitality(nodeA, syn);
+    if (added) {
+      // Legacy 'triadic_probe' counter.  Commit 9 will retire this in
+      // favour of a real transport.notify for the cross-peer LEARN
+      // side-effects; for now we keep the counter for parity with the
+      // v0.70.04 bandwidth study's per-type breakdown.
+      const nodeC = this.nodeMap.get(cId);
+      if (nodeC) this._msg(nodeA, nodeC, 'triadic_probe');
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LEARN: Hop Caching
   // ═══════════════════════════════════════════════════════════════════════════
 
-  _hopCache(nodeId, targetId, depth = 0) {
+  async _hopCache(nodeId, targetId, depth = 0) {
+    // V1 cleanup deferred to commit 14 — _hopCache will execute *at*
+    // the local node in production (no nodeMap lookup needed).  For
+    // now the simulator's god's-eye dispatch resolves both nodeId and
+    // targetId through nodeMap so legacy callers (lookup + recursive
+    // lateral-spread) continue to work unchanged.
     const node   = this.nodeMap.get(nodeId);
-    const target = this.nodeMap.get(targetId);
-    if (!node || !target || !node.alive || !target.alive) return;
+    if (!node?.alive) return;
     if (!node.synaptome.has(targetId)) {
-      const latMs   = roundTripLatency(node, target);
-      const stratum = clz64(node.id ^ target.id);
-      const syn     = new Synapse({ peerId: targetId, latencyMs: latMs, stratum });
+      const stratum = clz64(node.id ^ targetId);
+      const syn     = new Synapse({ peerId: targetId, latencyMs: 0, stratum });
       syn.weight    = 0.5;             // NX-6 parity (was 0.3 — too low to displace bootstrap)
       syn.inertia   = this.simEpoch;   // fresh recency so vitality comparison is fair
       syn._addedBy  = depth === 0 ? 'hopCache' : 'lateralSpread';
-      const added   = this._addByVitality(node, syn);
+      const added   = await this._addByVitality(node, syn);
 
       // TRAFFIC: when a synapse is added, the node had to probe target to
       // confirm it's alive and learn its latency — count one wire message.
-      if (added) this._msg(node, target, depth === 0 ? 'hop_cache' : 'hop_cache_lateral');
+      // (Legacy counter; commit 9 retires this in favor of transport.notify.)
+      if (added) {
+        const target = this.nodeMap.get(targetId);
+        if (target) this._msg(node, target, depth === 0 ? 'hop_cache' : 'hop_cache_lateral');
+      }
 
       // Lateral spread: propagate to geographic neighbors (same top-4 geo bits)
       if (this.EN_LATERAL_SPREAD && added && depth === 0) {
@@ -865,8 +914,13 @@ export class NeuromorphicDHTNH1 extends DHT {
           // TRAFFIC: the lateral-spread tells the regional peer about target.
           // That's a wire message from node → regional peer.
           const lateralPeer = this.nodeMap.get(regional[i].peerId);
-          this._msg(node, lateralPeer, 'lateral_spread');
-          this._hopCache(regional[i].peerId, targetId, 1);
+          if (lateralPeer) this._msg(node, lateralPeer, 'lateral_spread');
+          // v0.70.14 — recursive call now async; fire-and-forget per
+          // contract design (lateral spread is a side effect, not on
+          // the routing critical path).
+          this._hopCache(regional[i].peerId, targetId, 1).catch(err => {
+            console.error(`NH-1: lateral _hopCache failed:`, err);
+          });
         }
       }
     }
@@ -931,14 +985,19 @@ export class NeuromorphicDHTNH1 extends DHT {
     const candidate = await this._localCandidate(node, lo, hi);
     if (!candidate || node.synaptome.has(candidate.id)) return;
 
-    // Delete victim from synaptome AND release its connections slot so the
-    // bilateral cap doesn't reject the candidate. Anneal is intentionally
-    // a 1-for-1 exchange — the peer count stays constant.
+    // v0.70.14 — anneal is a 1-for-1 exchange.  Close the victim's
+    // channel before opening the candidate's.  Both go through the
+    // Transport contract; the bilateral-cap check happens inside
+    // openConnection (returns false if remote refused).
     node.synaptome.delete(victim.peerId);
     node.connections?.delete(victim.peerId);
-    if (!node.tryConnect(candidate)) return;        // bilateral cap
+    await node.transport.closeConnection(victim.peerId);
 
-    const latMs   = roundTripLatency(node, candidate);
+    const opened = await node.transport.openConnection(candidate.id);
+    if (!opened) return;        // bilateral cap
+
+    const measuredLat = node.transport.getLatency(candidate.id);
+    const latMs   = (measuredLat >= 0) ? measuredLat : 200;
     const stratum = clz64(node.id ^ candidate.id);
     const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
     syn.weight    = 0.1;
@@ -951,22 +1010,27 @@ export class NeuromorphicDHTNH1 extends DHT {
   // ═══════════════════════════════════════════════════════════════════════════
 
   async _evictAndReplace(node, deadSyn) {
-    // The dead peer is gone; release its slot from the connections Set so the
-    // bilateral-cap accounting reflects the actual surviving link count.
+    // v0.70.14 — admission via Transport contract.  The dead peer's
+    // channel is closed; the candidate's channel is opened (which is
+    // the bilateral-cap check); latency comes from getLatency.
     node.synaptome.delete(deadSyn.peerId);
     node.connections?.delete(deadSyn.peerId);
+    await node.transport.closeConnection(deadSyn.peerId);
 
     const group = Math.min(this.STRATA_GROUPS - 1, deadSyn.stratum >>> 2);
     const candidate = await this._localCandidate(node, group * 4, group * 4 + 3);
     if (!candidate || node.synaptome.has(candidate.id)) return null;
-    if (!node.tryConnect(candidate)) return null;     // bilateral cap
+
+    const opened = await node.transport.openConnection(candidate.id);
+    if (!opened) return null;     // bilateral cap
 
     const weights = [];
     for (const s of node.synaptome.values()) weights.push(s.weight);
     weights.sort((a, b) => a - b);
     const medW = weights.length > 0 ? weights[weights.length >> 1] : this.VITALITY_FLOOR;
 
-    const latMs   = roundTripLatency(node, candidate);
+    const measuredLat = node.transport.getLatency(candidate.id);
+    const latMs   = (measuredLat >= 0) ? measuredLat : 200;
     const stratum = clz64(node.id ^ candidate.id);
     const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
     syn.weight    = medW;
