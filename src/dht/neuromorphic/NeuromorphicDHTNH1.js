@@ -197,6 +197,27 @@ export class NeuromorphicDHTNH1 extends DHT {
     // Sanity handler: any peer can ping us; we reply 'pong'.
     node.transport.onRequest('ping', async () => 'pong');
 
+    // ── lookahead_probe (commit 5) ────────────────────────────────────
+    // Source asks: "what is your closest forward synapse to target X?"
+    // We answer with the peer of our best-AP synapse that strictly
+    // makes XOR progress past `fromDist` (the source's own distance to
+    // X passing through us). If we have no such forward, we report
+    // ourselves as terminal — the source projects the second hop's
+    // latency as 0, distance as our own distance to target.
+    node.transport.onRequest('lookahead_probe', async (_fromId, payload) => {
+      const target   = payload.target;
+      const fromDist = payload.fromDist;     // BigInt
+      const fwd = [];
+      for (const syn of node.synaptome.values()) {
+        if ((syn.peerId ^ target) < fromDist) fwd.push(syn);
+      }
+      if (fwd.length === 0) {
+        return { peerId: node.id, latency: 0, terminal: true };
+      }
+      const best = node.bestByAP(fwd, target, 0);
+      return { peerId: best.peerId, latency: best.latency, terminal: false };
+    });
+
     // Dead-peer callback.  In commits 5+ this will trigger
     // _evictAndReplace on the affected synapse and reheat the local
     // node's temperature.  For now we just record that the event
@@ -534,7 +555,7 @@ export class NeuromorphicDHTNH1 extends DHT {
       }
 
       if (!nextSyn) {
-        nextSyn = this._bestByTwoHopAP(current, candidates, targetKey, currentDist);
+        nextSyn = await this._bestByTwoHopAP(current, candidates, targetKey, currentDist);
       }
 
       const nextId = nextSyn.peerId;
@@ -597,42 +618,61 @@ export class NeuromorphicDHTNH1 extends DHT {
   // NAVIGATE: Two-hop lookahead AP selection
   // ═══════════════════════════════════════════════════════════════════════════
 
-  _bestByTwoHopAP(current, candidates, targetKey, currentDist) {
-    // v0.66.10: pure progress/latency AP — the LTP-weight bias was removed
-    // because ablation showed `weightScale` had no measurable effect on
-    // routing and marginally hurt pub/sub full-converge (likely because
-    // weight differences across nodes injected K-set drift into routing
-    // decisions that should otherwise be deterministic given network state).
+  async _bestByTwoHopAP(current, candidates, targetKey, currentDist) {
+    // v0.70.11 (refactor commit 5) — the two-hop lookahead now runs as
+    // parallel `lookahead_probe` RPCs against each candidate, instead of
+    // reaching synchronously into firstNode.synaptome.  This is the
+    // first V2 (cross-peer state read) violation cleared.
+    //
+    // Wire shape: each probe asks the candidate "what is your closest
+    // forward synapse to target?" and the candidate's onRequest
+    // handler answers locally from its own synaptome.  Promise.allSettled
+    // is the right primitive — a slow or dead candidate's rejection is
+    // dropped and the rest of the responses still score.  No `_msg`
+    // counter calls are needed: SimulatedTransport.send bumps the same
+    // msgsSent / msgsReceived / msgsByType counters under the
+    // 'lookahead_probe' type.
+
     const ranked = candidates.map(s => {
       const ap = Number(currentDist - (s.peerId ^ targetKey)) / s.latency;
       return { s, ap };
     }).sort((a, b) => b.ap - a.ap);
 
     const probeSet = ranked.slice(0, this.LOOKAHEAD_ALPHA).map(x => x.s);
-    let bestSyn = null, bestAP2 = -Infinity;
 
+    // Short-circuit: any probe whose first-hop sits exactly on the
+    // target wins outright (zero remaining XOR distance).
     for (const first of probeSet) {
+      if ((first.peerId ^ targetKey) === 0n) return first;
+    }
+
+    // Parallel lookahead probes.  Each rejected probe is treated like
+    // an empty-forward response — the source projects the second-hop
+    // latency as 0 and distance as the first-hop's own distance to
+    // target, the same fallback as `if (!fwd.length)` in the legacy
+    // code path.
+    const settled = await Promise.allSettled(
+      probeSet.map(first =>
+        current.transport.send(first.peerId, 'lookahead_probe', {
+          target:   targetKey,
+          fromDist: first.peerId ^ targetKey,
+        })
+      )
+    );
+
+    let bestSyn = null, bestAP2 = -Infinity;
+    for (let i = 0; i < probeSet.length; i++) {
+      const first = probeSet[i];
       const firstDist = first.peerId ^ targetKey;
-      if (firstDist === 0n) return first;
-      const firstNode = this.nodeMap.get(first.peerId);
-      if (!firstNode?.alive) continue;
-
-      // TRAFFIC: each two-hop AP probe is one round-trip (current asks
-      // first for its closest-to-target). Count once per probe-set entry.
-      this._msg(current, firstNode, 'lookahead_probe');
-
-      const fwd = [];
-      for (const fs of firstNode.synaptome.values()) {
-        if ((fs.peerId ^ targetKey) < firstDist && this.nodeMap.get(fs.peerId)?.alive)
-          fwd.push(fs);
-      }
+      const r = settled[i];
 
       let twoHopDist, secondLat;
-      if (!fwd.length) { twoHopDist = firstDist; secondLat = 0; }
-      else {
-        const best2 = firstNode.bestByAP(fwd, targetKey, 0);
-        twoHopDist = best2.peerId ^ targetKey;
-        secondLat  = best2.latency;
+      if (r.status !== 'fulfilled' || !r.value || r.value.terminal) {
+        twoHopDist = firstDist;
+        secondLat  = 0;
+      } else {
+        twoHopDist = r.value.peerId ^ targetKey;
+        secondLat  = r.value.latency;
       }
 
       const ap2 = Number(currentDist - twoHopDist) / (first.latency + secondLat);
