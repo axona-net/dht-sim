@@ -1,6 +1,17 @@
 /**
  * NeuromorphicDHTNX17 — publisher-prefix addressing + pure routed axonal tree.
  *
+ * ── Migration status (v0.70.18 / refactor commit 12) ──────────────────────
+ *
+ * NX-17 is a RESEARCH/COMPARISON protocol; not migrated to the
+ * Transport contract.  It inherits NX-15's legacy `nodeMap.get`-based
+ * routing primitives (see NX-15's header for the full migration-status
+ * note).  Production deployment uses NeuromorphicDHTNH1 exclusively.
+ *
+ * Tests confirm runtime parity with v0.70.16: AxonManager's
+ * async-aware refactor is backward-compatible with NX-15/NX-17's sync
+ * primitives.
+ *
  * ── The two pieces ────────────────────────────────────────────────────────
  *
  * 1. **Publisher-prefix topic IDs.**

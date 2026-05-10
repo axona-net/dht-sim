@@ -1,6 +1,37 @@
 /**
  * NeuromorphicDHTNX15 — Membership-protocol pub/sub.
  *
+ * ── Migration status (v0.70.18 / refactor commit 12) ─────────────────
+ *
+ * NX-15 is a RESEARCH/COMPARISON protocol kept available for ablation
+ * against the production target NH-1 (N-DHT).  The structural
+ * Transport-contract migration that NH-1 went through in commits 4-11
+ * — recursive forwarding lookup, parallel lookahead probes, transport
+ * notify for LEARN side-effects, transport-mediated pub/sub primitives
+ * — has NOT been propagated to NX-15 (or its parent NX-10/NX-6).  NX-15
+ * still uses the simulator's god's-eye `nodeMap.get(peerId)` path for
+ * peer access.
+ *
+ * Why kept on legacy paths:
+ *   - NX-15 / NX-17 are how we reproduce the v0.66.x and earlier
+ *     benchmark series against the same simulator code.  Migrating
+ *     them would mean re-validating those numbers under the new
+ *     transport model, which is out of scope for the production
+ *     deployment effort.
+ *   - The AxonManager refactor (commit 10) is intentionally
+ *     backward-compatible: AxonManager's `await this.dht.findKClosest`
+ *     / `await this.dht.sendDirect` work fine with a sync return value
+ *     (await of a non-Promise is a microtask no-op), so NX-15's
+ *     existing sync primitives plug in cleanly.  Tests confirm parity:
+ *     test_nx15_integration: 15 passed / 2 failed (matches baseline).
+ *
+ * Production deployment uses NeuromorphicDHTNH1 exclusively.  All
+ * V1+V2 cleanup, contract compliance, and observability work targets
+ * NH-1.  See `documents/implementation/N-DHT-refactor-punchlist.md`
+ * for the full violation tally and migration plan.
+ *
+ * ── Original design notes (preserved for context) ────────────────────
+ *
  * Extends NX-10 (inheriting synaptome, routing-topology forwarding tree,
  * churn resilience, and every prior NX-N rule) and adds a real, self-
  * organising pub/sub membership protocol on top:

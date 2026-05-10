@@ -2,6 +2,57 @@
 
 *Generated against contracts at `src/contracts/` (sim v0.70.06).*
 
+## 0. Status (sim v0.70.18, refactor commits 1-12 done)
+
+The 15-commit migration is partially complete.  Production target NH-1
+is now V1+V2-clean in the routing path (lookup main loop, two-hop
+lookahead, candidate enumeration, LEARN side-effects, pub/sub
+primitives).
+
+| Commit | Status | Title                                                   |
+|--------|--------|---------------------------------------------------------|
+| 1      | ✅     | SimulatedNetwork.makeTransport + Transport contract     |
+| 2      | ✅     | SimulatorBootstrapService implements BootstrapService   |
+| 3      | ✅     | K-DHT lookup converted to await transport.send (V3 fix) |
+| 4      | ✅     | NH-1 transport-attached at addNode + onPeerDied        |
+| 5      | ✅     | NH-1 _bestByTwoHopAP runs as parallel transport.send    |
+| 6      | ✅     | NH-1 _localCandidate via parallel transport.send        |
+| 7      | ✅     | NH-1 _findCloserInTwoHops reuses lookahead_probe        |
+| 8      | ✅     | NH-1 _addByVitality on the Transport contract           |
+| 9      | ✅     | NH-1 LEARN side-effects via transport.notify            |
+| 10     | ✅     | NH-1 pub/sub primitives on the Transport contract       |
+| 11     | ✅     | NH-1 lookup() recursive forwarding wrap-up              |
+| 12     | ✅     | NX-15/NX-17 scope clarification (not migrated)          |
+| 13     | ⏳     | NX-6 lineage (research; deferred)                       |
+| 14     | ⏳     | NeuronNode cleanup — drop `_nodeMapRef`                 |
+| 15     | ⏳     | DHT.getMetrics / getSynaptome / onEvent observability   |
+
+Scope decision (commit 12): NX-15, NX-17, and NX-6 are research /
+comparison protocols.  They REMAIN on the simulator's god's-eye
+`nodeMap.get` path so historical benchmark numbers (v0.66.x and
+earlier) reproduce byte-for-byte.  They will not be migrated to the
+Transport contract — that work targets NH-1 (the production target)
+exclusively.  AxonManager's async-aware refactor (commit 10) is
+backward-compatible with NX-15/17's sync primitives, so they keep
+working in the simulator without any changes.
+
+Remaining V1 sites in NH-1 (after commit 11):
+  - bootstrap (`buildRoutingTables` / `bootstrapJoin`) — sim-only
+    enumerator path; will be replaced by the production
+    `BootstrapService.bootstrap(sponsor)` flow when the deployment
+    pathway lands.
+  - `postChurnHeal` liveness sweep — to be replaced by
+    `transport.onPeerDied → _evictAndReplace` fan-out in commit 14.
+  - `_pickRecruitPeer` / `_pickRelayPeer` (in pub/sub) — addressed by
+    NeuronNode cleanup in commit 14.
+  - `_nodeShim.getAlivePeer` (consumed by AxonManager) — addressed by
+    AxonManager's peer-died model in commit 14.
+
+The lookup main loop itself — the protocol's central routing tick —
+is V1/V2-free as of v0.70.17.
+
+---
+
 ## 1. Summary
 
 Per-file violation counts. V1 = `nodeMap.get(peerId)` peer-registry reach. V2 =
