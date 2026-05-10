@@ -218,6 +218,20 @@ export class NeuromorphicDHTNH1 extends DHT {
       return { peerId: best.peerId, latency: best.latency, terminal: false };
     });
 
+    // ── local_probe (commit 6) ────────────────────────────────────────
+    // Source asks for our 2-hop neighbourhood — i.e., the peer ids in
+    // our own synaptome.  The source then filters by stratum range and
+    // picks a candidate at random for annealing / dead-peer replacement.
+    // The receiver excludes the requestor itself (which would otherwise
+    // appear as a candidate in the requestor's own synaptome — useless).
+    node.transport.onRequest('local_probe', async (fromId, _payload) => {
+      const peerIds = [];
+      for (const syn of node.synaptome.values()) {
+        if (syn.peerId !== fromId) peerIds.push(syn.peerId);
+      }
+      return peerIds;
+    });
+
     // Dead-peer callback.  In commits 5+ this will trigger
     // _evictAndReplace on the affected synapse and reheat the local
     // node's temperature.  For now we just record that the event
@@ -598,7 +612,16 @@ export class NeuromorphicDHTNH1 extends DHT {
       // v0.70.03 — multiply trigger probability by ANNEAL_RATE_SCALE so
       // ablations can throttle the dominant local_probe source without
       // disturbing the temperature-reheat semantics on dead-peer detection.
-      if (Math.random() < current.temperature * this.ANNEAL_RATE_SCALE) this._tryAnneal(current);
+      // v0.70.12 — anneal is fire-and-forget per the contract design:
+      // it runs as a background task off the lookup's critical path.
+      // Stray rejections are logged but do not propagate (the lookup
+      // has already moved on to the next hop before anneal completes).
+      if (Math.random() < current.temperature * this.ANNEAL_RATE_SCALE) {
+        const annealNode = current;
+        this._tryAnneal(annealNode).catch(err => {
+          console.error(`NH-1: anneal failed at ${annealNode.id.toString(16)}:`, err);
+        });
+      }
 
       currentId = nextId;
     }
@@ -883,7 +906,7 @@ export class NeuromorphicDHTNH1 extends DHT {
   // EXPLORE: Annealing
   // ═══════════════════════════════════════════════════════════════════════════
 
-  _tryAnneal(node) {
+  async _tryAnneal(node) {
     if (!node.alive || node.synaptome.size === 0) return;
 
     // Find weakest synapse by weight (skip LTP-locked)
@@ -905,7 +928,7 @@ export class NeuromorphicDHTNH1 extends DHT {
     }
 
     const lo = targetGroup * 4, hi = lo + 3;
-    const candidate = this._localCandidate(node, lo, hi);
+    const candidate = await this._localCandidate(node, lo, hi);
     if (!candidate || node.synaptome.has(candidate.id)) return;
 
     // Delete victim from synaptome AND release its connections slot so the
@@ -927,14 +950,14 @@ export class NeuromorphicDHTNH1 extends DHT {
   // STRUCTURE: Dead-synapse Replacement + 2-hop Search
   // ═══════════════════════════════════════════════════════════════════════════
 
-  _evictAndReplace(node, deadSyn) {
+  async _evictAndReplace(node, deadSyn) {
     // The dead peer is gone; release its slot from the connections Set so the
     // bilateral-cap accounting reflects the actual surviving link count.
     node.synaptome.delete(deadSyn.peerId);
     node.connections?.delete(deadSyn.peerId);
 
     const group = Math.min(this.STRATA_GROUPS - 1, deadSyn.stratum >>> 2);
-    const candidate = this._localCandidate(node, group * 4, group * 4 + 3);
+    const candidate = await this._localCandidate(node, group * 4, group * 4 + 3);
     if (!candidate || node.synaptome.has(candidate.id)) return null;
     if (!node.tryConnect(candidate)) return null;     // bilateral cap
 
@@ -952,45 +975,62 @@ export class NeuromorphicDHTNH1 extends DHT {
     return syn;
   }
 
-  _localCandidate(node, lo, hi) {
+  async _localCandidate(node, lo, hi) {
+    // v0.70.12 (refactor commit 6) — the 2-hop neighbourhood scan now
+    // runs as parallel `local_probe` RPCs against each peer in node's
+    // synaptome, instead of synchronously reading peer.synaptome.values().
+    //
+    // This is the dominant V2 violation in NH-1.  At default
+    // ANNEAL_RATE_SCALE = 1.0 and 50 K nodes, it accounted for ~89% of
+    // all wire traffic (per the v0.70.04 bandwidth study).  In the
+    // production deployment that ratio is likely re-tuned via
+    // ANNEAL_RATE_SCALE = 0.10 (the knee point in the same study) but
+    // the volume projection from the simulator transfers directly
+    // because the simulator already counted these as wire messages.
+
+    const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
+    if (probeTargets.length === 0) return null;
+
+    const settled = await Promise.allSettled(
+      probeTargets.map(peerId => node.transport.send(peerId, 'local_probe', null))
+    );
+
     const candidates = [];
     outer:
-    for (const syn of node.synaptome.values()) {
-      const peer = this.nodeMap.get(syn.peerId);
-      if (!peer?.alive) continue;
-      // TRAFFIC: each visited 1-hop peer is a "tell me your synaptome"
-      // FIND_NODE-style RPC. The inner loop is data within that response,
-      // not separate messages.
-      this._msg(node, peer, 'local_probe');
-      for (const peerSyn of peer.synaptome.values()) {
-        const id = peerSyn.peerId;
-        if (id === node.id || node.synaptome.has(id)) continue;
-        const c = this.nodeMap.get(id);
-        if (!c?.alive) continue;
+    for (const r of settled) {
+      if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
+      for (const id of r.value) {
+        if (id === node.id) continue;
+        if (node.synaptome.has(id)) continue;
         const stratum = clz64(node.id ^ id);
-        if (stratum >= lo && stratum <= hi) {
-          candidates.push(c);
-          if (candidates.length >= this.ANNEAL_LOCAL_SAMPLE) break outer;
-        }
+        if (stratum < lo || stratum > hi) continue;
+        candidates.push(id);
+        if (candidates.length >= this.ANNEAL_LOCAL_SAMPLE) break outer;
       }
     }
-    return candidates.length > 0
-      ? candidates[Math.floor(Math.random() * candidates.length)]
-      : null;
+    if (candidates.length === 0) return null;
+
+    const chosenId = candidates[Math.floor(Math.random() * candidates.length)];
+    // V1 violation kept until commit 8 — the callers (_tryAnneal,
+    // _evictAndReplace) still need the Node object for tryConnect's
+    // bilateral-cap check and roundTripLatency. Commit 8 replaces
+    // those with transport.openConnection + transport.getLatency.
+    const chosen = this.nodeMap.get(chosenId);
+    return chosen?.alive ? chosen : null;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Honest Churn Heal (each node checks its own synapses)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  postChurnHeal() {
+  async postChurnHeal() {
     for (const node of this.nodeMap.values()) {
       if (!node.alive) continue;
       const dead = [];
       for (const syn of node.synaptome.values()) {
         if (!this.nodeMap.get(syn.peerId)?.alive) dead.push(syn);
       }
-      for (const syn of dead) this._evictAndReplace(node, syn);
+      for (const syn of dead) await this._evictAndReplace(node, syn);
       for (const [peerId] of node.incomingSynapses) {
         if (!this.nodeMap.get(peerId)?.alive) node.incomingSynapses.delete(peerId);
       }

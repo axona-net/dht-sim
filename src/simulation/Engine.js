@@ -458,7 +458,7 @@ export class SimulationEngine {
       }
       added++;
     }
-    if (typeof dht.postChurnHeal === 'function') dht.postChurnHeal();
+    if (typeof dht.postChurnHeal === 'function') await dht.postChurnHeal();
     dht.verifyConnectionCap?.('training-churn');
     return { killed: numToReplace, added };
   }
@@ -711,7 +711,7 @@ export class SimulationEngine {
             // NX-12+: Second-pass re-heal — repair any synapses whose
             // first-pass replacement was also churned in this same batch.
             if (typeof dht.postChurnHeal === 'function') {
-              dht.postChurnHeal();
+              await dht.postChurnHeal();
             }
             // Bilateral-cap invariant check after each churn round. No-op
             // when web limit is off (cap=Infinity). Surfaces any new protocol
