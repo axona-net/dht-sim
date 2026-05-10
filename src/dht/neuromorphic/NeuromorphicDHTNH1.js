@@ -165,7 +165,46 @@ export class NeuromorphicDHTNH1 extends DHT {
     node.temperature = this.T_INIT;
     this.nodeMap.set(id, node);
     this.network.addNode(node);
+
+    // v0.70.10 (refactor commit 4) — give the node a Transport-conformant
+    // interface and register NH-1's request/notification handlers + the
+    // onPeerDied callback.  The legacy nodeMap-based path is left intact
+    // (every existing method still works); subsequent commits 5–11
+    // migrate one method at a time onto the transport contract.
+    if (typeof this.network.makeTransport === 'function') {
+      node.transport = this.network.makeTransport(id);
+      await node.transport.start();
+      this._registerNH1Handlers(node);
+    }
     return node;
+  }
+
+  /**
+   * @private
+   * Register NH-1 handlers on a node's transport.  Handlers added here
+   * over the course of commits 5-11:
+   *
+   *   commit 4 — `ping`            (sanity), `onPeerDied`
+   *   commit 5 — `find_node`       (the main routing-tick hop)
+   *   commit 6 — `find_closest`    (lookahead probe response)
+   *   commit 7 — `sample_synaptome` (local_probe response — anneal)
+   *   commit 8 — none new          (admission gate is local logic)
+   *   commit 9 — `reinforce`, `triadic`, `hop_cache` (notifications)
+   *   commit 10 — pubsub:subscribe, pubsub:publish, pubsub:deliver, ...
+   *   commit 11 — `bootstrap_offer` (sponsor-chain join)
+   */
+  _registerNH1Handlers(node) {
+    // Sanity handler: any peer can ping us; we reply 'pong'.
+    node.transport.onRequest('ping', async () => 'pong');
+
+    // Dead-peer callback.  In commits 5+ this will trigger
+    // _evictAndReplace on the affected synapse and reheat the local
+    // node's temperature.  For now we just record that the event
+    // arrived so the wiring is verifiable end-to-end.
+    node.transport.onPeerDied((peerId) => {
+      if (!node._deadPeerEvents) node._deadPeerEvents = [];
+      node._deadPeerEvents.push(peerId);
+    });
   }
 
   async removeNode(nodeId) {
