@@ -69,6 +69,18 @@ export class GeographicDHT extends KademliaDHT {
     });
     this.nodeMap.set(id, node);
     this.network.addNode(node);
+
+    // v0.70.22 — G-DHT inherits K-DHT's transport-driven `lookup` (commit
+    // 3 of the refactor sequence), so each node MUST have the FIND_NODE /
+    // PING request handlers registered on its transport.  Without this,
+    // every K-DHT-style FIND_NODE RPC during a G-DHT lookup throws "no
+    // request handler" and the lookup discovers zero new candidates →
+    // 0% success.  Mirrors KademliaDHT.addNode's transport-attach block.
+    if (typeof this.network.makeTransport === 'function') {
+      node.transport = this.network.makeTransport(id);
+      await node.transport.start();
+      this._registerKDHTHandlers(node);
+    }
     return node;
   }
 
