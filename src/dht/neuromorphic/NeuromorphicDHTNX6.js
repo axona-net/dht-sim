@@ -1,6 +1,26 @@
 /**
  * NeuromorphicDHTNX6 (NX-6) – Churn-Resilient Routing
  *
+ * ── Migration status (v0.70.19 / refactor commit 13) ─────────────────
+ *
+ * NX-6 is a RESEARCH/COMPARISON protocol kept available for ablation
+ * against the production target NH-1 (N-DHT).  It is the larger parent
+ * of the NX-{7,8,9,10,11,12,13,15,17} lineage — its highway-tier
+ * doubled inner loops (synaptome + highway scans on every routing
+ * hop) approximately double the V1+V2 surface relative to NH-1.  The
+ * structural Transport-contract migration NH-1 went through in
+ * commits 4-11 is NOT propagated to NX-6 or its descendants; they all
+ * stay on the simulator's god's-eye `nodeMap.get(peerId)` path so the
+ * v0.66.x and earlier benchmark numbers reproduce byte-for-byte.
+ *
+ * Why kept on legacy paths: same rationale as commit 12 (see NX-15's
+ * header).  AxonManager's async-aware refactor (commit 10) is
+ * backward-compatible with NX-6's sync routing primitives, so the
+ * lineage continues to work in the simulator without any code
+ * changes.  Production deployment uses NH-1 exclusively.
+ *
+ * ── Original design notes (preserved for context) ────────────────────
+ *
  * Derived from NX-5.  Two churn-resilience mechanisms that activate when
  * routing encounters dead peers:
  *

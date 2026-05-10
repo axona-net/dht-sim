@@ -2,7 +2,7 @@
 
 *Generated against contracts at `src/contracts/` (sim v0.70.06).*
 
-## 0. Status (sim v0.70.18, refactor commits 1-12 done)
+## 0. Status (sim v0.70.19, refactor commits 1-13 done)
 
 The 15-commit migration is partially complete.  Production target NH-1
 is now V1+V2-clean in the routing path (lookup main loop, two-hop
@@ -23,7 +23,7 @@ primitives).
 | 10     | ✅     | NH-1 pub/sub primitives on the Transport contract       |
 | 11     | ✅     | NH-1 lookup() recursive forwarding wrap-up              |
 | 12     | ✅     | NX-15/NX-17 scope clarification (not migrated)          |
-| 13     | ⏳     | NX-6 lineage (research; deferred)                       |
+| 13     | ✅     | NX-6 lineage scope clarification (not migrated)         |
 | 14     | ⏳     | NeuronNode cleanup — drop `_nodeMapRef`                 |
 | 15     | ⏳     | DHT.getMetrics / getSynaptome / onEvent observability   |
 
