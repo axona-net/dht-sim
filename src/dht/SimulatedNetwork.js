@@ -1,4 +1,5 @@
 import { roundTripLatency } from '../utils/geo.js';
+import { SimulatedTransport } from './SimulatedTransport.js';
 
 /**
  * SimulatedNetwork – implements message passing without real network I/O.
@@ -23,6 +24,15 @@ export class SimulatedNetwork {
      * interactive Add Nodes, slice-world bridges, etc.).
      */
     this.dht = dht;
+
+    // v0.70.07 — per-node Transport registry. Each node's
+    // SimulatedTransport registers itself at start() so other transports
+    // can find it for inbound dispatch and so removeNode can broadcast
+    // onPeerDied. Lives in parallel to the legacy `nodes` map and the
+    // legacy send() path; subsequent commits migrate protocol code from
+    // the legacy path to transport.send / transport.notify.
+    /** @type {Map<bigint, import('./SimulatedTransport.js').SimulatedTransport>} */
+    this._transports = new Map();
   }
 
   /**
@@ -46,6 +56,17 @@ export class SimulatedNetwork {
       node.alive = false;
       node._network = null;
       this.nodes.delete(nodeId);
+    }
+
+    // v0.70.07 — broadcast onPeerDied to every other registered
+    // transport. In production this signal arrives via heartbeat
+    // timeout; in the simulator it's deterministic, fired the moment
+    // the node is removed.
+    if (this._transports.has(nodeId)) {
+      this._transports.delete(nodeId);
+    }
+    for (const [otherId, transport] of this._transports) {
+      if (otherId !== nodeId) transport._firePeerDied(nodeId);
     }
   }
 
@@ -97,5 +118,40 @@ export class SimulatedNetwork {
 
   get size() {
     return this.nodes.size;
+  }
+
+  // ─── v0.70.07 — Transport registry / factory ───────────────────────
+  //
+  // Per-node SimulatedTransport instances register here at start() so
+  // they can be found for inbound dispatch (transport.send → look up
+  // receiver's transport → invoke registered handler) and so
+  // removeNode() can broadcast onPeerDied. The registry is decoupled
+  // from the legacy `nodes` map so the existing SimulatedNetwork.send
+  // path keeps working without change.
+
+  /**
+   * Create a SimulatedTransport instance for `nodeId`. The transport
+   * is *not* started yet — caller must call `await transport.start()`.
+   *
+   * @param {bigint} nodeId
+   * @returns {import('./SimulatedTransport.js').SimulatedTransport}
+   */
+  makeTransport(nodeId) {
+    return new SimulatedTransport(this, nodeId);
+  }
+
+  /** @internal used by SimulatedTransport.start */
+  _registerTransport(nodeId, transport) {
+    this._transports.set(nodeId, transport);
+  }
+
+  /** @internal used by SimulatedTransport.stop */
+  _unregisterTransport(nodeId) {
+    this._transports.delete(nodeId);
+  }
+
+  /** @internal used by SimulatedTransport.send for inbound dispatch */
+  _getTransport(nodeId) {
+    return this._transports.get(nodeId);
   }
 }
