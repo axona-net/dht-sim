@@ -269,7 +269,35 @@ export class KademliaDHT extends DHT {
     });
     this.nodeMap.set(id, node);
     this.network.addNode(node);
+
+    // v0.70.09 — give the node a Transport-conformant interface and
+    // register K-DHT's request handlers on it.  The legacy
+    // node.handleMessage path is left intact (other simulator code
+    // and the network.send() chokepoint still use it); this commit
+    // adds the transport-driven path that lookup() now uses.
+    if (typeof this.network.makeTransport === 'function') {
+      node.transport = this.network.makeTransport(id);
+      await node.transport.start();
+      this._registerKDHTHandlers(node);
+    }
     return node;
+  }
+
+  /**
+   * @private
+   * Register K-DHT request/notification handlers on a node's transport.
+   * Mirrors the cases in {@link KademliaNode#handleMessage} but in the
+   * transport-conformant shape: handler returns a Promise<response>,
+   * caller awaits.
+   */
+  _registerKDHTHandlers(node) {
+    node.transport.onRequest('FIND_NODE', async (fromId, payload) => {
+      const closest = (payload?.geoKey !== undefined)
+        ? node.findClosestByGeo(payload.geoKey, this.k)
+        : node.findClosest(payload.target, this.k);
+      return closest.filter(n => n.id !== fromId).map(n => n.id);
+    });
+    node.transport.onRequest('PING', async () => 'PONG');
   }
 
   async removeNode(nodeId) {
@@ -453,23 +481,25 @@ export class KademliaDHT extends DHT {
       );
       path.push(bestThisRound.id);
 
-      // Send FIND_NODE to each in parallel – pass geoKey so intermediate nodes
-      // also respond with geo-close neighbours when in geographic mode.
+      // v0.70.09 — Send FIND_NODE to each candidate in TRUE parallel via
+      // transport.send.  Promise.allSettled is the right primitive: a slow
+      // or dead peer should not fail the whole batch — its rejection is
+      // dropped and the rest of the responses are processed.
+      //
+      // The previous implementation used `this.network.send()` in a
+      // serial for-loop, which the simulator's instantaneous clock made
+      // indistinguishable from parallel.  In production, serial would
+      // pay α × RTT per round; parallel pays one RTT.
       const newNodes = [];
-
-      for (const node of toQuery) {
-        try {
-          const { response } = this.network.send(
-            source, node.id, 'FIND_NODE', { target: targetKey, geoKey }
-          );
-
-          // Map returned IDs → node objects (simulation privilege)
-          const discovered = response
-            .map(id => this.nodeMap.get(id))
-            .filter(n => n && n.alive && !queried.has(n.id));
-          newNodes.push(...discovered);
-        } catch {
-          // Node churned out mid-lookup – ignore and continue
+      const transport = source.transport;
+      const settled = await Promise.allSettled(
+        toQuery.map(n => transport.send(n.id, 'FIND_NODE', { target: targetKey, geoKey }))
+      );
+      for (const r of settled) {
+        if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
+        for (const id of r.value) {
+          const peer = this.nodeMap.get(id);
+          if (peer && peer.alive && !queried.has(peer.id)) newNodes.push(peer);
         }
       }
 
