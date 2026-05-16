@@ -91,10 +91,14 @@ Each run object in the `runs` array supports:
 Omitting a field leaves the current UI value unchanged.
 
 ## Protocol Keys
-- `kademlia` — Kademlia DHT
+
+**Current SOTA (performance):** `ngdhtnx17` — NX-17
+**Current protocol (simplified production):** `ngdhtnh1` — NH-1
+
+- `kademlia` — Kademlia DHT (baseline)
 - `geob` — Geographic DHT (SOTA G-DHT — stratified inter-cell + intra-cell + random global). Earlier variants (`geo`, `geoa`) are retired for benchmarking but remain in code for backward-compat reading of old CSVs.
-- `ngdht10w` — Neuromorphic DHT v10 (best performer)
-- `ngdht`, `ngdht2`…`ngdht13w` — other neuromorphic variants
+- `ngdht10w` — Neuromorphic DHT v10
+- `ngdht`, `ngdht2`…`ngdht13w` — earlier neuromorphic variants
 - `ngdhtnx1w` — NX-1W configurable research protocol
 - `ngdhtnx2w` — NX-2W broadcast-tree protocol (NX-1W + Rule 15: proximity-ordered fan-out tree) (pass `nx1wRules` to configure)
 - `ngdhtnx3` — NX-3 G-DHT three-layer init
@@ -105,7 +109,11 @@ Omitting a field leaves the current UI value unchanged.
 - `ngdhtnx8` — NX-8 dendritic pub/sub v2 (NX-6 + balanced binary split relay tree)
 - `ngdhtnx9` — NX-9 geographic dendritic pub/sub (NX-6 + S2-clustered relay tree with direct 1-hop delivery)
 - `ngdhtnx10` — NX-10 routing-topology forwarding tree (NX-6 + delegates to first-hop synapses as forwarders)
-- `ngdhtnx11` — NX-11 diversified bootstrap + axonal pub/sub (NX-10 + 80/20 stratified/random bootstrap) (current SOTA)
+- `ngdhtnx11` — NX-11 diversified bootstrap + axonal pub/sub (NX-10 + 80/20 stratified/random bootstrap)
+- `ngdhtnx13` — NX-13 (intermediate research variant)
+- `ngdhtnx15` — NX-15 (intermediate research variant)
+- **`ngdhtnx17` — NX-17 current performance SOTA. Strongest latency reduction vs Kademlia across global, regional, and churn tests at 25K nodes.**
+- **`ngdhtnh1` — NH-1 simplified current protocol. Trades a small amount of NX-17's peak performance for a substantially smaller implementation; this is what production deployments target.**
 
 ## Test Keys
 - `global` — random global lookups
@@ -131,10 +139,54 @@ Pub/Sub coverage %,...
 ```
 
 ## Key Metrics to Watch
-- **Global hops** — lower is better (N-10W typically 35-40% fewer than Kademlia)
-- **Regional hops** — N-10W excels here (synaptic locality)
-- **Pub/Sub bcast hops** — scales with coverage; N-10W's strongest advantage
-- **ms latency** — reflects hops × node delay; compare across protocols
+
+The headline advantage of the current SOTA protocols is **latency reduction**,
+not hop reduction. NX-17 and NH-1 hop counts hover near Kademlia's on global
+lookups; the speedup comes from learned routing that exploits geographic /
+synaptic locality, dramatically shortening the per-hop wire time.
+
+- **ms latency** — the primary metric. Reflects learned-route quality, not
+  just hop count. Lower is better.
+- **Global hops** — informative for theory but NX-17 ≈ Kademlia here (≈4.4).
+- **Regional hops** — where neuromorphic locality shows up (NX-17 ~40%
+  fewer on 500km than Kademlia).
+- **Pub/Sub bcast hops** — scales with coverage; axonal-tree variants
+  (NX-7+/NX-17) dominate here.
+- **Success %** — must be 100% under steady-state and ≥99% under 5% churn
+  for a protocol to be considered viable.
+
+### Latest benchmark snapshot (25,000 nodes · May 15)
+
+Run via the loop above with
+`protocols: ["kademlia", "geob", "ngdhtnx17", "ngdhtnh1"]` and
+`tests: ["global", "r500", "r2000", "r5000", "churn"]`.
+
+| Protocol | global ms | r500 ms | r2000 ms | r5000 ms | 5% churn ms | success% |
+|---|---|---|---|---|---|---|
+| Kademlia | 508.5 | 512.6 | 498.0 | 505.6 | 465.6 | 100% |
+| G-DHT    | 282.0 | 153.4 | 176.8 | 208.5 | 278.7 | 100% |
+| **NX-17**  | **242.2** | **79.4**  | **106.7** | **145.4** | **234.5** | **100%** |
+| NH-1     | 256.1 | 106.9 | 139.0 | 175.4 | 287.7 | 100% |
+
+NX-17 vs Kademlia latency reduction:
+
+| Test | Kademlia | NX-17 | Reduction |
+|---|---|---|---|
+| Global       | 508.5ms | 242.2ms | **52%** |
+| Regional 500km   | 512.6ms |  79.4ms | **85%** |
+| Regional 2000km  | 498.0ms | 106.7ms | **79%** |
+| Regional 5000km  | 505.6ms | 145.4ms | **71%** |
+| 5% churn (global)| 465.6ms | 234.5ms | **50%** |
+
+100% delivery success under all conditions including 5% churn. The
+85% latency reduction on local traffic is the standout — that's where
+the learned routing locality compounds. Even on worst-case global
+lookups, NX-17 is half of Kademlia's wall-clock latency.
+
+When updating these numbers in pitches, docs, or external materials,
+**rerun the benchmark** rather than trusting stale percentages.
+Hop counts and the resulting latency mix can shift across protocol
+revisions even when the architecture is unchanged.
 
 ## Files
 - `results/benchmark_latest.csv` — latest benchmark result
