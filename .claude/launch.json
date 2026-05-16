@@ -3,10 +3,9 @@
   "configurations": [
     {
       "name": "dht-sim",
-      "runtimeExecutable": "/usr/local/bin/node",
+      "runtimeExecutable": "node",
       "runtimeArgs": ["server.js"],
-      "port": 3000,
-      "autoPort": false
+      "port": 3000
     }
   ]
 }

@@ -1,0 +1,25 @@
+{
+  "label": "Traffic-load distribution: 4 protocols × 4 sizes",
+  "hypothesis": "Compare per-cycle traffic distribution across K-DHT, G-DHT, NX-17, NH-1 at 5K / 10K / 25K / 50K nodes. Decide whether bandwidth concentration is a deploy blocker before building the real-world system.",
+  "runs": [
+    { "mode": "training", "maxSessions": 10, "nodeCount":  5000, "protocol": "kademlia",   "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount":  5000, "protocol": "geob",       "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount":  5000, "protocol": "ngdhtnx17",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount":  5000, "protocol": "ngdhtnh1",   "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+
+    { "mode": "training", "maxSessions": 10, "nodeCount": 10000, "protocol": "kademlia",   "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 10000, "protocol": "geob",       "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 10000, "protocol": "ngdhtnx17",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 10000, "protocol": "ngdhtnh1",   "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "kademlia",   "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "geob",       "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnh1",   "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "kademlia",   "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "geob",       "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "ngdhtnx17",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "ngdhtnh1",   "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true }
+  ]
+}

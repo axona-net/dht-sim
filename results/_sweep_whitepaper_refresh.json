@@ -1,0 +1,9 @@
+{
+  "label": "Whitepaper data refresh — 25K only (v0.70.05 dest fix)",
+  "hypothesis": "Replace pre-NH-1 era benchmarks in the whitepaper §15 with NH-1-generation numbers at 25K. The 50K case is covered by the v0.70.04 bandwidth-distribution sweep already on disk, so we don't re-run it here. The previous attempt at this refresh hung the browser tab during the (G-DHT, dest, 50K) cell because of an O(N) per-lookup filter+reduce; the v0.70.05 dest fix replaces it with a single-pass cached scan and zero per-lookup allocations.",
+  "runs": [
+    { "nodeCount": 25000, "protocols": ["kademlia","geob","ngdhtnx17","ngdhtnh1"],
+      "tests": ["global","r500","r1000","r2000","r5000","src","dest","srcdest","pubsub","churn"],
+      "maxConnections": 100, "highwayPct": 0, "webLimit": true }
+  ]
+}

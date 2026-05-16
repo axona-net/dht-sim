@@ -1,0 +1,30 @@
+{
+  "label": "Anneal-knob ablation: ANNEAL_LOCAL_SAMPLE 5/10/20/50 + ANNEAL_RATE_SCALE 0.1, plus 50K NH-1 long-run",
+  "hypothesis": "local_probe is 77-89% of neuromorphic traffic. Cutting ANNEAL_LOCAL_SAMPLE (per-call probe budget) or ANNEAL_RATE_SCALE (trigger frequency) should produce close-to-proportional reductions in total volume without breaking routing quality. The 50K NH-1 long-run validates Gini steady-state stability over many cycles.",
+  "runs": [
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealLocalSample":  5 } } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealLocalSample": 10 } } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealLocalSample": 20 } } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealLocalSample": 50 } } },
+
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealLocalSample":  5 } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealLocalSample": 10 } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealLocalSample": 20 } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealLocalSample": 50 } },
+
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealRateScale": 0.1 } } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealRateScale": 0.1 } },
+
+    { "mode": "training", "maxSessions": 50, "nodeCount": 50000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true }
+  ]
+}

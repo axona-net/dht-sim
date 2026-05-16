@@ -1,0 +1,34 @@
+{
+  "label": "annealRateScale knee + churn comparison",
+  "hypothesis": "Map the bandwidth-vs-Gini tradeoff curve at 50K NH-1 across rateScale 0.05-1.0; verify NX-17 deep-merge fix produces valid ablation. Churn tests at 25K confirm throttled NH-1 still recovers under 5%/cycle node turnover.",
+  "runs": [
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealRateScale": 0.05 } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealRateScale": 0.10 } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealRateScale": 0.25 } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealRateScale": 0.50 } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 50000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nh1Rules": { "annealRateScale": 1.00 } },
+
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealRateScale": 0.05 } } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealRateScale": 0.10 } } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealRateScale": 0.25 } } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealRateScale": 0.50 } } },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true,
+      "nx1wRulesOverride": { "annealing": { "annealRateScale": 1.00 } } },
+
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "kademlia",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true, "churnPctPerCycle": 5 },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "geob",      "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true, "churnPctPerCycle": 5 },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnx17", "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true, "churnPctPerCycle": 5 },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true, "churnPctPerCycle": 5 },
+    { "mode": "training", "maxSessions": 10, "nodeCount": 25000, "protocol": "ngdhtnh1",  "msgCount": 500, "maxConnections": 100, "highwayPct": 0, "webLimit": true, "churnPctPerCycle": 5,
+      "nh1Rules": { "annealRateScale": 0.10 } }
+  ]
+}
