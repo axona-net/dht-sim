@@ -141,6 +141,29 @@ export class AxonManager {
     /** Delivery callback — registered by PubSubAdapter via onPubsubDelivery. */
     this._deliveryCallback = null;
 
+    // ── Post-level metrics state (additive; only populated when callers
+    //    pass meta.postHash on publish). Old tests are unaffected.
+    /** topicId -> postHash -> { delivery_count, pull_count, reshare_count,
+     *                          first_seen, last_updated }.
+     *  Held at every node that runs a fan-out (root + sub-axons).
+     *  delivery_count is bumped per forward-to-direct-subscriber. */
+    this._counters = new Map();
+
+    /** requestId -> { accumulated: [{responderId, entries[]}] } —
+     *  in-flight metrics requests this node has issued. */
+    this._pendingMetricsReqs = new Map();
+    this._metricsCounter = 0;
+
+    /** requestId -> { resolve } — in-flight pull() requests; resolved
+     *  on first FOUND response or NOT_FOUND-from-anyone-or-timeout. */
+    this._pendingPullReqs = new Map();
+    this._pullCounter     = 0;
+
+    /** Dedup set for incoming metricsBroadcast (one request can reach a
+     *  node twice through a sub-axon tree's branching). Bounded ring. */
+    this._seenMetricsReqs    = new Set();
+    this._seenMetricsReqCap  = 1024;
+
     // Register handlers with the DHT.
     dht.onRoutedMessage('pubsub:subscribe',    (p, m) => this._onSubscribe(p, m));
     dht.onRoutedMessage('pubsub:unsubscribe',  (p, m) => this._onUnsubscribe(p, m));
@@ -154,6 +177,15 @@ export class AxonManager {
     dht.onDirectMessage('pubsub:subscribe-k',  (p, m) => this._onSubscribeDirect(p, m));
     dht.onDirectMessage('pubsub:publish-k',    (p, m) => this._onPublishDirect(p, m));
     dht.onDirectMessage('pubsub:unsubscribe-k',(p, m) => this._onUnsubscribeDirect(p, m));
+    // ── Post-level metrics (additive; only active when posts carry a
+    //    postHash so existing callers see no change in behavior).
+    dht.onRoutedMessage('pubsub:metricsReq',       (p, m) => this._onMetricsReq(p, m));
+    dht.onDirectMessage('pubsub:metricsBroadcast', (p, m) => this._onMetricsBroadcast(p, m));
+    dht.onDirectMessage('pubsub:metricsResp',      (p, m) => this._onMetricsResp(p, m));
+    // ── Pull (on-demand fetch by post_hash) and reshare notifications.
+    dht.onRoutedMessage('pubsub:pullReq',       (p, m) => this._onPullReq(p, m));
+    dht.onDirectMessage('pubsub:pullResp',      (p, m) => this._onPullResp(p, m));
+    dht.onRoutedMessage('pubsub:reshareNotify', (p, m) => this._onReshareNotify(p, m));
 
     // Periodic refresh + TTL sweep. We use a single timer driving both
     // actions; refreshTick() is exported for tests that prefer to pump
@@ -261,10 +293,27 @@ export class AxonManager {
    * — SimulatedNetwork — was already async via setTimeout, but the
    * AxonManager wrapper presented a sync API).
    */
-  pubsubPublish(topicId, json) {
+  /**
+   * Publish to a topic.
+   *
+   * @param {string|number} topicId
+   * @param {string} json   Application payload (string — typically
+   *                        JSON.stringify of a SignedPost).
+   * @param {Object} [meta] Optional post-level metadata that the relay
+   *                        layer uses for metrics. When omitted, no
+   *                        counters are touched — preserves legacy
+   *                        single-arg behavior.
+   * @param {string} [meta.postHash]   Content hash of the post.
+   * @param {string} [meta.publisher]  Publisher identifier.
+   * @param {Array}  [meta.references] PostRefs this post points back at
+   *                                   (used for reshare_count tracking
+   *                                   in a later PR).
+   * @returns {string} publishId
+   */
+  pubsubPublish(topicId, json, meta) {
     const publishId = `${this.nodeId}:${++this._publishCounter}`;
     const publishTs = this._now();
-    this._asyncPublish(topicId, json, publishId, publishTs)
+    this._asyncPublish(topicId, json, publishId, publishTs, meta)
       .catch(err => console.error('AxonManager: publish failed:', err));
     return publishId;
   }
@@ -277,13 +326,36 @@ export class AxonManager {
    * test_integration's gap-detection that drop the first publish's
    * full K-fan-out as a contiguous prefix of wire transactions.
    */
-  async _asyncPublish(topicId, json, publishId, publishTs) {
+  async _asyncPublish(topicId, json, publishId, publishTs, meta) {
+    // meta is forwarded as { postHash, publisher } so relays can
+    // attribute counters without parsing the opaque `json` payload.
+    const postHash   = meta?.postHash   || null;
+    const publisher  = meta?.publisher  || null;
+    const references = meta?.references || null;
+
+    // For every PostRef in this publish, route a one-shot notification
+    // toward the referenced topic so that topic's root learns about
+    // the reshare and bumps reshare_count. Fire-and-forget; the count
+    // is best-effort, matching §6.4 (metrics are advisory).
+    if (postHash && Array.isArray(references) && references.length > 0) {
+      for (const ref of references) {
+        if (!ref?.topic_id || !ref?.post_hash) continue;
+        this.dht.routeMessage(ref.topic_id, 'pubsub:reshareNotify', {
+          refTopicId:        ref.topic_id,
+          refPostHash:       ref.post_hash,
+          resharerTopicId:   topicId,
+          resharerPostHash:  postHash,
+          resharerPublisher: publisher,
+        });
+      }
+    }
+
     if (this._useKClosestMode()) {
       const roots = await this._findKClosest(topicId, this.rootSetSize);
       if (roots.length > 0) {
         for (const target of roots) {
           this.dht.sendDirect(target, 'pubsub:publish-k', {
-            topicId, json, publishId, publishTs,
+            topicId, json, publishId, publishTs, postHash, publisher,
           });
         }
         return;
@@ -299,7 +371,7 @@ export class AxonManager {
         for (const target of targets) {
           if (target === this.nodeId) continue;
           this.dht.sendDirect(target, 'pubsub:publish-k', {
-            topicId, json, publishId, publishTs,
+            topicId, json, publishId, publishTs, postHash, publisher,
           });
         }
         return;
@@ -307,7 +379,7 @@ export class AxonManager {
     }
     // Fallback (K=1 or no findKClosest): single routed walk.
     this.dht.routeMessage(topicId, 'pubsub:publish', {
-      topicId, json, publishId, publishTs,
+      topicId, json, publishId, publishTs, postHash, publisher,
     });
   }
 
@@ -726,7 +798,7 @@ export class AxonManager {
    * sendDirect. Otherwise, forward along the route.
    */
   async _onPublish(payload, meta) {
-    const { topicId, json, publishId, publishTs } = payload;
+    const { topicId, json, publishId, publishTs, postHash, publisher } = payload;
     const role = this.axonRoles.get(topicId);
     if (!role) return 'forward';
     // Only the ROOT consumes a routed publish and initiates fan-out.
@@ -744,7 +816,7 @@ export class AxonManager {
 
     // Add to the replay cache BEFORE fan-out, so even if fan-out partly
     // fails, the cache reflects everything the root accepted.
-    this._addToReplayCache(role, { json, publishId, publishTs });
+    this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher });
 
     // Also track locally-received for publishId dedup and metric
     // accounting (the root itself is "receiving" its own publish when
@@ -755,11 +827,22 @@ export class AxonManager {
     for (const [childId] of role.children) {
       if (childId === this.nodeId) {
         if (this._deliveryCallback) this._deliveryCallback(topicId, json, publishId, publishTs);
+        // Self is also a direct subscriber when it appears in children.
+        if (postHash) this._bumpDelivery(topicId, postHash);
         continue;
       }
-      const ok = await this.dht.sendDirect(childId, 'pubsub:deliver',
-                                           { topicId, json, publishId, publishTs });
-      if (!ok) deadChildren.push(childId);
+      const ok = await this.dht.sendDirect(childId, 'pubsub:deliver', {
+        topicId, json, publishId, publishTs, postHash, publisher,
+      });
+      if (!ok) {
+        deadChildren.push(childId);
+      } else if (postHash) {
+        // Count one delivery for each child the root successfully
+        // forwarded to. Sub-axon children will count their own
+        // sub-tree deliveries when they re-fan in _onDeliver, so
+        // root counts the direct hop and sub-axons count the rest.
+        this._bumpDelivery(topicId, postHash);
+      }
     }
     for (const dead of deadChildren) role.children.delete(dead);
     return 'consumed';
@@ -836,7 +919,7 @@ export class AxonManager {
    * locally + fan down appropriately.
    */
   async _onDeliver(payload, meta) {
-    const { topicId, json, publishId, publishTs } = payload;
+    const { topicId, json, publishId, publishTs, postHash, publisher } = payload;
     if (this._alreadySeenPublish(publishId)) return;
 
     // Track per-topic receipt + lastSeenTs regardless of whether we
@@ -849,15 +932,18 @@ export class AxonManager {
       // If we hold a role for this topic, cache the message so we can
       // replay it to any subscriber that arrives (or re-subscribes with
       // a stale lastSeenTs). Both roots and sub-axons cache.
-      this._addToReplayCache(role, { json, publishId, publishTs });
+      this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher });
 
       if (!role.isRoot) {
         // Sub-axon: re-fan to our children. Skip the upstream peer and self.
         for (const [childId] of role.children) {
           if (childId === meta.fromId) continue;
           if (childId === this.nodeId) continue;
-          await this.dht.sendDirect(childId, 'pubsub:deliver',
-                                    { topicId, json, publishId, publishTs });
+          const ok = await this.dht.sendDirect(childId, 'pubsub:deliver', {
+            topicId, json, publishId, publishTs, postHash, publisher,
+          });
+          // Sub-axon counts each successful forward to its sub-tree.
+          if (ok && postHash) this._bumpDelivery(topicId, postHash);
         }
       }
     }
@@ -1093,7 +1179,7 @@ export class AxonManager {
   }
 
   async _onPublishDirect(payload, meta) {
-    const { topicId, json, publishId, publishTs } = payload;
+    const { topicId, json, publishId, publishTs, postHash, publisher } = payload;
     if (this._alreadySeenPublish(publishId)) return;
     const role = this.axonRoles.get(topicId);
     if (!role) {
@@ -1110,22 +1196,27 @@ export class AxonManager {
       // in NX-6 but haven't wired them in as the K-closest fallback
       // path. Flagged as follow-up work in Phase 3 notes.
       await this.dht.routeMessage(topicId, 'pubsub:publish',
-                                  { topicId, json, publishId, publishTs });
+        { topicId, json, publishId, publishTs, postHash, publisher });
       return;
     }
 
-    this._addToReplayCache(role, { json, publishId, publishTs });
+    this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher });
     this._recordReceived(topicId, publishId, publishTs);
 
     const deadChildren = [];
     for (const [childId] of role.children) {
       if (childId === this.nodeId) {
         if (this._deliveryCallback) this._deliveryCallback(topicId, json, publishId, publishTs);
+        if (postHash) this._bumpDelivery(topicId, postHash);
         continue;
       }
       const ok = await this.dht.sendDirect(childId, 'pubsub:deliver',
-                                           { topicId, json, publishId, publishTs });
-      if (!ok) deadChildren.push(childId);
+        { topicId, json, publishId, publishTs, postHash, publisher });
+      if (!ok) {
+        deadChildren.push(childId);
+      } else if (postHash) {
+        this._bumpDelivery(topicId, postHash);
+      }
     }
     for (const dead of deadChildren) role.children.delete(dead);
   }
@@ -1265,6 +1356,319 @@ export class AxonManager {
       const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
       issueSubscribe(topicId, lastSeenTs, role);    // fire-and-forget
     }
+  }
+
+  // ── Post-level metrics ──────────────────────────────────────────────
+  //
+  // Counters are per (topicId, postHash) and held at every node that
+  // performs a fan-out for that topic. Each event is counted by exactly
+  // one relay (the one that actually forwarded the post to a direct
+  // subscriber, fulfilled the Pull, or saw the reshare), so aggregating
+  // is plain addition across responding relays.
+  //
+  // Held in `this._counters: Map<topicId, Map<postHash, RelayCounters>>`.
+
+  /** Return (and lazily create) a RelayCounters record for this hash. */
+  _counterFor(topicId, postHash) {
+    let byTopic = this._counters.get(topicId);
+    if (!byTopic) { byTopic = new Map(); this._counters.set(topicId, byTopic); }
+    let c = byTopic.get(postHash);
+    if (!c) {
+      c = {
+        post_hash:        postHash,
+        topic_id:         topicId,
+        delivery_count:   0,
+        pull_count:       0,
+        reshare_count:    0,
+        first_seen:       this._now(),
+        last_updated:     this._now(),
+      };
+      byTopic.set(postHash, c);
+    }
+    return c;
+  }
+
+  _bumpDelivery(topicId, postHash) {
+    const c = this._counterFor(topicId, postHash);
+    c.delivery_count += 1;
+    c.last_updated = this._now();
+  }
+
+  _bumpPull(topicId, postHash) {
+    const c = this._counterFor(topicId, postHash);
+    c.pull_count += 1;
+    c.last_updated = this._now();
+  }
+
+  _bumpReshare(topicId, postHash) {
+    const c = this._counterFor(topicId, postHash);
+    c.reshare_count += 1;
+    c.last_updated = this._now();
+  }
+
+  /** Walk this role's replay cache (newest-first) looking for an entry
+   *  matching `postHash`. Returns the cache entry or null. */
+  _findInReplayCache(role, postHash) {
+    const cache = role?.replayCache;
+    if (!cache) return null;
+    for (let i = cache.length - 1; i >= 0; i--) {
+      if (cache[i].postHash === postHash) return cache[i];
+    }
+    return null;
+  }
+
+  /**
+   * Common access-control + response shape for both metricsReq and
+   * metricsBroadcast handlers. Returns true if we sent a response.
+   */
+  _maybeRespondMetrics(payload, role) {
+    const { topicId, postHashes, requesterId, requestId } = payload;
+    // §4.7 self-authenticating ownership check. Drop silently if the
+    // requester isn't the topic's publisher — also avoids leaking
+    // topic existence.
+    const samplePost = role.replayCache?.[0];
+    if (samplePost && samplePost.publisher && samplePost.publisher !== requesterId) {
+      return false;
+    }
+    const byTopic = this._counters.get(topicId) || new Map();
+    const wantedHashes = (postHashes && postHashes.length > 0)
+      ? postHashes
+      : [...byTopic.keys()];
+    const entries = [];
+    for (const h of wantedHashes) {
+      const c = byTopic.get(h);
+      if (c) entries.push({ ...c });
+    }
+    this.dht.sendDirect(requesterId, 'pubsub:metricsResp', {
+      requestId,
+      responderId: this.nodeId,
+      entries,
+      timestamp: this._now(),
+    });
+    return true;
+  }
+
+  /** Per-request dedup so a tree-broadcast hitting a node twice via
+   *  different paths only triggers one response + one re-fan. */
+  _markMetricsReqSeen(requestId) {
+    if (this._seenMetricsReqs.has(requestId)) return true;
+    this._seenMetricsReqs.add(requestId);
+    if (this._seenMetricsReqs.size > this._seenMetricsReqCap) {
+      // Drop the oldest half by re-iterating insertion order.
+      const drop = this._seenMetricsReqCap / 2;
+      let i = 0;
+      for (const k of this._seenMetricsReqs) {
+        if (i++ >= drop) break;
+        this._seenMetricsReqs.delete(k);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * ROUTED handler — the publisher's metricsReq lands at the closest
+   * role-holder on the topic tree (typically the root). That node:
+   *   1. Responds with its own counters.
+   *   2. Broadcasts the request to its children via direct messages
+   *      so sub-axons also report. Recursive: each sub-axon does the
+   *      same. A request that doesn't hit any role-holder along the
+   *      routed walk eventually drops at the terminal node — that's
+   *      fine, it just means there are no relays for this topic.
+   */
+  async _onMetricsReq(payload, meta) {
+    const { topicId, requestId } = payload;
+    const role = this.axonRoles.get(topicId);
+    if (!role) return 'forward';
+    if (this._markMetricsReqSeen(requestId)) return 'consumed';
+
+    if (!this._maybeRespondMetrics(payload, role)) return 'consumed';
+
+    // Fan out to all children. Leaf subscribers will silently ignore
+    // (their _onMetricsBroadcast sees no role and returns early).
+    // Sub-axons will respond + recurse.
+    for (const [childId] of role.children) {
+      if (childId === this.nodeId) continue;
+      this.dht.sendDirect(childId, 'pubsub:metricsBroadcast', payload);
+    }
+    return 'consumed';
+  }
+
+  /**
+   * DIRECT handler — tree-broadcast version of metricsReq. Reached
+   * via the root's fan-out to its sub-axon children (and recursively
+   * thereafter). Only role-bearing nodes act; leaves drop silently.
+   */
+  _onMetricsBroadcast(payload, meta) {
+    const { topicId, requestId } = payload;
+    const role = this.axonRoles.get(topicId);
+    if (!role) return;
+    if (this._markMetricsReqSeen(requestId)) return;
+
+    if (!this._maybeRespondMetrics(payload, role)) return;
+
+    // Re-fan to our own children (sub-axons of sub-axons, etc.). Skip
+    // the upstream peer that sent us this so we don't bounce it back.
+    for (const [childId] of role.children) {
+      if (childId === this.nodeId) continue;
+      if (childId === meta.fromId) continue;
+      this.dht.sendDirect(childId, 'pubsub:metricsBroadcast', payload);
+    }
+  }
+
+  /** Collect a metrics response into the pending request's accumulator. */
+  _onMetricsResp(payload, meta) {
+    const { requestId, responderId, entries } = payload;
+    const pending = this._pendingMetricsReqs.get(requestId);
+    if (!pending) return;  // late or unsolicited; drop
+    pending.accumulated.push({ responderId, entries });
+  }
+
+  // ── Pull (on-demand fetch by post_hash) ─────────────────────────────
+
+  /**
+   * ROUTED handler — a Pull traveling through the relay tree toward
+   * the post's topic_id. Any role-bearing node whose replay cache has
+   * the post fulfills the request immediately and bumps pull_count.
+   * Non-cache-holding role nodes can either NOT_FOUND-out (if they
+   * are the root, the last hop) or forward (if they are a sub-axon
+   * and the routed walk should continue upstream toward the root).
+   *
+   * Only the FULFILLING relay increments pull_count — forwarders do
+   * not. This implements the single-count invariant for Pull metrics
+   * (§4.5).
+   */
+  async _onPullReq(payload, meta) {
+    const { topicId, postHash, requesterId, requestId } = payload;
+    const role = this.axonRoles.get(topicId);
+    if (!role) return 'forward';
+
+    const cached = this._findInReplayCache(role, postHash);
+    if (cached) {
+      this.dht.sendDirect(requesterId, 'pubsub:pullResp', {
+        requestId,
+        postHash,
+        status:      'FOUND',
+        post:        cached.json,
+        responderId: this.nodeId,
+      });
+      this._bumpPull(topicId, postHash);
+      return 'consumed';
+    }
+    if (role.isRoot) {
+      // Root is the topic's authoritative endpoint. If we don't have
+      // it, no one in the tree does.
+      this.dht.sendDirect(requesterId, 'pubsub:pullResp', {
+        requestId,
+        postHash,
+        status:      'NOT_FOUND',
+        responderId: this.nodeId,
+      });
+      return 'consumed';
+    }
+    // Sub-axon without a cache hit: let the routed walk continue
+    // upstream toward the root, which has the canonical cache.
+    return 'forward';
+  }
+
+  /** Resolve the pending pull() promise on first response. */
+  _onPullResp(payload, meta) {
+    const { requestId, status, post } = payload;
+    const pending = this._pendingPullReqs.get(requestId);
+    if (!pending) return;
+    this._pendingPullReqs.delete(requestId);
+    if (status === 'FOUND' && post) {
+      try { pending.resolve(JSON.parse(post)); }
+      catch { pending.resolve(null); }
+    } else {
+      pending.resolve(null);
+    }
+  }
+
+  /**
+   * Publisher-/application-side: issue a Pull for a specific post.
+   * Returns the parsed SignedPost or null (NOT_FOUND / timeout / parse
+   * error). Best-effort: callers are expected to render `null` as
+   * "post unavailable" rather than retry aggressively (§6.1).
+   */
+  requestPull(topicId, postHash, { timeoutMs = 1000 } = {}) {
+    const requestId = `${this.nodeId}:pl${++this._pullCounter}`;
+    return new Promise(resolve => {
+      this._pendingPullReqs.set(requestId, { resolve });
+      this.dht.routeMessage(topicId, 'pubsub:pullReq', {
+        topicId, postHash, requesterId: this.nodeId, requestId,
+      });
+      setTimeout(() => {
+        const pending = this._pendingPullReqs.get(requestId);
+        if (pending) {
+          this._pendingPullReqs.delete(requestId);
+          pending.resolve(null);
+        }
+      }, timeoutMs);
+    });
+  }
+
+  // ── Reshare notifications ───────────────────────────────────────────
+
+  /**
+   * ROUTED handler — a separate notification routed by the resharer's
+   * AxonManager toward the referenced post's topic_id. The first
+   * role-bearing node consumes it and bumps reshare_count. Forwarders
+   * don't bump (single-count invariant); leaves can't bump because
+   * they don't hold counter state for the topic.
+   */
+  _onReshareNotify(payload, meta) {
+    const { refTopicId, refPostHash } = payload;
+    const role = this.axonRoles.get(refTopicId);
+    if (!role) return 'forward';
+    this._bumpReshare(refTopicId, refPostHash);
+    return 'consumed';
+  }
+
+  /**
+   * Publisher-side: issue a MetricsRequest into a topic's relay tree
+   * and collect responses for `timeoutMs`. Returns the raw per-relay
+   * entries; aggregation (sum across relays) happens at the application
+   * layer in AxonPubSub.
+   *
+   * @param {string|number} topicId
+   * @param {string[]} [postHashes]  Empty/omitted = all posts the
+   *                                 relay holds counters for.
+   * @param {Object}   [opts]
+   * @param {number}   [opts.timeoutMs=500]
+   * @returns {Promise<Array<{responderId:string, entries:RelayCounters[]}>>}
+   */
+  requestMetrics(topicId, postHashes, { timeoutMs = 500 } = {}) {
+    const requestId = `${this.nodeId}:m${++this._metricsCounter}`;
+    return new Promise(resolve => {
+      const pending = { accumulated: [] };
+      this._pendingMetricsReqs.set(requestId, pending);
+      this.dht.routeMessage(topicId, 'pubsub:metricsReq', {
+        topicId,
+        postHashes: postHashes ?? null,
+        requesterId: this.nodeId,
+        requestId,
+      });
+      setTimeout(() => {
+        this._pendingMetricsReqs.delete(requestId);
+        resolve(pending.accumulated);
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Read this node's local counters for a topic without going over the
+   * wire. Useful for in-process unit tests and for the simulator's
+   * cross-node oracle when ground-truth verification is needed.
+   */
+  getLocalCounters(topicId, postHashes) {
+    const byTopic = this._counters.get(topicId) || new Map();
+    if (!postHashes || postHashes.length === 0) {
+      return [...byTopic.values()].map(c => ({ ...c }));
+    }
+    return postHashes
+      .map(h => byTopic.get(h))
+      .filter(Boolean)
+      .map(c => ({ ...c }));
   }
 
   // ── Diagnostics ─────────────────────────────────────────────────────
