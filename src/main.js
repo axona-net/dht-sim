@@ -57,7 +57,7 @@ import { NeuromorphicDHTNX10 } from './dht/neuromorphic/NeuromorphicDHTNX10.js';
 import { NeuromorphicDHTNX13 } from './dht/neuromorphic/NeuromorphicDHTNX13.js';
 import { NeuromorphicDHTNX15 } from './dht/neuromorphic/NeuromorphicDHTNX15.js';
 import { NeuromorphicDHTNX17 } from './dht/neuromorphic/NeuromorphicDHTNX17.js';
-import { NeuromorphicDHTNH1 }  from './dht/neuromorphic/NeuromorphicDHTNH1.js';
+import { AxonaEngine }         from './dht/neuromorphic/AxonaEngine.js';
 import { SimulationEngine }   from './simulation/Engine.js';
 import { Controls }           from './ui/Controls.js';
 import { Results }            from './ui/Results.js';
@@ -1992,7 +1992,7 @@ function createDHT(params) {
       });
     case 'ngdhtnx17':
       // v0.71.0 — NX-17 is now a thin parametric variant of NH-1
-      // (extends NeuromorphicDHTNH1). Both protocols share the same
+      // (extends AxonaEngine). Both protocols share the same
       // Transport contract usage and the same DHT API surface; NX-17
       // distinguishes itself by tuning toward wider exploration
       // (larger synaptome, higher LOOKAHEAD_ALPHA, slower annealing).
@@ -2010,7 +2010,7 @@ function createDHT(params) {
         membership: params.nx17Params ?? params.nh1Params ?? params.nx15Params,
       });
     case 'ngdhtnh1':
-      return new NeuromorphicDHTNH1({
+      return new AxonaEngine({
         k: params.k,
         alpha: params.alpha,
         bits: params.bits,

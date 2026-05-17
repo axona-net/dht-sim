@@ -6,7 +6,7 @@
 // start() and join(), then uses lookup / subscribe / publish.
 //
 // Concrete implementations:
-//   - NeuromorphicDHTNH1  — current SOTA (NH-1 generation)
+//   - AxonaEngine  — current SOTA (NH-1 generation)
 //   - NeuromorphicDHTNX17 — reference benchmark
 //   - KademliaDHT         — comparison baseline
 //   - GeographicDHT       — comparison baseline (G-DHT)

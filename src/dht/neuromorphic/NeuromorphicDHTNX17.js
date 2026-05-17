@@ -71,14 +71,14 @@
 // `usesPublisherPrefix = true` and `_membershipOpts.rootSetSize = 0`
 // --- are inherited automatically: NH-1 already sets both to those
 // values, as documented in NH-1's constructor and at lines 131 / 158
-// of NeuromorphicDHTNH1.js.  Existing call sites in Engine.js and
+// of AxonaEngine.js.  Existing call sites in Engine.js and
 // main.js that read `dht.usesPublisherPrefix` or pass through the
 // rootSetSize=0 routed mode are unchanged.
 // =====================================================================
 
-import { NeuromorphicDHTNH1 } from './NeuromorphicDHTNH1.js';
+import { AxonaEngine } from './AxonaEngine.js';
 
-export class NeuromorphicDHTNX17 extends NeuromorphicDHTNH1 {
+export class NeuromorphicDHTNX17 extends AxonaEngine {
   static get protocolName() { return 'Neuromorphic-NX17'; }
 
   /**

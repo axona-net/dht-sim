@@ -320,7 +320,7 @@ export class KademliaDHT extends DHT {
     });
     node.transport.onRequest('PING', async () => 'PONG');
 
-    // Dead-peer callback. Mirrors NeuromorphicDHTNH1._registerNH1Handlers.
+    // Dead-peer callback. Mirrors AxonaEngine._registerNH1Handlers.
     // Populates a local Set of known-dead peer ids that the lookup
     // consults when filtering candidates. Replaces the legacy
     // `peer.alive` god's-eye liveness check; the protocol learns about

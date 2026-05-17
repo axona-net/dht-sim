@@ -25,7 +25,7 @@
  *     existing sync primitives plug in cleanly.  Tests confirm parity:
  *     test_nx15_integration: 15 passed / 2 failed (matches baseline).
  *
- * Production deployment uses NeuromorphicDHTNH1 exclusively.  All
+ * Production deployment uses AxonaEngine exclusively.  All
  * V1+V2 cleanup, contract compliance, and observability work targets
  * NH-1.  See `documents/implementation/N-DHT-refactor-punchlist.md`
  * for the full violation tally and migration plan.

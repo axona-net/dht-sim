@@ -1,5 +1,5 @@
 // =====================================================================
-// NHOnePeer — per-node DHT contract implementation for NH-1.
+// AxonaPeer — per-node DHT contract implementation for NH-1.
 //
 // ── Migration status (Phase 1 of NH1-PerNode-Refactor-Plan-v0.71.md) ──
 //
@@ -7,7 +7,7 @@
 //
 // This class exists to implement the per-node DHT contract at
 // `src/contracts/DHT.js` against the existing multi-node
-// `NeuromorphicDHTNH1` (the simulator's NH-1 engine).  In Phase 1 every
+// `AxonaEngine` (the simulator's NH-1 engine).  In Phase 1 every
 // method is a thin delegation to the engine, with the per-node
 // `NeuronNode` reference passed through where the engine expects it.
 //
@@ -19,7 +19,7 @@
 // engine to `NHOneEngine` and finalises the split.
 //
 // During Phase 1 the simulator's behaviour is unchanged: the engine
-// still owns all the routing logic; NHOnePeer is just an alternative
+// still owns all the routing logic; AxonaPeer is just an alternative
 // API surface that production peers can use to exercise NH-1 through
 // the contract.
 //
@@ -41,18 +41,18 @@ import { DHT }      from '../../contracts/DHT.js';
 import { Synapse }  from './Synapse.js';
 import { clz64 }    from '../../utils/geo.js';
 
-export class NHOnePeer extends DHT {
+export class AxonaPeer extends DHT {
   /**
    * @param {object} opts
-   * @param {import('./NeuromorphicDHTNH1.js').NeuromorphicDHTNH1} opts.engine
+   * @param {import('./AxonaEngine.js').AxonaEngine} opts.engine
    *        The legacy multi-node engine (Phase 1: delegate target).
    * @param {import('./NeuronNode.js').NeuronNode} opts.node
    *        The NeuronNode this peer wraps.
    */
   constructor({ engine, node }) {
     super();
-    if (!engine) throw new Error('NHOnePeer: engine is required');
-    if (!node)   throw new Error('NHOnePeer: node is required');
+    if (!engine) throw new Error('AxonaPeer: engine is required');
+    if (!node)   throw new Error('AxonaPeer: node is required');
     this._engine = engine;
     this._node   = node;
     this._started = false;
@@ -66,7 +66,7 @@ export class NHOnePeer extends DHT {
   //
   // Phase 1: start/stop are mostly bookkeeping.  The underlying node
   // was already created and registered with the engine via
-  // `engine.addNode()` before this NHOnePeer instance came into
+  // `engine.addNode()` before this AxonaPeer instance came into
   // existence.  We just need to wire up event forwarding so that
   // `onEvent` listeners on this peer receive events that the engine
   // emits about this node.
@@ -81,7 +81,7 @@ export class NHOnePeer extends DHT {
     // Engine emits events to a single global listener set today
     // (engine._eventListeners).  We subscribe and filter to events
     // about THIS node, then forward to our per-peer listeners.  This
-    // lets the production peer subscribe via NHOnePeer.onEvent without
+    // lets the production peer subscribe via AxonaPeer.onEvent without
     // seeing other nodes' events (which it can't, since production
     // only has one node).
     this._engineListenerUnsub = this._engine.onEvent((ev) => {
@@ -96,7 +96,7 @@ export class NHOnePeer extends DHT {
         for (const cb of this._eventListeners) {
           try { cb(ev); }
           catch (err) {
-            console.error(`NHOnePeer ${this._node.id} listener threw:`, err);
+            console.error(`AxonaPeer ${this._node.id} listener threw:`, err);
           }
         }
       }
@@ -128,7 +128,7 @@ export class NHOnePeer extends DHT {
    */
   async join(_sponsor) {
     throw new Error(
-      'NHOnePeer.join: not implemented in Phase 1. ' +
+      'AxonaPeer.join: not implemented in Phase 1. ' +
       'Simulator path uses engine.bootstrapJoin; ' +
       'production path lands in Phase 6 integration.'
     );
@@ -142,11 +142,60 @@ export class NHOnePeer extends DHT {
 
   // ─── DHT operations ────────────────────────────────────────────────
   //
-  // Phase 1: delegate to the engine.  The engine's lookup takes
-  // (sourceId, targetKey) — we supply this peer's id as the source.
+  // Phase 4 (v0.71.4) — lookup() now owns the body.  No sourceId
+  // parameter: the peer IS the source of its own lookups.  Internal
+  // sim state (`simEpoch`, decay-tick interval, EMA hops/time) still
+  // lives on the engine during the migration window; this peer's
+  // lookup() reads/writes `this._engine.X` for those cross-peer
+  // concerns.  Phase 5 splits the rest of the shared state.
 
   async lookup(targetKey) {
-    return this._engine.lookup(this._node.id, targetKey);
+    const node   = this._node;
+    const engine = this._engine;
+    if (!node || !node.alive) return null;
+
+    engine.simEpoch++;
+    if (++engine.lookupsSinceDecay >= engine.DECAY_INTERVAL) {
+      engine._tickDecay();                            // FORGET: periodic
+      engine.lookupsSinceDecay = 0;
+    }
+
+    const result = await this._lookupStep({
+      sourceId:    node.id,
+      targetKey,
+      hops:        0,
+      path:        [node.id],
+      trace:       [],
+      queried:     new Set([node.id]),
+      totalTimeMs: 0,
+    });
+
+    // ── LEARN: LTP reinforcement on fast paths ─────────────────────
+    if (result.found && result.trace.length > 0) {
+      const hopCount = result.trace.length;
+      engine._emaHops = engine._emaHops === null
+        ? hopCount : 0.9 * engine._emaHops + 0.1 * hopCount;
+      engine._emaTime = engine._emaTime === null
+        ? result.totalTimeMs : 0.9 * engine._emaTime + 0.1 * result.totalTimeMs;
+      if (result.totalTimeMs <= engine._emaTime) {
+        this._reinforceWave(result.trace);
+      }
+    }
+
+    const hops = result.path.length - 1;
+    engine._bumpLookupStats(node, result.found, hops, result.totalTimeMs);
+    engine._emit({
+      type: 'lookup-completed', timestamp: Date.now(),
+      sourceId: node.id, targetKey,
+      hops, time: result.totalTimeMs, found: result.found,
+    });
+
+    return {
+      path:  result.path,
+      hops,
+      time:  result.totalTimeMs,
+      found: result.found,
+    };
   }
 
   async subscribe(topicName, handler) {
@@ -242,7 +291,7 @@ export class NHOnePeer extends DHT {
 
   /**
    * Two-hop AP scoring with parallel `lookahead_probe` RPCs.  Body
-   * matches NeuromorphicDHTNH1._bestByTwoHopAP byte-for-byte; only
+   * matches AxonaEngine._bestByTwoHopAP byte-for-byte; only
    * the receiver changes (was `current` parameter, now `this._node`).
    * The engine method now delegates here.
    */
@@ -355,7 +404,7 @@ export class NHOnePeer extends DHT {
 
   onEvent(handler) {
     if (typeof handler !== 'function') {
-      throw new TypeError('NHOnePeer.onEvent: handler must be a function');
+      throw new TypeError('AxonaPeer.onEvent: handler must be a function');
     }
     this._eventListeners.add(handler);
     return () => this._eventListeners.delete(handler);
@@ -367,7 +416,7 @@ export class NHOnePeer extends DHT {
    * @private
    * Decide whether a global engine event mentions this peer.  Phase 1
    * filter; refined in Phase 3 when the per-node event-emit sites
-   * land directly on NHOnePeer.
+   * land directly on AxonaPeer.
    */
   _eventMentionsSelf(ev) {
     if (!ev || typeof ev !== 'object') return false;
@@ -388,7 +437,7 @@ export class NHOnePeer extends DHT {
   // ─── Write operations (Phase 3) ────────────────────────────────────
   //
   // Methods that mutate this peer's local state.  Bodies are copied
-  // from NeuromorphicDHTNH1 verbatim; `node` → `this._node`,
+  // from AxonaEngine verbatim; `node` → `this._node`,
   // `this.X` (engine config) → `this._engine.X`, `this._vitality(node, s)`
   // → `this._vitality(s)` (peer's own method).  The engine retains
   // 1-line delegators for backward compat with internal callers.
@@ -432,7 +481,7 @@ export class NHOnePeer extends DHT {
     for (let i = trace.length - 1; i >= 0; i--) {
       const { fromId, synapse } = trace[i];
       this._node.transport.notify(fromId, 'reinforce', { synapsePeerId: synapse.peerId })
-        .catch(err => console.error('NHOnePeer: reinforce notify failed:', err));
+        .catch(err => console.error('AxonaPeer: reinforce notify failed:', err));
     }
   }
 
@@ -448,7 +497,7 @@ export class NHOnePeer extends DHT {
     if (count >= this._engine.TRIADIC_THRESHOLD) {
       node.transitCache.delete(key);
       node.transport.notify(originId, 'triadic_introduce', { peerId: nextId })
-        .catch(err => console.error('NHOnePeer: triadic_introduce notify failed:', err));
+        .catch(err => console.error('AxonaPeer: triadic_introduce notify failed:', err));
     } else {
       node.transitCache.set(key, count);
     }
@@ -711,7 +760,7 @@ export class NHOnePeer extends DHT {
       const result = await handler(payload, meta);
       return result || 'forward';
     } catch (err) {
-      console.error(`NHOnePeer routed handler error at ${node.id} for '${type}':`, err);
+      console.error(`AxonaPeer routed handler error at ${node.id} for '${type}':`, err);
       return 'forward';
     }
   }
@@ -839,7 +888,7 @@ export class NHOnePeer extends DHT {
         try {
           h(payload, { fromId: fromHex, type });
         } catch (err) {
-          console.error(`NHOnePeer direct handler error at ${node.id} for '${type}':`, err);
+          console.error(`AxonaPeer direct handler error at ${node.id} for '${type}':`, err);
         }
       });
     }
@@ -856,7 +905,7 @@ export class NHOnePeer extends DHT {
   // AP), applies LEARN side-effects (incoming promotion, hop caching,
   // triadic closure), bumps temperature + maybe triggers anneal, and
   // forwards via transport.send('lookup_step', ...).  Body copied
-  // verbatim from NeuromorphicDHTNH1._lookupStep; `node` → `this._node`,
+  // verbatim from AxonaEngine._lookupStep; `node` → `this._node`,
   // engine config via `this._engine.X`, internal method calls land on
   // peer methods (e.g. `this._addByVitality(syn)` instead of
   // `engine._addByVitality(node, syn)`).
@@ -974,7 +1023,7 @@ export class NHOnePeer extends DHT {
         for (let i = 0; i < Math.min(engine.LATERAL_K, regional.length); i++) {
           node.transport.notify(regional[i].peerId, 'lateral_spread',
                                 { target: targetKey, depth: 1 })
-            .catch(err => console.error('NHOnePeer: lateral_spread notify failed:', err));
+            .catch(err => console.error('AxonaPeer: lateral_spread notify failed:', err));
         }
       }
     }
@@ -984,7 +1033,7 @@ export class NHOnePeer extends DHT {
     node.temperature = Math.max(engine.T_MIN, node.temperature * engine.ANNEAL_COOLING);
     if (Math.random() < node.temperature * engine.ANNEAL_RATE_SCALE) {
       this._tryAnneal().catch(err =>
-        console.error(`NHOnePeer: anneal failed at ${node.id.toString(16)}:`, err));
+        console.error(`AxonaPeer: anneal failed at ${node.id.toString(16)}:`, err));
     }
 
     try {
@@ -1013,7 +1062,7 @@ export class NHOnePeer extends DHT {
   }
 }
 
-// ─── Module-local helpers (mirror NeuromorphicDHTNH1) ────────────────
+// ─── Module-local helpers (mirror AxonaEngine) ────────────────
 
 function topicToBigInt(v) {
   if (typeof v === 'bigint') return v;

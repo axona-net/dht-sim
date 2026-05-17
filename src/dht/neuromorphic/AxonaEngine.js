@@ -1,5 +1,5 @@
 /**
- * NeuromorphicDHTNH1 (NH-1) — Neuro-Homeostatic Protocol
+ * AxonaEngine (NH-1) — Neuro-Homeostatic Protocol
  *
  * Implements five fundamental operations through a unified vitality model:
  *
@@ -27,7 +27,7 @@ import { randomU64, clz64, roundTripLatency, buildXorRoutingTable }
                          from '../../utils/geo.js';
 import { geoCellId }     from '../../utils/s2.js';
 import { AxonManager }   from '../../pubsub/AxonManager.js';
-import { NHOnePeer }     from './NHOnePeer.js';
+import { AxonaPeer }     from './AxonaPeer.js';
 
 // ── Identity conversions for the AxonManager boundary ────────────────────────
 // AxonManager works in 16-char hex strings; NeuronNode uses BigInt. NH-1
@@ -41,7 +41,7 @@ function nodeIdToHex(id) {
   return id.toString(16).padStart(16, '0');
 }
 
-export class NeuromorphicDHTNH1 extends DHT {
+export class AxonaEngine extends DHT {
   static get protocolName() { return 'Neuromorphic-NH1'; }
 
   constructor(config = {}) {
@@ -151,13 +151,13 @@ export class NeuromorphicDHTNH1 extends DHT {
 
     // v0.71.3 (Phase 2 of NH1-PerNode-Refactor) — per-node DHT-contract
     // wrappers.  Each NeuronNode in `nodeMap` gets a corresponding
-    // NHOnePeer in `_peers` created during `addNode()`.  Read-only
+    // AxonaPeer in `_peers` created during `addNode()`.  Read-only
     // protocol methods (`_vitality`, `_bestByTwoHopAP`,
     // `_greedyNextHopToward`, `_findCloserInTwoHops`, `getSynaptome`,
     // `getMetrics`) delegate to the per-peer instance via `_peerFor`.
     // Phase 3 will migrate write operations.  Phase 4 renames this
     // class to `NHOneEngine`.
-    /** @type {Map<object, import('./NHOnePeer.js').NHOnePeer>} */
+    /** @type {Map<object, import('./AxonaPeer.js').AxonaPeer>} */
     this._peers = new Map();
   }
 
@@ -204,14 +204,14 @@ export class NeuromorphicDHTNH1 extends DHT {
       this._registerNH1Handlers(node);
     }
 
-    // v0.71.3 (Phase 2) — every NeuronNode pairs with an NHOnePeer
+    // v0.71.3 (Phase 2) — every NeuronNode pairs with an AxonaPeer
     // that exposes the DHT contract surface for this single node.  The
     // engine's own read-only methods now delegate via `_peerFor(node)`.
-    // We don't call `peer.start()` here yet: in Phase 2 NHOnePeer's
+    // We don't call `peer.start()` here yet: in Phase 2 AxonaPeer's
     // start() only wires event forwarding, which the engine's tests
     // and benchmark harness do not subscribe to.  Phase 3 may
     // promote start() to register handlers when more logic migrates.
-    const peer = new NHOnePeer({ engine: this, node });
+    const peer = new AxonaPeer({ engine: this, node });
     this._peers.set(node, peer);
 
     this._emit({
@@ -223,7 +223,7 @@ export class NeuromorphicDHTNH1 extends DHT {
 
   /**
    * @private
-   * Return the NHOnePeer wrapper for a given NeuronNode.  Used by
+   * Return the AxonaPeer wrapper for a given NeuronNode.  Used by
    * read-only methods (`_vitality` et al.) to forward into per-peer
    * implementations.  If a NeuronNode is encountered that doesn't
    * yet have a peer (e.g., legacy tests that pre-date Phase 2 and
@@ -234,7 +234,7 @@ export class NeuromorphicDHTNH1 extends DHT {
     if (!node) return null;
     let peer = this._peers.get(node);
     if (!peer) {
-      peer = new NHOnePeer({ engine: this, node });
+      peer = new AxonaPeer({ engine: this, node });
       this._peers.set(node, peer);
     }
     return peer;
@@ -805,52 +805,15 @@ export class NeuromorphicDHTNH1 extends DHT {
    * unchanged; per-type breakdown shifts from 'find_node' to
    * 'lookup_step'.
    */
+  // v0.71.4 (Phase 4) — body moved to AxonaPeer.lookup(targetKey).
+  // The simulator's multi-node entry point keeps its (sourceId,
+  // targetKey) signature; it resolves the source peer and delegates
+  // to the contract-shape per-peer lookup.  Production code paths
+  // (axona-peer) call `peer.lookup(target)` directly.
   async lookup(sourceId, targetKey) {
     const source = this.nodeMap.get(sourceId);
     if (!source || !source.alive) return null;
-
-    this.simEpoch++;
-    if (++this.lookupsSinceDecay >= this.DECAY_INTERVAL) {
-      this._tickDecay();                              // FORGET: periodic
-      this.lookupsSinceDecay = 0;
-    }
-
-    const result = await this._lookupStep(source, {
-      sourceId,
-      targetKey,
-      hops:        0,
-      path:        [sourceId],
-      trace:       [],
-      queried:     new Set([sourceId]),
-      totalTimeMs: 0,
-    });
-
-    // ── LEARN: LTP reinforcement on fast paths ───────────────────────────
-    if (result.found && result.trace.length > 0) {
-      const hopCount = result.trace.length;
-      this._emaHops = this._emaHops === null
-        ? hopCount : 0.9 * this._emaHops + 0.1 * hopCount;
-      this._emaTime = this._emaTime === null
-        ? result.totalTimeMs : 0.9 * this._emaTime + 0.1 * result.totalTimeMs;
-      if (result.totalTimeMs <= this._emaTime) {
-        this._reinforceWave(source, result.trace);
-      }
-    }
-
-    const hops = result.path.length - 1;
-    this._bumpLookupStats(source, result.found, hops, result.totalTimeMs);
-    this._emit({
-      type: 'lookup-completed', timestamp: Date.now(),
-      sourceId: sourceId, targetKey,
-      hops, time: result.totalTimeMs, found: result.found,
-    });
-
-    return {
-      path:  result.path,
-      hops,
-      time:  result.totalTimeMs,
-      found: result.found,
-    };
+    return this._peerFor(source).lookup(targetKey);
   }
 
   /**
@@ -867,9 +830,9 @@ export class NeuromorphicDHTNH1 extends DHT {
    * because each handler returns the post-mutation ctx.
    */
   // v0.71.3 (Phase 3g of per-node refactor) — body moved to
-  // NHOnePeer._lookupStep.  The 150-line legacy body that previously
+  // AxonaPeer._lookupStep.  The 150-line legacy body that previously
   // lived here has been removed; review the per-peer version in
-  // NHOnePeer.js as the canonical implementation.
+  // AxonaPeer.js as the canonical implementation.
   async _lookupStep(node, ctx) {
     return this._peerFor(node)._lookupStep(ctx);
   }
@@ -890,7 +853,7 @@ export class NeuromorphicDHTNH1 extends DHT {
   // ═══════════════════════════════════════════════════════════════════════════
 
   // v0.71.3 (Phase 2 of per-node refactor) — body moved to
-  // NHOnePeer._bestByTwoHopAP; this stub delegates so existing
+  // AxonaPeer._bestByTwoHopAP; this stub delegates so existing
   // callers (`_lookupStep` at L889) continue to work unchanged.
   async _bestByTwoHopAP(current, candidates, targetKey, currentDist) {
     return this._peerFor(current)._bestByTwoHopAP(candidates, targetKey, currentDist);
@@ -911,8 +874,8 @@ export class NeuromorphicDHTNH1 extends DHT {
    * over-represented strata when accepting new peers); duplicating the
    * concept at the synaptome layer added cost without adding signal.
    */
-  // v0.71.3 (Phase 2 of per-node refactor) — delegate to NHOnePeer.
-  // The body has moved to NHOnePeer._vitality(syn); this stub keeps
+  // v0.71.3 (Phase 2 of per-node refactor) — delegate to AxonaPeer.
+  // The body has moved to AxonaPeer._vitality(syn); this stub keeps
   // existing internal callers working until Phase 3 moves _addByVitality
   // and the rest of the write-side machinery onto the peer.
   _vitality(node, syn) {
@@ -921,7 +884,7 @@ export class NeuromorphicDHTNH1 extends DHT {
 
   /** Add synapse, honouring bilateral cap and evicting lowest-vitality if full. */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._addByVitality.
+  // AxonaPeer._addByVitality.
   async _addByVitality(node, newSyn) {
     return this._peerFor(node)._addByVitality(newSyn);
   }
@@ -931,7 +894,7 @@ export class NeuromorphicDHTNH1 extends DHT {
   // ═══════════════════════════════════════════════════════════════════════════
 
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._reinforceWave.
+  // AxonaPeer._reinforceWave.
   _reinforceWave(source, trace) {
     return this._peerFor(source)._reinforceWave(trace);
   }
@@ -941,7 +904,7 @@ export class NeuromorphicDHTNH1 extends DHT {
   // ═══════════════════════════════════════════════════════════════════════════
 
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._recordTransit.
+  // AxonaPeer._recordTransit.
   _recordTransit(node, originId, nextId) {
     return this._peerFor(node)._recordTransit(originId, nextId);
   }
@@ -992,7 +955,7 @@ export class NeuromorphicDHTNH1 extends DHT {
   // ═══════════════════════════════════════════════════════════════════════════
 
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._tryAnneal.
+  // AxonaPeer._tryAnneal.
   async _tryAnneal(node) {
     return this._peerFor(node)._tryAnneal();
   }
@@ -1002,13 +965,13 @@ export class NeuromorphicDHTNH1 extends DHT {
   // ═══════════════════════════════════════════════════════════════════════════
 
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._evictAndReplace.
+  // AxonaPeer._evictAndReplace.
   async _evictAndReplace(node, deadSyn) {
     return this._peerFor(node)._evictAndReplace(deadSyn);
   }
 
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._localCandidate.
+  // AxonaPeer._localCandidate.
   async _localCandidate(node, lo, hi) {
     return this._peerFor(node)._localCandidate(lo, hi);
   }
@@ -1101,7 +1064,7 @@ export class NeuromorphicDHTNH1 extends DHT {
   // observability methods: getNodeId(), getSynaptome(), getMetrics(),
   // onEvent().  In production each DHT instance is one node, so those
   // methods take no argument.  In the simulator one
-  // NeuromorphicDHTNH1 manages many nodes (legacy collapse for
+  // AxonaEngine manages many nodes (legacy collapse for
   // performance), so we accept an optional `nodeOrId` argument that
   // selects which node to report on.  Production wiring will simply
   // omit the argument and the methods will resolve to the local node.
@@ -1124,7 +1087,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * @param {object|bigint|string} [nodeOrId]
    * @returns {Array<object>}  SynapseSnapshot[] per types.js
    */
-  // v0.71.3 (Phase 2) — body moved to NHOnePeer.getSynaptome().
+  // v0.71.3 (Phase 2) — body moved to AxonaPeer.getSynaptome().
   // Engine retains the no-args "any alive node" fallback that the
   // simulator's dashboards use; resolved per-node calls delegate.
   getSynaptome(nodeOrId) {
@@ -1141,7 +1104,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * @param {object|bigint|string} [nodeOrId]
    * @returns {object}  Metrics per types.js
    */
-  // v0.71.3 (Phase 2) — body moved to NHOnePeer.getMetrics().  The
+  // v0.71.3 (Phase 2) — body moved to AxonaPeer.getMetrics().  The
   // engine retains the no-args "any alive node" fallback used by the
   // simulator dashboards; resolved per-node calls delegate.
   getMetrics(nodeOrId) {
@@ -1332,7 +1295,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    *   anything else — message not consumed; keep walking toward target
    */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer.onRoutedMessage.
+  // AxonaPeer.onRoutedMessage.
   onRoutedMessage(node, type, handler) {
     return this._peerFor(node).onRoutedMessage(type, handler);
   }
@@ -1349,7 +1312,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * entry from the table at delivery time.
    */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer.onDirectMessage.
+  // AxonaPeer.onDirectMessage.
   onDirectMessage(node, type, handler) {
     return this._peerFor(node).onDirectMessage(type, handler);
   }
@@ -1374,7 +1337,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * counter inside the transport adapter under that same per-type key.
    */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer.findKClosest.
+  // AxonaPeer.findKClosest.
   async findKClosest(sourceNode, targetId, K = 5, opts = {}) {
     const src = this._resolveNode(sourceNode);
     if (!src) return [];
@@ -1392,7 +1355,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * `_findCloserInTwoHops`.
    */
   // v0.71.3 (Phase 2 of per-node refactor) — body moved to
-  // NHOnePeer._greedyNextHopToward.
+  // AxonaPeer._greedyNextHopToward.
   _greedyNextHopToward(node, targetId) {
     return this._peerFor(node)._greedyNextHopToward(targetId);
   }
@@ -1419,7 +1382,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * such 2-hop peer exists (true terminal).
    */
   // v0.71.3 (Phase 2 of per-node refactor) — body moved to
-  // NHOnePeer._findCloserInTwoHops.
+  // AxonaPeer._findCloserInTwoHops.
   async _findCloserInTwoHops(node, targetId) {
     return this._peerFor(node)._findCloserInTwoHops(targetId);
   }
@@ -1449,7 +1412,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * via SimulatedTransport's bumps).
    */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer.routeMessage.
+  // AxonaPeer.routeMessage.
   async routeMessage(originNode, targetId, type, payload, opts = {}) {
     return this._peerFor(originNode).routeMessage(targetId, type, payload, opts);
   }
@@ -1461,7 +1424,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * Sync handlers still work — `await` over a non-Promise is a no-op.
    */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._deliverRouted.
+  // AxonaPeer._deliverRouted.
   async _deliverRouted(node, type, payload, meta) {
     return this._peerFor(node)._deliverRouted(type, payload, meta);
   }
@@ -1489,7 +1452,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * receiver-side dispatch is also free of nodeMap.
    */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer.sendDirect.
+  // AxonaPeer.sendDirect.
   async sendDirect(fromNode, peerId, type, payload) {
     return this._peerFor(fromNode).sendDirect(peerId, type, payload);
   }
@@ -1503,7 +1466,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * proven connections. Falls back to XOR-closest existing child.
    */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._pickRecruitPeer.
+  // AxonaPeer._pickRecruitPeer.
   _pickRecruitPeer(node, role, meta, subscriberId) {
     return this._peerFor(node)._pickRecruitPeer(role, meta, subscriberId);
   }
@@ -1518,7 +1481,7 @@ export class NeuromorphicDHTNH1 extends DHT {
    * cheapest signal of "which direction is this group growing toward."
    */
   // v0.71.3 (Phase 3 of per-node refactor) — body moved to
-  // NHOnePeer._pickRelayPeer.
+  // AxonaPeer._pickRelayPeer.
   _pickRelayPeer(node, role, subscriberId, forwarderId) {
     return this._peerFor(node)._pickRelayPeer(role, subscriberId, forwarderId);
   }

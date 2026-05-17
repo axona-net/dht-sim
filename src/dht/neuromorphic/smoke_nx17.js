@@ -10,7 +10,7 @@
 
 import { SimulatedNetwork } from '../SimulatedNetwork.js';
 import { NeuromorphicDHTNX17 } from './NeuromorphicDHTNX17.js';
-import { NeuromorphicDHTNH1 }  from './NeuromorphicDHTNH1.js';
+import { AxonaEngine }  from './AxonaEngine.js';
 
 const NODE_COUNT = 200;
 
@@ -62,7 +62,7 @@ async function main() {
   console.log('NX-17 / NH-1 smoke test (uniform-API verification)');
   console.log(`Node count: ${NODE_COUNT}, k=20, α=3`);
 
-  const nh1 = await buildNetwork(NeuromorphicDHTNH1, 'NH-1');
+  const nh1 = await buildNetwork(AxonaEngine, 'NH-1');
   const okNH = await exerciseGlobalLookups(nh1, 'NH-1', 30);
 
   const nx17 = await buildNetwork(NeuromorphicDHTNX17, 'NX-17');
@@ -72,7 +72,7 @@ async function main() {
   // accessors like usesPublisherPrefix) is also accessible on NX-17.
   // Use `in` operator to walk the prototype chain so we don't miss
   // inherited getters or methods.
-  const nh1Names = Object.getOwnPropertyNames(NeuromorphicDHTNH1.prototype)
+  const nh1Names = Object.getOwnPropertyNames(AxonaEngine.prototype)
     .filter(n => n !== 'constructor');
   const missing = nh1Names.filter(n => !(n in nx17));
   const apiOk = missing.length === 0;

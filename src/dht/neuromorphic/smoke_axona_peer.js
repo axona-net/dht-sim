@@ -1,8 +1,8 @@
 // =====================================================================
-// NHOnePeer Phase 1 smoke test.
+// AxonaPeer Phase 1 smoke test.
 //
-// Validates the per-node DHT contract surface that NHOnePeer exposes
-// on top of today's multi-node NeuromorphicDHTNH1 engine.  Phase 1's
+// Validates the per-node DHT contract surface that AxonaPeer exposes
+// on top of today's multi-node AxonaEngine engine.  Phase 1's
 // goal is API-shape verification; nothing about routing decisions or
 // performance has changed yet.
 //
@@ -10,8 +10,8 @@
 // =====================================================================
 
 import { SimulatedNetwork }      from '../SimulatedNetwork.js';
-import { NeuromorphicDHTNH1 }    from './NeuromorphicDHTNH1.js';
-import { NHOnePeer }             from './NHOnePeer.js';
+import { AxonaEngine }    from './AxonaEngine.js';
+import { AxonaPeer }             from './AxonaPeer.js';
 import { DHT as DHTContract }    from '../../contracts/DHT.js';
 
 const NODE_COUNT = 30;
@@ -31,7 +31,7 @@ function check(label, condition) {
 
 async function buildEngine() {
   const network = new SimulatedNetwork();
-  const engine = new NeuromorphicDHTNH1({
+  const engine = new AxonaEngine({
     network,
     k: 20,
     alpha: 3,
@@ -51,16 +51,16 @@ async function testConstruction() {
   console.log('\n── Construction + extends contract ──');
   const engine = await buildEngine();
   const someNode = [...engine.nodeMap.values()][0];
-  const peer = new NHOnePeer({ engine, node: someNode });
+  const peer = new AxonaPeer({ engine, node: someNode });
 
-  check('NHOnePeer instance can be constructed', peer != null);
-  check('NHOnePeer extends the DHT contract',     peer instanceof DHTContract);
+  check('AxonaPeer instance can be constructed', peer != null);
+  check('AxonaPeer extends the DHT contract',     peer instanceof DHTContract);
   check('throws if engine missing',
-    (() => { try { new NHOnePeer({ node: someNode }); return false; }
+    (() => { try { new AxonaPeer({ node: someNode }); return false; }
              catch { return true; } })()
   );
   check('throws if node missing',
-    (() => { try { new NHOnePeer({ engine }); return false; }
+    (() => { try { new AxonaPeer({ engine }); return false; }
              catch { return true; } })()
   );
 }
@@ -69,7 +69,7 @@ async function testLifecycle() {
   console.log('\n── Lifecycle (start / stop / idempotency) ──');
   const engine = await buildEngine();
   const someNode = [...engine.nodeMap.values()][0];
-  const peer = new NHOnePeer({ engine, node: someNode });
+  const peer = new AxonaPeer({ engine, node: someNode });
 
   let threw = false;
   try { await peer.start(); } catch { threw = true; }
@@ -97,8 +97,8 @@ async function testIdentity() {
   console.log('\n── Identity ──');
   const engine = await buildEngine();
   const allNodes = [...engine.nodeMap.values()];
-  const peerA = new NHOnePeer({ engine, node: allNodes[0] });
-  const peerB = new NHOnePeer({ engine, node: allNodes[1] });
+  const peerA = new AxonaPeer({ engine, node: allNodes[0] });
+  const peerB = new AxonaPeer({ engine, node: allNodes[1] });
 
   check('getNodeId returns the wrapped node id',
     peerA.getNodeId() === allNodes[0].id);
@@ -110,7 +110,7 @@ async function testObservability() {
   console.log('\n── Observability (getSynaptome / getMetrics) ──');
   const engine = await buildEngine();
   const someNode = [...engine.nodeMap.values()][0];
-  const peer = new NHOnePeer({ engine, node: someNode });
+  const peer = new AxonaPeer({ engine, node: someNode });
 
   const syn = peer.getSynaptome();
   check('getSynaptome returns an array', Array.isArray(syn));
@@ -136,7 +136,7 @@ async function testLookupDelegation() {
   const sourceNode = allNodes[0];
   const targetId = allNodes[10].id;
 
-  const peer = new NHOnePeer({ engine, node: sourceNode });
+  const peer = new AxonaPeer({ engine, node: sourceNode });
   await peer.start();
 
   // Run the same lookup two ways: via the engine directly and via the
@@ -156,7 +156,7 @@ async function testEventForwarding() {
   console.log('\n── onEvent forwards events about this peer ──');
   const engine = await buildEngine();
   const someNode = [...engine.nodeMap.values()][0];
-  const peer = new NHOnePeer({ engine, node: someNode });
+  const peer = new AxonaPeer({ engine, node: someNode });
   await peer.start();
 
   const received = [];
@@ -190,7 +190,7 @@ async function testStub() {
   console.log('\n── Phase-1 stubs (join throws, leave no-ops) ──');
   const engine = await buildEngine();
   const someNode = [...engine.nodeMap.values()][0];
-  const peer = new NHOnePeer({ engine, node: someNode });
+  const peer = new AxonaPeer({ engine, node: someNode });
 
   let joined = null;
   try { await peer.join({ kind: 'simulator', sim: engine, sponsorId: 0n }); }
@@ -204,7 +204,7 @@ async function testStub() {
 }
 
 async function main() {
-  console.log('NHOnePeer Phase 1 smoke test');
+  console.log('AxonaPeer Phase 1 smoke test');
   console.log(`Node count: ${NODE_COUNT}, k=20, α=3`);
   await testConstruction();
   await testLifecycle();
