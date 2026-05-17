@@ -1070,105 +1070,30 @@ export class NeuromorphicDHTNH1 extends DHT {
   }
 
   /** Add synapse, honouring bilateral cap and evicting lowest-vitality if full. */
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._addByVitality.
   async _addByVitality(node, newSyn) {
-    // v0.70.14 (refactor commit 8) — admission gate now goes entirely
-    // through the Transport contract.  The bilateral-cap check moves
-    // from node.tryConnect(peer) (which required a peer Node object
-    // looked up via nodeMap) to await transport.openConnection(peerId)
-    // (which only needs the id).  The synapse latency is filled in
-    // from transport.getLatency() instead of roundTripLatency() with
-    // peer's lat/lng — same haversine value in the simulator, real
-    // heartbeat-measured RTT in production.
-    //
-    // Local capacity is checked *first* (purely local computation, no
-    // network cost) so we don't open a remote channel only to
-    // immediately close it if no eviction is possible.
-
-    const cap = node._maxSynaptome ?? this.MAX_SYNAPTOME;
-
-    // Pre-pick eviction victim if local synaptome is at capacity.
-    let victim = null;
-    if (node.synaptome.size >= cap) {
-      let minV = Infinity, minVAny = Infinity, victimAny = null;
-      for (const s of node.synaptome.values()) {
-        if (s.inertia > this.simEpoch) continue;  // LTP-locked: protected
-        const v = this._vitality(node, s);
-        if (v < minVAny) { minVAny = v; victimAny = s; }
-        if (!s.bootstrap && v < minV) { minV = v; victim = s; }
-      }
-      victim = victim ?? victimAny;
-      if (!victim) return false;   // no evictable target — abort before opening anything
-    }
-
-    // Network-side bilateral cap check.  Returns false if remote
-    // refused or unreachable.  Same semantic as the legacy tryConnect
-    // failure path.  In production this opens a real WebRTC channel;
-    // in the simulator it is a synchronous liveness check.
-    const opened = await node.transport.openConnection(newSyn.peerId);
-    if (!opened) return false;
-
-    // Latency from the transport contract.  In production: -1 until
-    // the first heartbeat fires (~1 second after openConnection); fall
-    // back to a 200ms default until then so AP scoring has a usable
-    // value.  Subsequent reinforcement events update the synapse's
-    // latency from the same source.
-    const measuredLat = node.transport.getLatency(newSyn.peerId);
-    newSyn.latency = (measuredLat >= 0) ? measuredLat : 200;
-
-    if (victim) {
-      node.synaptome.delete(victim.peerId);
-      node.connections?.delete(victim.peerId);
-      await node.transport.closeConnection(victim.peerId);
-    }
-    node.addSynapse(newSyn);
-    return true;
+    return this._peerFor(node)._addByVitality(newSyn);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LEARN: LTP Reinforcement
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._reinforceWave.
   _reinforceWave(source, trace) {
-    // v0.70.15 (refactor commit 9) — LTP reinforcement via real wire
-    // notifications.  The source of the successful lookup walks the
-    // trace and fires a 'reinforce' notify to each step's `fromId`.
-    // Each receiver runs the LTP update on its own local synaptome
-    // entry (handler registered in _registerNH1Handlers).
-    //
-    // Notify is fire-and-forget.  If a receiver is dead or unreachable,
-    // the notification drops silently — LTP missing on one step of a
-    // historical successful path is a non-fatal benign loss.  The
-    // counter still bumps on the SimulatedTransport side under
-    // 'reinforce'.
-    for (let i = trace.length - 1; i >= 0; i--) {
-      const { fromId, synapse } = trace[i];
-      source.transport.notify(fromId, 'reinforce', { synapsePeerId: synapse.peerId })
-        .catch(err => console.error('NH-1: reinforce notify failed:', err));
-    }
+    return this._peerFor(source)._reinforceWave(trace);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LEARN: Triadic Closure
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._recordTransit.
   _recordTransit(node, originId, nextId) {
-    // v0.70.15 (refactor commit 9) — triadic introduction is now a real
-    // wire notification.  The transit-observer fires
-    // 'triadic_introduce' at the origin; the origin's notify handler
-    // runs the local introduce logic (admission via _addByVitality).
-    //
-    // The legacy central _introduce dispatcher is removed — the
-    // handler in _registerNH1Handlers is the only home for that logic
-    // now.
-    const key   = `${originId}_${nextId}`;
-    const count = (node.transitCache.get(key) ?? 0) + 1;
-    if (count >= this.TRIADIC_THRESHOLD) {
-      node.transitCache.delete(key);
-      node.transport.notify(originId, 'triadic_introduce', { peerId: nextId })
-        .catch(err => console.error('NH-1: triadic_introduce notify failed:', err));
-    } else {
-      node.transitCache.set(key, count);
-    }
+    return this._peerFor(node)._recordTransit(originId, nextId);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1216,131 +1141,26 @@ export class NeuromorphicDHTNH1 extends DHT {
   // EXPLORE: Annealing
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._tryAnneal.
   async _tryAnneal(node) {
-    if (!node.alive || node.synaptome.size === 0) return;
-
-    // Find weakest synapse by weight (skip LTP-locked)
-    let victim = null, weakW = Infinity;
-    for (const s of node.synaptome.values()) {
-      if (s.inertia > this.simEpoch) continue;
-      if (s.weight < weakW) { weakW = s.weight; victim = s; }
-    }
-    if (!victim) return;
-
-    // Target under-represented stratum group
-    const counts = new Array(this.STRATA_GROUPS).fill(0);
-    for (const s of node.synaptome.values()) {
-      counts[Math.min(this.STRATA_GROUPS - 1, s.stratum >>> 2)]++;
-    }
-    let targetGroup = 0, minCount = Infinity;
-    for (let g = 0; g < this.STRATA_GROUPS; g++) {
-      if (counts[g] < minCount) { minCount = counts[g]; targetGroup = g; }
-    }
-
-    const lo = targetGroup * 4, hi = lo + 3;
-    const candidate = await this._localCandidate(node, lo, hi);
-    if (!candidate || node.synaptome.has(candidate.id)) return;
-
-    // v0.70.14 — anneal is a 1-for-1 exchange.  Close the victim's
-    // channel before opening the candidate's.  Both go through the
-    // Transport contract; the bilateral-cap check happens inside
-    // openConnection (returns false if remote refused).
-    node.synaptome.delete(victim.peerId);
-    node.connections?.delete(victim.peerId);
-    await node.transport.closeConnection(victim.peerId);
-
-    const opened = await node.transport.openConnection(candidate.id);
-    if (!opened) return;        // bilateral cap
-
-    const measuredLat = node.transport.getLatency(candidate.id);
-    const latMs   = (measuredLat >= 0) ? measuredLat : 200;
-    const stratum = clz64(node.id ^ candidate.id);
-    const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
-    syn.weight    = 0.1;
-    syn._addedBy  = 'anneal';
-    node.addSynapse(syn);
-    this._emit({
-      type: 'anneal-fired', timestamp: Date.now(),
-      observerId: node.id, evicted: victim.peerId, admitted: candidate.id,
-    });
+    return this._peerFor(node)._tryAnneal();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STRUCTURE: Dead-synapse Replacement + 2-hop Search
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._evictAndReplace.
   async _evictAndReplace(node, deadSyn) {
-    // v0.70.14 — admission via Transport contract.  The dead peer's
-    // channel is closed; the candidate's channel is opened (which is
-    // the bilateral-cap check); latency comes from getLatency.
-    node.synaptome.delete(deadSyn.peerId);
-    node.connections?.delete(deadSyn.peerId);
-    await node.transport.closeConnection(deadSyn.peerId);
-
-    const group = Math.min(this.STRATA_GROUPS - 1, deadSyn.stratum >>> 2);
-    const candidate = await this._localCandidate(node, group * 4, group * 4 + 3);
-    if (!candidate || node.synaptome.has(candidate.id)) return null;
-
-    const opened = await node.transport.openConnection(candidate.id);
-    if (!opened) return null;     // bilateral cap
-
-    const weights = [];
-    for (const s of node.synaptome.values()) weights.push(s.weight);
-    weights.sort((a, b) => a - b);
-    const medW = weights.length > 0 ? weights[weights.length >> 1] : this.VITALITY_FLOOR;
-
-    const measuredLat = node.transport.getLatency(candidate.id);
-    const latMs   = (measuredLat >= 0) ? measuredLat : 200;
-    const stratum = clz64(node.id ^ candidate.id);
-    const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
-    syn.weight    = medW;
-    syn._addedBy  = 'evictReplace';
-    node.addSynapse(syn);
-    return syn;
+    return this._peerFor(node)._evictAndReplace(deadSyn);
   }
 
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._localCandidate.
   async _localCandidate(node, lo, hi) {
-    // v0.70.12 (refactor commit 6) — the 2-hop neighbourhood scan now
-    // runs as parallel `local_probe` RPCs against each peer in node's
-    // synaptome, instead of synchronously reading peer.synaptome.values().
-    //
-    // This is the dominant V2 violation in NH-1.  At default
-    // ANNEAL_RATE_SCALE = 1.0 and 50 K nodes, it accounted for ~89% of
-    // all wire traffic (per the v0.70.04 bandwidth study).  In the
-    // production deployment that ratio is likely re-tuned via
-    // ANNEAL_RATE_SCALE = 0.10 (the knee point in the same study) but
-    // the volume projection from the simulator transfers directly
-    // because the simulator already counted these as wire messages.
-
-    const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
-    if (probeTargets.length === 0) return null;
-
-    const settled = await Promise.allSettled(
-      probeTargets.map(peerId => node.transport.send(peerId, 'local_probe', null))
-    );
-
-    const candidates = [];
-    outer:
-    for (const r of settled) {
-      if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
-      for (const id of r.value) {
-        if (id === node.id) continue;
-        if (node.synaptome.has(id)) continue;
-        const stratum = clz64(node.id ^ id);
-        if (stratum < lo || stratum > hi) continue;
-        candidates.push(id);
-        if (candidates.length >= this.ANNEAL_LOCAL_SAMPLE) break outer;
-      }
-    }
-    if (candidates.length === 0) return null;
-
-    // v0.70.20 (refactor commit 14) — return a BigInt peer-id, not
-    // a Node.  Callers (`_tryAnneal`, `_evictAndReplace`) only ever
-    // consumed `.id` from the result; the bilateral-cap check and
-    // latency measurement go through the Transport contract.  No
-    // nodeMap.get reach.
-    const chosenId = candidates[Math.floor(Math.random() * candidates.length)];
-    return { id: chosenId };
+    return this._peerFor(node)._localCandidate(lo, hi);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

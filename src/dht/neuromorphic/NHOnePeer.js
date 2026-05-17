@@ -37,7 +37,9 @@
 //     Engine-cycle code continue to work)
 // =====================================================================
 
-import { DHT } from '../../contracts/DHT.js';
+import { DHT }      from '../../contracts/DHT.js';
+import { Synapse }  from './Synapse.js';
+import { clz64 }    from '../../utils/geo.js';
 
 export class NHOnePeer extends DHT {
   /**
@@ -381,5 +383,194 @@ export class NHOnePeer extends DHT {
       ev.sourceId  === me ||
       ev.type === 'cycle-snapshot'
     );
+  }
+
+  // ─── Write operations (Phase 3) ────────────────────────────────────
+  //
+  // Methods that mutate this peer's local state.  Bodies are copied
+  // from NeuromorphicDHTNH1 verbatim; `node` → `this._node`,
+  // `this.X` (engine config) → `this._engine.X`, `this._vitality(node, s)`
+  // → `this._vitality(s)` (peer's own method).  The engine retains
+  // 1-line delegators for backward compat with internal callers.
+
+  /** Admission gate.  Same logic as engine._addByVitality verbatim. */
+  async _addByVitality(newSyn) {
+    const node   = this._node;
+    const engine = this._engine;
+    const cap = node._maxSynaptome ?? engine.MAX_SYNAPTOME;
+
+    let victim = null;
+    if (node.synaptome.size >= cap) {
+      let minV = Infinity, minVAny = Infinity, victimAny = null;
+      for (const s of node.synaptome.values()) {
+        if (s.inertia > engine.simEpoch) continue;
+        const v = this._vitality(s);
+        if (v < minVAny) { minVAny = v; victimAny = s; }
+        if (!s.bootstrap && v < minV) { minV = v; victim = s; }
+      }
+      victim = victim ?? victimAny;
+      if (!victim) return false;
+    }
+
+    const opened = await node.transport.openConnection(newSyn.peerId);
+    if (!opened) return false;
+
+    const measuredLat = node.transport.getLatency(newSyn.peerId);
+    newSyn.latency = (measuredLat >= 0) ? measuredLat : 200;
+
+    if (victim) {
+      node.synaptome.delete(victim.peerId);
+      node.connections?.delete(victim.peerId);
+      await node.transport.closeConnection(victim.peerId);
+    }
+    node.addSynapse(newSyn);
+    return true;
+  }
+
+  /** LTP reinforcement wave along a successful lookup trace. */
+  _reinforceWave(trace) {
+    for (let i = trace.length - 1; i >= 0; i--) {
+      const { fromId, synapse } = trace[i];
+      this._node.transport.notify(fromId, 'reinforce', { synapsePeerId: synapse.peerId })
+        .catch(err => console.error('NHOnePeer: reinforce notify failed:', err));
+    }
+  }
+
+  /**
+   * Triadic-closure transit-counting.  After TRIADIC_THRESHOLD
+   * observations of (origin→nextId) transiting through us, send the
+   * origin a 'triadic_introduce' notification.
+   */
+  _recordTransit(originId, nextId) {
+    const node = this._node;
+    const key   = `${originId}_${nextId}`;
+    const count = (node.transitCache.get(key) ?? 0) + 1;
+    if (count >= this._engine.TRIADIC_THRESHOLD) {
+      node.transitCache.delete(key);
+      node.transport.notify(originId, 'triadic_introduce', { peerId: nextId })
+        .catch(err => console.error('NHOnePeer: triadic_introduce notify failed:', err));
+    } else {
+      node.transitCache.set(key, count);
+    }
+  }
+
+  /**
+   * Anneal step — replace the weakest synapse with a candidate from
+   * the under-represented stratum group.  Emits 'anneal-fired' via
+   * the engine's event bus (Phase 3 retains shared bus; future phase
+   * may split per-peer).
+   */
+  async _tryAnneal() {
+    const node   = this._node;
+    const engine = this._engine;
+    if (!node.alive || node.synaptome.size === 0) return;
+
+    let victim = null, weakW = Infinity;
+    for (const s of node.synaptome.values()) {
+      if (s.inertia > engine.simEpoch) continue;
+      if (s.weight < weakW) { weakW = s.weight; victim = s; }
+    }
+    if (!victim) return;
+
+    const counts = new Array(engine.STRATA_GROUPS).fill(0);
+    for (const s of node.synaptome.values()) {
+      counts[Math.min(engine.STRATA_GROUPS - 1, s.stratum >>> 2)]++;
+    }
+    let targetGroup = 0, minCount = Infinity;
+    for (let g = 0; g < engine.STRATA_GROUPS; g++) {
+      if (counts[g] < minCount) { minCount = counts[g]; targetGroup = g; }
+    }
+
+    const lo = targetGroup * 4, hi = lo + 3;
+    const candidate = await this._localCandidate(lo, hi);
+    if (!candidate || node.synaptome.has(candidate.id)) return;
+
+    node.synaptome.delete(victim.peerId);
+    node.connections?.delete(victim.peerId);
+    await node.transport.closeConnection(victim.peerId);
+
+    const opened = await node.transport.openConnection(candidate.id);
+    if (!opened) return;
+
+    const measuredLat = node.transport.getLatency(candidate.id);
+    const latMs   = (measuredLat >= 0) ? measuredLat : 200;
+    const stratum = clz64(node.id ^ candidate.id);
+    const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
+    syn.weight    = 0.1;
+    syn._addedBy  = 'anneal';
+    node.addSynapse(syn);
+    engine._emit({
+      type: 'anneal-fired', timestamp: Date.now(),
+      observerId: node.id, evicted: victim.peerId, admitted: candidate.id,
+    });
+  }
+
+  /**
+   * Dead-synapse replacement.  Closes the dead channel, finds a
+   * candidate in the same stratum group, opens a fresh channel.
+   */
+  async _evictAndReplace(deadSyn) {
+    const node   = this._node;
+    const engine = this._engine;
+
+    node.synaptome.delete(deadSyn.peerId);
+    node.connections?.delete(deadSyn.peerId);
+    await node.transport.closeConnection(deadSyn.peerId);
+
+    const group = Math.min(engine.STRATA_GROUPS - 1, deadSyn.stratum >>> 2);
+    const candidate = await this._localCandidate(group * 4, group * 4 + 3);
+    if (!candidate || node.synaptome.has(candidate.id)) return null;
+
+    const opened = await node.transport.openConnection(candidate.id);
+    if (!opened) return null;
+
+    const weights = [];
+    for (const s of node.synaptome.values()) weights.push(s.weight);
+    weights.sort((a, b) => a - b);
+    const medW = weights.length > 0 ? weights[weights.length >> 1] : engine.VITALITY_FLOOR;
+
+    const measuredLat = node.transport.getLatency(candidate.id);
+    const latMs   = (measuredLat >= 0) ? measuredLat : 200;
+    const stratum = clz64(node.id ^ candidate.id);
+    const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
+    syn.weight    = medW;
+    syn._addedBy  = 'evictReplace';
+    node.addSynapse(syn);
+    return syn;
+  }
+
+  /**
+   * 2-hop neighbourhood scan via parallel `local_probe` RPCs.  Picks
+   * a random candidate from the under-represented stratum group [lo, hi].
+   * Returns `{id}` or null.
+   */
+  async _localCandidate(lo, hi) {
+    const node   = this._node;
+    const engine = this._engine;
+
+    const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
+    if (probeTargets.length === 0) return null;
+
+    const settled = await Promise.allSettled(
+      probeTargets.map(peerId => node.transport.send(peerId, 'local_probe', null))
+    );
+
+    const candidates = [];
+    outer:
+    for (const r of settled) {
+      if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
+      for (const id of r.value) {
+        if (id === node.id) continue;
+        if (node.synaptome.has(id)) continue;
+        const stratum = clz64(node.id ^ id);
+        if (stratum < lo || stratum > hi) continue;
+        candidates.push(id);
+        if (candidates.length >= engine.ANNEAL_LOCAL_SAMPLE) break outer;
+      }
+    }
+    if (candidates.length === 0) return null;
+
+    const chosenId = candidates[Math.floor(Math.random() * candidates.length)];
+    return { id: chosenId };
   }
 }
