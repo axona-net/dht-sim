@@ -171,14 +171,184 @@ export class NHOnePeer extends DHT {
     return this._node.id;
   }
 
+  /**
+   * Phase 2: own the synaptome-snapshot construction directly off the
+   * local NeuronNode.  No engine round-trip.  Returns the per-node
+   * snapshot — peer ids, weights, latencies, stratum indices.  The
+   * application gets a frozen view; the protocol mutates the
+   * underlying state independently.
+   */
   getSynaptome() {
-    // Engine.getSynaptome accepts (nodeOrId).  Return its per-node
-    // snapshot.  No mutation; safe to read at any frequency.
-    return this._engine.getSynaptome(this._node);
+    if (!this._node) return [];
+    return this._node.getSynaptomeSnapshot();
   }
 
+  /**
+   * Phase 2: own the metrics object construction.  Per-node lookup
+   * counters still live in `engine._nodeStats` (a single Map keyed by
+   * NeuronNode); Phase 3 will move those onto the peer.  Until then
+   * we look up our entry there.
+   */
   getMetrics() {
-    return this._engine.getMetrics(this._node);
+    const node = this._node;
+    if (!node) return null;
+    const stats = this._engine._nodeStats.get(node) ||
+      { attempted: 0, succeeded: 0, sumHops: 0, sumLatency: 0 };
+    const cycleStats = {
+      lookupsAttempted: stats.attempted,
+      lookupsSucceeded: stats.succeeded,
+      avgHops:    stats.succeeded > 0 ? stats.sumHops    / stats.succeeded : 0,
+      avgLatency: stats.succeeded > 0 ? stats.sumLatency / stats.succeeded : 0,
+    };
+    const traffic = {
+      msgsSent:     node.msgsSent     | 0,
+      msgsReceived: node.msgsReceived | 0,
+      byType:       node.msgsByType ? { ...node.msgsByType } : {},
+    };
+    return {
+      simEpoch:             this._engine.simEpoch,
+      synaptomeSize:        node.synaptome.size,
+      incomingSynapsesSize: node.incomingSynapses.size,
+      temperature:          node.temperature ?? this._engine.T_INIT,
+      cycleStats,
+      traffic,
+    };
+  }
+
+  // ─── Read-only candidate scoring (Phase 2) ─────────────────────────
+  //
+  // These methods are pure functions of this peer's local state
+  // (synaptome, incomingSynapses) plus the routing target.  They take
+  // no `node` parameter — `this._node` is the receiver.  The engine's
+  // versions of the same names delegate here via `_peerFor(node)`.
+
+  /**
+   * Vitality score for a synapse.  weight × recency, where recency
+   * decays exponentially from the synapse's last reinforcement epoch.
+   * LTP-locked synapses (inertia > current epoch) get recency = 1.0.
+   */
+  _vitality(syn) {
+    let recency;
+    if (syn.inertia > this._engine.simEpoch) {
+      recency = 1.0;
+    } else {
+      const elapsed = this._engine.simEpoch - syn.inertia;
+      recency = Math.max(0.1, Math.exp(-elapsed / this._engine.RECENCY_HALF_LIFE));
+    }
+    return syn.weight * recency;
+  }
+
+  /**
+   * Two-hop AP scoring with parallel `lookahead_probe` RPCs.  Body
+   * matches NeuromorphicDHTNH1._bestByTwoHopAP byte-for-byte; only
+   * the receiver changes (was `current` parameter, now `this._node`).
+   * The engine method now delegates here.
+   */
+  async _bestByTwoHopAP(candidates, targetKey, currentDist) {
+    const ranked = candidates.map(s => {
+      const ap = Number(currentDist - (s.peerId ^ targetKey)) / s.latency;
+      return { s, ap };
+    }).sort((a, b) => b.ap - a.ap);
+
+    const probeSet = ranked.slice(0, this._engine.LOOKAHEAD_ALPHA).map(x => x.s);
+
+    // Short-circuit: any probe whose first-hop sits exactly on the
+    // target wins outright (zero remaining XOR distance).
+    for (const first of probeSet) {
+      if ((first.peerId ^ targetKey) === 0n) return first;
+    }
+
+    // Parallel lookahead probes.  Each rejected probe is treated like
+    // an empty-forward response — the source projects the second-hop
+    // latency as 0 and distance as the first-hop's own distance to
+    // target, the same fallback as `if (!fwd.length)` in the legacy
+    // code path.
+    const settled = await Promise.allSettled(
+      probeSet.map(first =>
+        this._node.transport.send(first.peerId, 'lookahead_probe', {
+          target:   targetKey,
+          fromDist: first.peerId ^ targetKey,
+        })
+      )
+    );
+
+    let bestSyn = null, bestAP2 = -Infinity;
+    for (let i = 0; i < probeSet.length; i++) {
+      const first = probeSet[i];
+      const firstDist = first.peerId ^ targetKey;
+      const r = settled[i];
+
+      let twoHopDist, secondLat;
+      if (r.status !== 'fulfilled' || !r.value || r.value.terminal) {
+        twoHopDist = firstDist;
+        secondLat  = 0;
+      } else {
+        twoHopDist = r.value.peerId ^ targetKey;
+        secondLat  = r.value.latency;
+      }
+
+      const ap2 = Number(currentDist - twoHopDist) / (first.latency + secondLat);
+      if (ap2 > bestAP2) { bestAP2 = ap2; bestSyn = first; }
+    }
+    return bestSyn ?? this._node.bestByAP(candidates, targetKey, 0);
+  }
+
+  /**
+   * Pure synchronous greedy 1-hop nextHop selector.  Used by
+   * `routeMessage` to find a first-hop closer to target than self.
+   * Returns peerId or null if no synapse makes XOR progress.
+   */
+  _greedyNextHopToward(targetId) {
+    if (!this._node?.alive) return null;
+    const target = (typeof targetId === 'bigint')
+      ? targetId
+      : BigInt('0x' + targetId);
+    let bestPeerId = null;
+    let bestDist   = this._node.id ^ target;
+    for (const syn of this._node.synaptome.values()) {
+      const d = syn.peerId ^ target;
+      if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
+    }
+    return bestPeerId;
+  }
+
+  /**
+   * Bounded 2-hop "anyone closer than me?" check.  Parallel
+   * `lookahead_probe` RPCs to each first-hop synapse; aggregates the
+   * 2-hop responses + incomingSynapses-as-reverse-routing; returns
+   * the globally-closest peer id strictly closer than self, or null
+   * if this peer is a true 2-hop terminal.
+   */
+  async _findCloserInTwoHops(targetId) {
+    const node = this._node;
+    const target = (typeof targetId === 'bigint')
+      ? targetId
+      : BigInt('0x' + targetId);
+    const myDist = node.id ^ target;
+    let bestPeerId = null;
+    let bestDist   = myDist;
+
+    const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
+    if (probeTargets.length > 0) {
+      const settled = await Promise.allSettled(
+        probeTargets.map(peerId =>
+          node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
+        )
+      );
+      for (const r of settled) {
+        if (r.status !== 'fulfilled' || !r.value || r.value.terminal) continue;
+        const d = r.value.peerId ^ target;
+        if (d < bestDist) {
+          bestDist   = d;
+          bestPeerId = r.value.peerId;
+        }
+      }
+    }
+    for (const syn of node.incomingSynapses.values()) {
+      const d = syn.peerId ^ target;
+      if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
+    }
+    return bestPeerId;
   }
 
   onEvent(handler) {

@@ -27,6 +27,7 @@ import { randomU64, clz64, roundTripLatency, buildXorRoutingTable }
                          from '../../utils/geo.js';
 import { geoCellId }     from '../../utils/s2.js';
 import { AxonManager }   from '../../pubsub/AxonManager.js';
+import { NHOnePeer }     from './NHOnePeer.js';
 
 // ── Identity conversions for the AxonManager boundary ────────────────────────
 // AxonManager works in 16-char hex strings; NeuronNode uses BigInt. NH-1
@@ -147,6 +148,17 @@ export class NeuromorphicDHTNH1 extends DHT {
     // by lookup() and reset by snapshotMetrics().  Keyed by NeuronNode.
     /** @type {Map<object, {attempted: number, succeeded: number, sumHops: number, sumLatency: number}>} */
     this._nodeStats = new Map();
+
+    // v0.71.3 (Phase 2 of NH1-PerNode-Refactor) — per-node DHT-contract
+    // wrappers.  Each NeuronNode in `nodeMap` gets a corresponding
+    // NHOnePeer in `_peers` created during `addNode()`.  Read-only
+    // protocol methods (`_vitality`, `_bestByTwoHopAP`,
+    // `_greedyNextHopToward`, `_findCloserInTwoHops`, `getSynaptome`,
+    // `getMetrics`) delegate to the per-peer instance via `_peerFor`.
+    // Phase 3 will migrate write operations.  Phase 4 renames this
+    // class to `NHOneEngine`.
+    /** @type {Map<object, import('./NHOnePeer.js').NHOnePeer>} */
+    this._peers = new Map();
   }
 
   /**
@@ -191,11 +203,41 @@ export class NeuromorphicDHTNH1 extends DHT {
       await node.transport.start();
       this._registerNH1Handlers(node);
     }
+
+    // v0.71.3 (Phase 2) — every NeuronNode pairs with an NHOnePeer
+    // that exposes the DHT contract surface for this single node.  The
+    // engine's own read-only methods now delegate via `_peerFor(node)`.
+    // We don't call `peer.start()` here yet: in Phase 2 NHOnePeer's
+    // start() only wires event forwarding, which the engine's tests
+    // and benchmark harness do not subscribe to.  Phase 3 may
+    // promote start() to register handlers when more logic migrates.
+    const peer = new NHOnePeer({ engine: this, node });
+    this._peers.set(node, peer);
+
     this._emit({
       type: 'peer-joined', timestamp: Date.now(),
       peerId: node.id, addedBy: 'addNode',
     });
     return node;
+  }
+
+  /**
+   * @private
+   * Return the NHOnePeer wrapper for a given NeuronNode.  Used by
+   * read-only methods (`_vitality` et al.) to forward into per-peer
+   * implementations.  If a NeuronNode is encountered that doesn't
+   * yet have a peer (e.g., legacy tests that pre-date Phase 2 and
+   * construct nodes directly), lazily create one — keeps backward
+   * compatibility through the migration window.
+   */
+  _peerFor(node) {
+    if (!node) return null;
+    let peer = this._peers.get(node);
+    if (!peer) {
+      peer = new NHOnePeer({ engine: this, node });
+      this._peers.set(node, peer);
+    }
+    return peer;
   }
 
   /**
@@ -466,6 +508,12 @@ export class NeuromorphicDHTNH1 extends DHT {
     node.alive = false;
     this.network.removeNode(nodeId);
     this.nodeMap.delete(nodeId);
+    // v0.71.3 (Phase 2) — tear down the per-node DHT-contract wrapper.
+    const peer = this._peers.get(node);
+    if (peer) {
+      try { peer.stop(); } catch { /* peer wasn't started; safe to drop */ }
+      this._peers.delete(node);
+    }
     this._emit({
       type: 'peer-left', timestamp: Date.now(),
       peerId: nodeId, reason: 'remove',
@@ -991,67 +1039,11 @@ export class NeuromorphicDHTNH1 extends DHT {
   // NAVIGATE: Two-hop lookahead AP selection
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // v0.71.3 (Phase 2 of per-node refactor) — body moved to
+  // NHOnePeer._bestByTwoHopAP; this stub delegates so existing
+  // callers (`_lookupStep` at L889) continue to work unchanged.
   async _bestByTwoHopAP(current, candidates, targetKey, currentDist) {
-    // v0.70.11 (refactor commit 5) — the two-hop lookahead now runs as
-    // parallel `lookahead_probe` RPCs against each candidate, instead of
-    // reaching synchronously into firstNode.synaptome.  This is the
-    // first V2 (cross-peer state read) violation cleared.
-    //
-    // Wire shape: each probe asks the candidate "what is your closest
-    // forward synapse to target?" and the candidate's onRequest
-    // handler answers locally from its own synaptome.  Promise.allSettled
-    // is the right primitive — a slow or dead candidate's rejection is
-    // dropped and the rest of the responses still score.  No `_msg`
-    // counter calls are needed: SimulatedTransport.send bumps the same
-    // msgsSent / msgsReceived / msgsByType counters under the
-    // 'lookahead_probe' type.
-
-    const ranked = candidates.map(s => {
-      const ap = Number(currentDist - (s.peerId ^ targetKey)) / s.latency;
-      return { s, ap };
-    }).sort((a, b) => b.ap - a.ap);
-
-    const probeSet = ranked.slice(0, this.LOOKAHEAD_ALPHA).map(x => x.s);
-
-    // Short-circuit: any probe whose first-hop sits exactly on the
-    // target wins outright (zero remaining XOR distance).
-    for (const first of probeSet) {
-      if ((first.peerId ^ targetKey) === 0n) return first;
-    }
-
-    // Parallel lookahead probes.  Each rejected probe is treated like
-    // an empty-forward response — the source projects the second-hop
-    // latency as 0 and distance as the first-hop's own distance to
-    // target, the same fallback as `if (!fwd.length)` in the legacy
-    // code path.
-    const settled = await Promise.allSettled(
-      probeSet.map(first =>
-        current.transport.send(first.peerId, 'lookahead_probe', {
-          target:   targetKey,
-          fromDist: first.peerId ^ targetKey,
-        })
-      )
-    );
-
-    let bestSyn = null, bestAP2 = -Infinity;
-    for (let i = 0; i < probeSet.length; i++) {
-      const first = probeSet[i];
-      const firstDist = first.peerId ^ targetKey;
-      const r = settled[i];
-
-      let twoHopDist, secondLat;
-      if (r.status !== 'fulfilled' || !r.value || r.value.terminal) {
-        twoHopDist = firstDist;
-        secondLat  = 0;
-      } else {
-        twoHopDist = r.value.peerId ^ targetKey;
-        secondLat  = r.value.latency;
-      }
-
-      const ap2 = Number(currentDist - twoHopDist) / (first.latency + secondLat);
-      if (ap2 > bestAP2) { bestAP2 = ap2; bestSyn = first; }
-    }
-    return bestSyn ?? current.bestByAP(candidates, targetKey, 0);
+    return this._peerFor(current)._bestByTwoHopAP(candidates, targetKey, currentDist);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1069,16 +1061,12 @@ export class NeuromorphicDHTNH1 extends DHT {
    * over-represented strata when accepting new peers); duplicating the
    * concept at the synaptome layer added cost without adding signal.
    */
+  // v0.71.3 (Phase 2 of per-node refactor) — delegate to NHOnePeer.
+  // The body has moved to NHOnePeer._vitality(syn); this stub keeps
+  // existing internal callers working until Phase 3 moves _addByVitality
+  // and the rest of the write-side machinery onto the peer.
   _vitality(node, syn) {
-    // Recency: exponential decay from last reinforcement
-    let recency;
-    if (syn.inertia > this.simEpoch) {
-      recency = 1.0;  // LTP-locked: full recency
-    } else {
-      const elapsed = this.simEpoch - syn.inertia;
-      recency = Math.max(0.1, Math.exp(-elapsed / this.RECENCY_HALF_LIFE));
-    }
-    return syn.weight * recency;
+    return this._peerFor(node)._vitality(syn);
   }
 
   /** Add synapse, honouring bilateral cap and evicting lowest-vitality if full. */
@@ -1466,12 +1454,15 @@ export class NeuromorphicDHTNH1 extends DHT {
    * @param {object|bigint|string} [nodeOrId]
    * @returns {Array<object>}  SynapseSnapshot[] per types.js
    */
+  // v0.71.3 (Phase 2) — body moved to NHOnePeer.getSynaptome().
+  // Engine retains the no-args "any alive node" fallback that the
+  // simulator's dashboards use; resolved per-node calls delegate.
   getSynaptome(nodeOrId) {
     const node = nodeOrId !== undefined
       ? this._resolveNode(nodeOrId)
       : this._anyAliveNode();
     if (!node) return [];
-    return node.getSynaptomeSnapshot();
+    return this._peerFor(node).getSynaptome();
   }
 
   /**
@@ -1480,32 +1471,15 @@ export class NeuromorphicDHTNH1 extends DHT {
    * @param {object|bigint|string} [nodeOrId]
    * @returns {object}  Metrics per types.js
    */
+  // v0.71.3 (Phase 2) — body moved to NHOnePeer.getMetrics().  The
+  // engine retains the no-args "any alive node" fallback used by the
+  // simulator dashboards; resolved per-node calls delegate.
   getMetrics(nodeOrId) {
     const node = nodeOrId !== undefined
       ? this._resolveNode(nodeOrId)
       : this._anyAliveNode();
     if (!node) return null;
-    const stats = this._nodeStats.get(node) ||
-      { attempted: 0, succeeded: 0, sumHops: 0, sumLatency: 0 };
-    const cycleStats = {
-      lookupsAttempted: stats.attempted,
-      lookupsSucceeded: stats.succeeded,
-      avgHops:    stats.succeeded > 0 ? stats.sumHops    / stats.succeeded : 0,
-      avgLatency: stats.succeeded > 0 ? stats.sumLatency / stats.succeeded : 0,
-    };
-    const traffic = {
-      msgsSent:     node.msgsSent     | 0,
-      msgsReceived: node.msgsReceived | 0,
-      byType:       node.msgsByType ? { ...node.msgsByType } : {},
-    };
-    return {
-      simEpoch:             this.simEpoch,
-      synaptomeSize:        node.synaptome.size,
-      incomingSynapsesSize: node.incomingSynapses.size,
-      temperature:          node.temperature ?? this.T_INIT,
-      cycleStats,
-      traffic,
-    };
+    return this._peerFor(node).getMetrics();
   }
 
   /**
@@ -1824,17 +1798,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    * chain bubbles `exhausted` upward.  Same V1-cleanup philosophy as
    * `_findCloserInTwoHops`.
    */
+  // v0.71.3 (Phase 2 of per-node refactor) — body moved to
+  // NHOnePeer._greedyNextHopToward.
   _greedyNextHopToward(node, targetId) {
-    if (!node?.alive) return null;
-    const target = (typeof targetId === 'bigint') ? targetId : topicToBigInt(targetId);
-    let bestPeerId = null;
-    let bestDist   = node.id ^ target;
-    for (const syn of node.synaptome.values()) {
-      const d = syn.peerId ^ target;
-      if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
-    }
-    // NH-1 has no `highway` tier, so no second loop.
-    return bestPeerId;
+    return this._peerFor(node)._greedyNextHopToward(targetId);
   }
 
   /**
@@ -1858,52 +1825,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    * Returns the closest node strictly closer than `node`, or null if no
    * such 2-hop peer exists (true terminal).
    */
+  // v0.71.3 (Phase 2 of per-node refactor) — body moved to
+  // NHOnePeer._findCloserInTwoHops.
   async _findCloserInTwoHops(node, targetId) {
-    // v0.70.13 (refactor commit 7) — clears the third V2 violation in
-    // NH-1.  The terminal-globality check now reuses the lookahead_probe
-    // RPC handler registered in commit 5: ask each first-hop peer "what
-    // is your closest forward synapse to target?" (with fromDist set to
-    // *node*'s own distance to target, so the receiver only returns
-    // peers strictly closer than us).  Aggregate the responses and pick
-    // the globally-closest 2-hop peer.
-    //
-    // v0.70.16 (refactor commit 10) — return type changed from Node to
-    // BigInt peer-id.  Callers (routeMessage, route_msg request handler)
-    // no longer dereference the result through nodeMap; they forward
-    // via transport.send(peerId, ...) which is enough.  Liveness check
-    // on incomingSynapses peers also dropped — if a peer is dead, the
-    // forward RPC fails and the chain bubbles up `exhausted`.
-
-    const target = (typeof targetId === 'bigint') ? targetId : topicToBigInt(targetId);
-    const myDist = node.id ^ target;
-    let bestPeerId = null;
-    let bestDist   = myDist;
-
-    const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
-    if (probeTargets.length > 0) {
-      const settled = await Promise.allSettled(
-        probeTargets.map(peerId =>
-          node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
-        )
-      );
-      for (const r of settled) {
-        if (r.status !== 'fulfilled' || !r.value || r.value.terminal) continue;
-        const d = r.value.peerId ^ target;
-        if (d < bestDist) {
-          bestDist   = d;
-          bestPeerId = r.value.peerId;
-        }
-      }
-    }
-
-    // Incoming peers as a reverse-routing option (they point AT us, so
-    // we can route via them to whatever they reach).  Pure local-state
-    // read; no nodeMap.get.
-    for (const syn of node.incomingSynapses.values()) {
-      const d = syn.peerId ^ target;
-      if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
-    }
-    return bestPeerId;
+    return this._peerFor(node)._findCloserInTwoHops(targetId);
   }
 
   // ── Routed messaging ─────────────────────────────────────────────────────
