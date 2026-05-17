@@ -1991,20 +1991,23 @@ function createDHT(params) {
         membership: params.nx15Params,   // UI-tunable pub/sub membership params
       });
     case 'ngdhtnx17':
+      // v0.71.0 — NX-17 is now a thin parametric variant of NH-1
+      // (extends NeuromorphicDHTNH1). Both protocols share the same
+      // Transport contract usage and the same DHT API surface; NX-17
+      // distinguishes itself by tuning toward wider exploration
+      // (larger synaptome, higher LOOKAHEAD_ALPHA, slower annealing).
+      // Caller-supplied `nx17Rules` overrides NX-17's defaults; if
+      // absent, NX-17 uses its own four-knob character set.
       return new NeuromorphicDHTNX17({
         k: params.k,
         alpha: params.alpha,
         bits: params.bits,
         geoBits: params.geoBits,
-        // v0.70.03 — sweep-driven NX-rule overrides (parallel to NH-1's
-        // _nh1RulesOverride). The sweep harness deep-merges run.nx1wRulesOverride
-        // onto the DOM-derived params.nx1wRules before this constructor
-        // runs, so single-parameter ablations (e.g. annealLocalSample) can
-        // be driven without touching the UI.
-        rules: window.__sim?._nx1wRulesEffective ?? params.nx1wRules,
-        // NX-17 ignores rootSetSize (forced to 0 in its constructor) but
-        // honours maxDirectSubs, minDirectSubs, refresh/TTL timers.
-        membership: params.nx17Params ?? params.nx15Params,
+        rules: window.__sim?._nx17RulesOverride ?? params.nx17Rules ?? {},
+        // NX-17 inherits NH-1's _membershipOpts (rootSetSize forced to 0,
+        // routed-mode single-root-per-topic).  honours all the same
+        // refresh/TTL knobs.
+        membership: params.nx17Params ?? params.nh1Params ?? params.nx15Params,
       });
     case 'ngdhtnh1':
       return new NeuromorphicDHTNH1({
