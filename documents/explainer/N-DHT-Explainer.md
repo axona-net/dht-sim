@@ -1,6 +1,6 @@
 # Neuromorphic Distributed Hash Table
 
-*An N-DHT explainer · v0.3.49 · 2026-05-06 · David A. Smith · YZ.social*
+*An N-DHT explainer · v0.3.51 · 2026-05-16 · David A. Smith · YZ.social*
 
 > *The technology is shaped by the mission.*
 
@@ -181,6 +181,8 @@ That part is standard. The useful property is that **the tree heals itself with 
 
 Result: under 5% churn (5% of nodes joining and leaving constantly), NH-1 still delivers 100% of messages. After three refresh cycles, it recovers from any disruption.
 
+Above the axonal tree sits a feed-style application layer with **five verbs** — `publish`, `subscribe`, `pull`, `reshare`, `metrics`. They cover everything a real social or agent-collaboration application asks of a substrate: author new content, attach to a topic, fetch a referenced post on demand, forward with provenance, and let a publisher see verifiable reach across the cascade — without identifying any individual subscriber. Encryption, schema, and ordering belong to the application above this layer; the protocol carries opaque bytes.
+
 ## The Big Result: Hitting the Theoretical Floor
 
 In 2004, Frank Dabek and colleagues proved a beautiful, depressing result: **no recursive DHT can be faster than 3δ**, where δ is the median one-way latency between random pairs of nodes on the Internet.
@@ -237,7 +239,9 @@ The legacy version of N-DHT did *not* have this property. The simulator code was
 
 The benchmark check at the end of that fifteen-commit pass: 25,000 simulated nodes, before and after. NH-1 came out within five percent on hop counts and one percent on latency — the small drift upward is the architecturally-honest cost of letting each peer make its own decisions instead of having the source orchestrate the walk. The other protocols (Kademlia, G-DHT, NX-17) came out within one percent across the board.
 
-So the simulator is now the deployment vehicle. The next step — which is just plumbing — is to write a Transport that runs on real WebRTC instead of an in-process fake, and a Bootstrap service that handles the cold-start problem of finding your first peer when you've never been on the network before. The protocol, the routing logic, the brain — all of that stays exactly as it is. You can read it in the simulator and you'll be reading the production code.
+So the simulator is the deployment vehicle, and the plumbing on the other side now exists. A production Transport built on WebRTC data channels — `axona-peer`, the browser-resident node — runs at <https://axona.net>. A signaling broker — `axona-bridge` — handles the WebRTC offer/answer exchange that two peers behind NATs need to find each other; it runs at <https://bridge.axona.net> and is interchangeable (any operator can stand one up, and a federated mesh of them is on the roadmap). The cold-start problem — finding your first peer when you've never been on the network before — resolves through any of three `BootstrapEndpoint` variants: a rendezvous URL with a signed manifest, a QR-code-pasted pairing string for direct device-to-device pairing, or an in-process simulator pointer. Once bootstrap returns one open channel, the routing logic is unchanged — the same `lookup_step` chain that the simulator runs.
+
+The product name for this whole stack — the peer, the bridge, the protocol, the SDK that ships them to applications — is **Axona**. The protocol is N-DHT; the network of nodes running it is Axona. The first application running on it in production is `civildefense.io`, a tap-to-report incident map built in weeks because the substrate primitives (signed posts, geographic locality, 24-hour expiry, anonymous P2P) inherit directly from this protocol layer. Source for the three live components: <https://github.com/axona-net/axona-peer>, <https://github.com/axona-net/axona-bridge>, <https://github.com/axona-net/dht-sim>.
 
 ## The Honest Footnotes
 

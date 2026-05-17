@@ -4,7 +4,7 @@ theme: default
 size: 16:9
 paginate: true
 header: "N-DHT"
-footer: "v0.3.50 · sim v0.70.22 · 2026-05-10"
+footer: "v0.3.51 · sim v0.70.22 · 2026-05-16"
 style: |
   section {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -69,7 +69,8 @@ davidasmith@gmail.com
 
 <br>
 
-<span class="muted">Source, data, and simulator: <code>github.com/YZ-social/dht-sim</code></span>
+<span class="muted">Source, data, and simulator: <code>github.com/axona-net/dht-sim</code></span>
+<span class="muted">Live network: <code>axona.net</code> · signaling: <code>bridge.axona.net</code></span>
 
 ---
 
@@ -1674,6 +1675,36 @@ A 25 K-node parity-gate benchmark (post-refactor sim v0.70.22 vs pre-refactor v0
 | **NH-1** | **+4.9 %** | **+1.3 %** |
 
 NH-1's small drift upward is the architecturally-honest cost: each peer makes its own next-hop decision from its own synaptome rather than a source-orchestrated walk reading across all intermediates. **It's the cost we pay in production anyway.**
+
+---
+
+## Live deployment — Axona
+
+The production-side of both contracts is now live. **Axona** is the product name for the network running N-DHT.
+
+| Contract | Production implementation | Live at |
+|---|---|---|
+| Transport | `axona-peer` — WebRTC data channels, 1 Hz heartbeat | <https://axona.net> |
+| BootstrapService | `axona-bridge` — WebRTC offer/answer signaling | <https://bridge.axona.net> |
+| DHT | `NeuromorphicDHTNH1` — unchanged from the simulator | runs inside `axona-peer` |
+
+`axona-peer` runs in the browser on Mac, Windows, Linux, iOS, and Android over real-world NATs (cellular, hotel WiFi, double-NAT). `axona-bridge` carries only the WebRTC offer/answer payloads between two peers — no application traffic — so the rendezvous role is interchangeable and a federated bridge mesh is on the Q4 2026 roadmap.
+
+**First end-user application.** `civildefense.io` — a tap-to-report incident map. Anonymous P2P, geographic locality via the S2 prefix, 24-hour expiry from the replay-cache LRU. Built in weeks because the substrate primitives map directly.
+
+**Pub/sub application API — the five verbs.**
+
+| Verb | Action |
+|---|---|
+| `publish` | author a new `SignedPost` into one of your topics |
+| `subscribe` | attach to a publisher's topic; receive future posts |
+| `pull` | fetch any post by content hash from its topic's relay tree |
+| `reshare` | publish with a reference back to an upstream post |
+| `metrics` | publisher-only — aggregate `delivery_count`, `pull_count`, `reshare_count` |
+
+`AxonPubSub.js` sits above `AxonManager`; encryption, schema, and ordering belong to the application. Cascade test at 2001 nodes verifies the counter invariants end-to-end.
+
+**Public repos:** `github.com/axona-net/axona-peer` · `github.com/axona-net/axona-bridge` · `github.com/axona-net/dht-sim`.
 
 ---
 

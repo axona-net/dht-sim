@@ -70,7 +70,7 @@
 {\large David A.~Smith\par}
 {\itshape\small YZ.social\par}
 \vspace{2em}
-{\small Version 0.3.50 \quad Simulator v0.70.22 \quad 2026-05-10\par}
+{\small Version 0.3.51 \quad Simulator v0.70.22 \quad 2026-05-16\par}
 \vfill
 \end{fullwidth}
 \newpage
@@ -6576,6 +6576,53 @@ implemented the DHT contract's observability surface:
   the deployment migration. The DHT contract, the protocol
   body, and \texttt{AxonManager} stay.
 \end{itemize}
+
+\paragraph{Live deployment --- Axona.}
+As of v0.3.51 the production-side implementations of all three
+contracts are live, and the network running them is named
+\textbf{Axona}. The Transport is \texttt{axona-peer}: a
+browser-resident node built on WebRTC data channels with a
+1\,Hz ping/pong heartbeat, running at
+\url{https://axona.net} on Mac, Windows, Linux, iOS, and
+Android over real-world NATs. The BootstrapService is
+\texttt{axona-bridge}: a WebRTC offer/answer signaling broker
+at \url{https://bridge.axona.net}; it carries only handshake
+payloads, no application traffic, so the rendezvous role is
+interchangeable and a federated bridge mesh is on the Q4 2026
+roadmap. The DHT inside \texttt{axona-peer} is the same
+\texttt{NeuromorphicDHTNH1} body that runs in the simulator.
+\NDHT is the protocol; Axona is the network. The first
+end-user application is \texttt{civildefense.io}, a
+tap-to-report incident map whose primitives (signed posts,
+geographic locality, 24-hour expiry, anonymous P2P) inherit
+directly from this protocol layer.
+
+\paragraph{Pub/sub application API --- the five verbs.}
+Above the axonal-tree primitive sits a feed-style API in
+\texttt{src/pubsub/AxonPubSub.js} (PR\,1 + PR\,2 in the
+companion implementation notes):
+
+\begin{itemize}\itemsep2pt
+\item \texttt{publish} --- author a new \texttt{SignedPost}
+  into one of your topics.
+\item \texttt{subscribe} --- attach to a publisher's topic;
+  receive future posts via the axonal tree.
+\item \texttt{pull} --- fetch any post by content hash from
+  its topic's relay tree (single-count \texttt{pull\_count}
+  invariant on the first FOUND response).
+\item \texttt{reshare} --- publish with a reference back to
+  an upstream post; the first role-bearing relay on the
+  notification path bumps \texttt{reshare\_count}.
+\item \texttt{metrics} --- publisher-only query for aggregate
+  \texttt{delivery\_count}, \texttt{pull\_count},
+  \texttt{reshare\_count} over each owned post.
+\end{itemize}
+
+Encryption, schema, and ordering belong to the application
+above this layer; the protocol carries opaque \texttt{content}
+bytes. A 2001-node cascade test
+(\texttt{src/pubsub/test\_pubsub\_cascade.js}, 13/13 passing)
+verifies the counter invariants end-to-end.
 
 % --------------------------------------------------------------------
 \section{Friction-Realistic Simulator Extensions}

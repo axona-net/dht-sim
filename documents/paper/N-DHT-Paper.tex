@@ -33,7 +33,7 @@
 \newcommand{\NXseventeen}{NX-17\xspace}
 
 % ── Title and authors ────────────────────────────────────────────────────────
-\title{N-DHT: A Learning-Adaptive Distributed Hash Table\\and Axonal Publish/Subscribe\\[0.3em]{\normalsize\normalfont v0.3.50 \quad 2026-05-10}}
+\title{N-DHT: A Learning-Adaptive Distributed Hash Table\\and Axonal Publish/Subscribe\\[0.3em]{\normalsize\normalfont v0.3.51 \quad 2026-05-16}}
 
 \author{
 \IEEEauthorblockN{David A. Smith}
@@ -1702,6 +1702,23 @@ stratified bootstrap, and the local self-resolution in
 manifest signature verification, and QR-code pairing
 out-of-band.
 
+\paragraph{Live deployment.} As of v0.3.51 the production
+Transport and BootstrapService implementations are live. The
+browser-resident peer (\texttt{axona-peer}) runs at
+\url{https://axona.net} on Mac, Windows, Linux, iOS, and Android
+behind real-world NATs. The signaling broker
+(\texttt{axona-bridge}) at \url{https://bridge.axona.net}
+handles the WebRTC offer/answer exchange for browser-to-browser
+channels; it carries no application traffic and any operator
+can stand one up, so the rendezvous role is interchangeable.
+The product name for the running network --- peer, bridge,
+SDK --- is \emph{Axona}; \nhone is the routing protocol it
+runs internally. The first end-user application on the live
+network is \texttt{civildefense.io}, a tap-to-report incident
+map whose primitives (signed posts, geographic locality,
+24-hour expiry, anonymous P2P) inherit directly from this
+protocol layer.
+
 % ═════════════════════════════════════════════════════════════════════════════
 \section{Future Work}
 \label{sec:future}
@@ -1773,9 +1790,15 @@ a consequence of locality engineering.
 
 The Berkeley/Cambridge DHT lineage --- Kademlia plus Pastry plus
 Tapestry plus SCRIBE --- gave us the substrate; vitality-driven
-learning is the contribution. Code, data, simulator, and the companion
-red-team analysis are open at
-\texttt{github.com/YZ-social/dht-sim}~\cite{dhtsim2026}.
+learning is the contribution. The production stack ---
+\texttt{axona-peer} (the browser-resident node) and
+\texttt{axona-bridge} (an interchangeable signaling broker) ---
+runs the same protocol code as the simulator that produced the
+numbers in \S\ref{sec:eval}. Code, data, simulator, and the
+companion red-team analysis are open at
+\texttt{github.com/axona-net/dht-sim}~\cite{dhtsim2026}; the live
+peer and bridge sources are at \texttt{github.com/axona-net/axona-peer}
+and \texttt{github.com/axona-net/axona-bridge}.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \bibliographystyle{IEEEtran}

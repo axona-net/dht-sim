@@ -2,11 +2,11 @@
 
 ## A Learning-Adaptive Distributed Hash Table with Axonal Publish-Subscribe
 
-**Whitepaper · Synthesis Edition**
+**Whitepaper · Synthesis Edition · v0.3.51 · 2026-05-16**
 *David A. Smith — YZ.social*
 *davidasmith@gmail.com*
 
-*This document synthesizes the Neuromorphic-DHT-Architecture whitepaper (v0.67), the v0.3.38 research deck, and the operational framework developed in conversation. It is intended as a complete reference for technical readers, operators, and researchers approaching the system for the first time.*
+*This document synthesizes the Neuromorphic-DHT-Architecture whitepaper (v0.67), the v0.3.38 research deck, and the operational framework developed in conversation. It is intended as a complete reference for technical readers, operators, and researchers approaching the system for the first time. N-DHT is the routing protocol; **Axona** is the product name for the network running it — peer (`axona-peer`), signaling broker (`axona-bridge`), and SDK — described in §9 and §17.*
 
 ---
 
@@ -809,6 +809,39 @@ The remaining `nodeMap.get(peerId)` sites in the protocol code are all sim-only 
 - **Observability is contract-level, not back-channel.** Smoke tests, the simulator's traffic distribution plot, and production load-balance dashboards all consume `getMetrics()` and `onEvent()`. Same fields, same event shapes.
 - **The production transport is one file.** Swapping `SimulatedTransport` for `WebRTCTransport` is the deployment migration. The DHT contract, the protocol body, and AxonManager stay.
 
+### 9.6 Live deployment — Axona
+
+As of v0.3.51 the production-side implementations of all three contracts are live and the network running them is named **Axona**. The mapping is direct:
+
+| Contract | Production implementation | Live at |
+|---|---|---|
+| Transport | `axona-peer` — WebRTC data channels with 1 Hz ping/pong heartbeat | <https://axona.net> (browser, Mac/Win/Linux/iOS/Android) |
+| BootstrapService | `axona-bridge` — WebRTC offer/answer signaling with signed manifest | <https://bridge.axona.net/healthz> |
+| DHT | `NeuromorphicDHTNH1` (unchanged from the simulator) | runs inside `axona-peer` |
+
+`axona-peer` is the browser-resident node; one instance per browser tab. It opens its first channel through `axona-bridge`, which carries WebRTC offer/answer payloads between two peers behind NATs and then drops out — the bridge sees no application traffic and any operator can stand one up. A federated bridge mesh is on the Q4 2026 roadmap, removing the single rendezvous role entirely.
+
+The protocol code is the same JavaScript that produced the §7 benchmark numbers; the swap is `SimulatedTransport → WebRTCTransport`, plus the `BootstrapService` variants (rendezvous-URL, QR-code pairing, in-process). The simulator's hop counts, latency curves, churn-resilience numbers, and pub/sub coverage transfer because the routing decisions that produce them are made in code that does not know it's being simulated.
+
+**Public repos:**
+- `github.com/axona-net/axona-peer` — browser peer (production Transport + DHT)
+- `github.com/axona-net/axona-bridge` — signaling broker (production BootstrapService)
+- `github.com/axona-net/dht-sim` — simulator (the testbench that drives every benchmark in §7)
+
+**First end-user application:** `civildefense.io`, a tap-to-report incident map. Users tap a location to register a concern; reports propagate over anonymous P2P with 24-hour expiry. The protocol primitives — signed posts, geographic locality via the S2 prefix, implicit expiry through the replay-cache LRU, end-to-end-secure delivery — map directly onto the application's needs, which is why it shipped in weeks.
+
+**Pub/sub application API (the five verbs).** Above the axonal-tree primitive sits a feed-style API in `src/pubsub/AxonPubSub.js`:
+
+| Verb | What it does |
+|---|---|
+| `publish` | author a new `SignedPost` into one of your topics |
+| `subscribe` | attach to a publisher's topic; receive future posts via the axonal tree |
+| `pull` | fetch any post by content hash from its topic's relay tree |
+| `reshare` | publish with a reference back to an upstream post; first role-bearing relay on the notification path bumps `reshare_count` |
+| `metrics` | publishers query aggregate `delivery_count`, `pull_count`, `reshare_count` for their own posts |
+
+Five verbs cover the application surface. Encryption, schema, and ordering belong to the application above this layer — `SignedPost` carries an opaque `content` field. The cascade test at 2001 nodes (`src/pubsub/test_pubsub_cascade.js`) verifies the counter invariants end-to-end.
+
 ---
 
 ## 10. Red Team — The Existing Five
@@ -1447,6 +1480,8 @@ This is Phase 3 of the red-team action plan; it's not blocking but it's necessar
 ---
 
 ## 17. Deployment Timeline
+
+**Status (v0.3.51).** The initial production stack — `axona-peer` and `axona-bridge` — is live (see §9.6). The plan below describes the path from this initial deployment to a multi-thousand-node operating network; it predates the v0.3.51 production launch and is retained as a forward-looking calibration for the scale-up phase.
 
 **Month 1: Simulator Hardening**
 - Complete OFAT sensitivity analysis (red-team item 10.8)
