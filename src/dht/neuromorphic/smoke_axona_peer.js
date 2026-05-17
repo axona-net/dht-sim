@@ -9,10 +9,11 @@
 // Runs under Node:  `node src/dht/neuromorphic/smoke_nh1peer_phase1.js`
 // =====================================================================
 
-import { SimulatedNetwork }      from '../SimulatedNetwork.js';
-import { AxonaEngine }    from './AxonaEngine.js';
-import { AxonaPeer }             from './AxonaPeer.js';
-import { DHT as DHTContract }    from '../../contracts/DHT.js';
+import { SimulatedNetwork }              from '../SimulatedNetwork.js';
+import { AxonaEngine }                   from './AxonaEngine.js';
+// v0.71.6 — production kernel (AxonaPeer + DHT contract) consumed
+// from `@axona/protocol`.  Local copies in dht-sim are deleted.
+import { AxonaPeer, DHT as DHTContract } from '@axona/protocol';
 
 const NODE_COUNT = 30;
 

@@ -20,14 +20,26 @@
  * 12 parameters, each controlling a behavioral axis.
  */
 
-import { DHT }          from '../DHT.js';
-import { Synapse }      from './Synapse.js';
-import { NeuronNode }   from './NeuronNode.js';
-import { randomU64, clz64, roundTripLatency, buildXorRoutingTable }
-                         from '../../utils/geo.js';
-import { geoCellId }     from '../../utils/s2.js';
-import { AxonManager }   from '../../pubsub/AxonManager.js';
-import { AxonaPeer }     from './AxonaPeer.js';
+import { DHT }          from '../DHT.js';   // simulator multi-node base
+// v0.71.6 (Phase 5) — production kernel comes from the published
+// `@axona/protocol` package.  The local copy of `AxonaPeer.js` was
+// deleted in this commit (the package is the canonical source).
+// Other production pieces (Synapse, NeuronNode, AxonManager, utils)
+// also resolve through the package for identity consistency with
+// AxonaPeer.  The simulator-only `src/dht/DHT.js` (above) and the
+// rest of the simulator harness stay local.
+import {
+  AxonaPeer,
+  Synapse,
+  NeuronNode,
+  AxonManager,
+  randomU64,
+  clz64,
+  roundTripLatency,
+  geoCellId,
+} from '@axona/protocol';
+// `buildXorRoutingTable` is reachable via the deep sub-path import.
+import { buildXorRoutingTable } from '@axona/protocol/utils/geo.js';
 
 // ── Identity conversions for the AxonManager boundary ────────────────────────
 // AxonManager works in 16-char hex strings; NeuronNode uses BigInt. NH-1
