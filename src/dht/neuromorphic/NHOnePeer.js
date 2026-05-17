@@ -845,6 +845,172 @@ export class NHOnePeer extends DHT {
     }
     table.set(type, handler);
   }
+
+  // ─── Routing tick — _lookupStep + _lookupResult (Phase 3g) ─────────
+  //
+  // _lookupStep is NH-1's per-hop routing logic.  It runs on the
+  // receiver of a 'lookup_step' request: collects forward-progress
+  // candidates from local synaptome + incoming, evicts dead synapses
+  // and replaces them, applies iterative-fallback if no candidate
+  // makes XOR progress, selects a next hop (direct → epsilon → 2-hop
+  // AP), applies LEARN side-effects (incoming promotion, hop caching,
+  // triadic closure), bumps temperature + maybe triggers anneal, and
+  // forwards via transport.send('lookup_step', ...).  Body copied
+  // verbatim from NeuromorphicDHTNH1._lookupStep; `node` → `this._node`,
+  // engine config via `this._engine.X`, internal method calls land on
+  // peer methods (e.g. `this._addByVitality(syn)` instead of
+  // `engine._addByVitality(node, syn)`).
+  //
+  async _lookupStep(ctx) {
+    const node   = this._node;
+    const engine = this._engine;
+    if (!node || !node.alive) {
+      return this._lookupResult(ctx, false);
+    }
+
+    const { sourceId, targetKey } = ctx;
+    const currentDist = node.id ^ targetKey;
+    if (currentDist === 0n) {
+      return this._lookupResult(ctx, true);
+    }
+    if (ctx.hops >= engine.MAX_HOPS) {
+      return this._lookupResult(ctx, false);
+    }
+
+    const dead = node._deadPeers || new Set();
+
+    const deadSynapses = [];
+    const candidates   = [];
+    for (const s of node.synaptome.values()) {
+      if ((s.peerId ^ targetKey) >= currentDist) continue;
+      if (dead.has(s.peerId)) { deadSynapses.push(s); s.weight = 0; continue; }
+      candidates.push(s);
+    }
+    for (const s of node.incomingSynapses.values()) {
+      if ((s.peerId ^ targetKey) >= currentDist) continue;
+      if (dead.has(s.peerId)) continue;
+      candidates.push(s);
+    }
+
+    if (deadSynapses.length > 0) {
+      node.temperature = Math.max(node.temperature, engine.T_REHEAT);
+      for (const syn of deadSynapses) {
+        const repl = await this._evictAndReplace(syn);
+        if (repl && (repl.peerId ^ targetKey) < currentDist) candidates.push(repl);
+      }
+    }
+
+    if (candidates.length === 0) {
+      let bestSyn = null, bestDist = null;
+      const scan = (s) => {
+        if (ctx.queried.has(s.peerId)) return;
+        if (dead.has(s.peerId)) return;
+        const d = s.peerId ^ targetKey;
+        if (bestDist === null || d < bestDist) { bestDist = d; bestSyn = s; }
+      };
+      for (const s of node.synaptome.values())         scan(s);
+      for (const s of node.incomingSynapses.values()) scan(s);
+      if (!bestSyn) return this._lookupResult(ctx, false);
+      candidates.push(bestSyn);
+    }
+
+    let nextSyn;
+    const direct = node.synaptome.get(targetKey)
+                ?? node.incomingSynapses.get(targetKey);
+    if (direct && !dead.has(targetKey)) nextSyn = direct;
+
+    if (!nextSyn && node.id === sourceId
+        && Math.random() < engine.EPSILON) {
+      nextSyn = candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
+    if (!nextSyn) {
+      nextSyn = await this._bestByTwoHopAP(candidates, targetKey, currentDist);
+    }
+
+    const nextId = nextSyn.peerId;
+
+    if (node.incomingSynapses.has(nextId) && !node.synaptome.has(nextId)) {
+      const inc = node.incomingSynapses.get(nextId);
+      inc.useCount = (inc.useCount ?? 0) + 1;
+      if (inc.useCount >= engine.PROMOTE_THRESHOLD) {
+        const syn = new Synapse({
+          peerId: nextId, latencyMs: inc.latency, stratum: inc.stratum,
+        });
+        syn.weight   = 0.5;
+        syn.inertia  = engine.simEpoch;
+        syn._addedBy = 'promote';
+        if (await this._addByVitality(syn)) {
+          node.incomingSynapses.delete(nextId);
+        }
+      }
+    }
+
+    ctx.queried.add(nextId);
+    ctx.path.push(nextId);
+    ctx.trace.push({ fromId: node.id, synapse: nextSyn });
+    ctx.totalTimeMs += nextSyn.latency;
+    ctx.hops += 1;
+
+    if (node.id !== targetKey && !node.synaptome.has(targetKey)) {
+      const stratum = clz64(node.id ^ targetKey);
+      const syn = new Synapse({
+        peerId: targetKey, latencyMs: 0, stratum,
+      });
+      syn.weight   = 0.5;
+      syn.inertia  = engine.simEpoch;
+      syn._addedBy = 'hopCache';
+      const added = await this._addByVitality(syn);
+      if (added && engine.EN_LATERAL_SPREAD) {
+        const nodeRegion = node.id >> BigInt(64 - engine.GEO_REGION_BITS);
+        const regional   = [];
+        for (const s of node.synaptome.values()) {
+          if (s.peerId === targetKey) continue;
+          if ((s.peerId >> BigInt(64 - engine.GEO_REGION_BITS)) === nodeRegion) {
+            regional.push(s);
+          }
+        }
+        regional.sort((a, b) => b.weight - a.weight);
+        for (let i = 0; i < Math.min(engine.LATERAL_K, regional.length); i++) {
+          node.transport.notify(regional[i].peerId, 'lateral_spread',
+                                { target: targetKey, depth: 1 })
+            .catch(err => console.error('NHOnePeer: lateral_spread notify failed:', err));
+        }
+      }
+    }
+
+    if (node.id !== sourceId) this._recordTransit(sourceId, nextId);
+
+    node.temperature = Math.max(engine.T_MIN, node.temperature * engine.ANNEAL_COOLING);
+    if (Math.random() < node.temperature * engine.ANNEAL_RATE_SCALE) {
+      this._tryAnneal().catch(err =>
+        console.error(`NHOnePeer: anneal failed at ${node.id.toString(16)}:`, err));
+    }
+
+    try {
+      const downstream = await node.transport.send(nextId, 'lookup_step', {
+        sourceId, targetKey,
+        hops:        ctx.hops,
+        path:        ctx.path,
+        trace:       ctx.trace,
+        queried:     ctx.queried,
+        totalTimeMs: ctx.totalTimeMs,
+      });
+      return downstream;
+    } catch {
+      return this._lookupResult(ctx, false);
+    }
+  }
+
+  _lookupResult(ctx, found) {
+    return {
+      found,
+      path:        ctx.path,
+      trace:       ctx.trace,
+      totalTimeMs: ctx.totalTimeMs,
+      hops:        ctx.hops,
+    };
+  }
 }
 
 // ─── Module-local helpers (mirror NeuromorphicDHTNH1) ────────────────
