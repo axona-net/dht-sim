@@ -155,6 +155,28 @@ synaptic locality, dramatically shortening the per-hop wire time.
 - **Success %** — must be 100% under steady-state and ≥99% under 5% churn
   for a protocol to be considered viable.
 
+### Transport-conformance status (v0.3.51)
+
+The four protocols in the production-comparison set — **NH-1**, **NX-17**,
+**K-DHT**, **G-DHT** — each have a different relationship to the Transport
+contract. Numbers transfer from sim to production only when the protocol
+runs entirely through Transport (no god's-eye `nodeMap` reads in routing).
+
+| Protocol | Transport-conforming? | Status |
+|---|---|---|
+| **NH-1**   | Yes  | Cleaned by the 15-commit migration. Reference. |
+| **K-DHT**  | Yes  | Cleaned in v0.3.51 (descriptor FIND_NODE, `_deadPeers` Set, inline latency). |
+| **G-DHT**  | Yes  | Inherits K-DHT's lookup + transport handlers. Cleaned via K-DHT. |
+| **NX-17**  | No   | Inherits NX-15 → NX-10 → NX-6 god's-eye routing. Refactor pending. |
+
+Earlier neuromorphic variants (NS-1…NS-6, NX-1…NX-15) remain on the legacy
+god's-eye path and are kept for ablation / simulator-only study.
+
+When re-running benchmarks after a refactor commit, **K-DHT and G-DHT ms
+numbers will shift** from pre-refactor values (the new code uses
+`transport.getLatency` per-round, not post-walk pairwise `roundTripLatency`).
+Hop counts and success rates are stable across the change.
+
 ### Latest benchmark snapshot (25,000 nodes · May 15)
 
 Run via the loop above with

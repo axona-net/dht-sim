@@ -1,6 +1,18 @@
 # Protocol-Layer God's-Eye Audit
 
-*v0.3.51 · 2026-05-16 · diagnostic report — no fixes yet*
+*v0.3.51 · 2026-05-16 · diagnostic report*
+
+> **Status update (2026-05-16).** K-DHT and G-DHT have been brought
+> into Transport-conformance (commit follows this document). The
+> three Category-C sites flagged in §3.4 are fixed: FIND_NODE now
+> returns descriptors `{id, s2Cell}` rather than raw ids; the source
+> filters dead peers via a local `_deadPeers` Set populated by
+> `transport.onPeerDied`; latency accumulates inline using
+> `transport.getLatency` per round, replacing the post-walk
+> `roundTripLatency(nodeMap.get(prev), nodeMap.get(next))` reach.
+> The remaining target — **NX-17** and its NX-15/NX-10/NX-6 lineage —
+> is queued as a separate refactor. Earlier neuromorphic variants
+> stay on the legacy god's-eye path as research artifacts.
 
 ## Why this audit happened
 

@@ -1,6 +1,6 @@
 import { DHTNode } from '../DHTNode.js';
 import { DHT } from '../DHT.js';
-import { randomU64, clz64, roundTripLatency, buildXorRoutingTable } from '../../utils/geo.js';
+import { randomU64, clz64, buildXorRoutingTable } from '../../utils/geo.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // K-Bucket
@@ -220,10 +220,17 @@ export class KademliaNode extends DHTNode {
       case 'FIND_NODE': {
         // When a geoKey is present, route by S2-cell XOR (geographic mode).
         // Otherwise use standard Kademlia ID XOR.
+        //
+        // v0.3.51 (god's-eye audit fix): returns descriptors {id, s2Cell}
+        // matching the transport-conformant handler. Legacy callers that
+        // expect raw ids should switch to reading `.id` off the
+        // descriptor.
         const closest = (data.geoKey !== undefined)
           ? this.findClosestByGeo(data.geoKey, this.k)
           : this.findClosest(data.target, this.k);
-        return closest.filter(n => n.id !== from).map(n => n.id);
+        return closest
+          .filter(n => n.id !== from)
+          .map(n => ({ id: n.id, s2Cell: n.s2Cell }));
       }
       case 'PING':
         return 'PONG';
@@ -289,15 +296,40 @@ export class KademliaDHT extends DHT {
    * Mirrors the cases in {@link KademliaNode#handleMessage} but in the
    * transport-conformant shape: handler returns a Promise<response>,
    * caller awaits.
+   *
+   * v0.3.51 (god's-eye audit fix): FIND_NODE response is now an array
+   * of descriptors `{id, s2Cell}` not raw ids. The caller stores these
+   * directly in its shortlist; no `nodeMap.get(id)` rehydration. This
+   * matches what a real WebRTC deployment would carry on the wire and
+   * removes the audit's C-9 violation (Kademlia geo-mode xorTo reading
+   * peer.s2Cell via global nodeMap).
+   *
+   * Also registers an `onPeerDied` callback that populates a per-node
+   * `_deadPeers` Set, mirroring the pattern NH-1 uses. The lookup
+   * filters candidates against this Set instead of reading peer.alive
+   * via nodeMap (audit C-10).
    */
   _registerKDHTHandlers(node) {
     node.transport.onRequest('FIND_NODE', async (fromId, payload) => {
       const closest = (payload?.geoKey !== undefined)
         ? node.findClosestByGeo(payload.geoKey, this.k)
         : node.findClosest(payload.target, this.k);
-      return closest.filter(n => n.id !== fromId).map(n => n.id);
+      return closest
+        .filter(n => n.id !== fromId)
+        .map(n => ({ id: n.id, s2Cell: n.s2Cell }));
     });
     node.transport.onRequest('PING', async () => 'PONG');
+
+    // Dead-peer callback. Mirrors NeuromorphicDHTNH1._registerNH1Handlers.
+    // Populates a local Set of known-dead peer ids that the lookup
+    // consults when filtering candidates. Replaces the legacy
+    // `peer.alive` god's-eye liveness check; the protocol learns about
+    // deaths the same way a real deployment does -- through
+    // transport-level peer-died notifications driven by the heartbeat.
+    if (!node._deadPeers) node._deadPeers = new Set();
+    node.transport.onPeerDied((peerId) => {
+      node._deadPeers.add(peerId);
+    });
   }
 
   async removeNode(nodeId) {
@@ -438,84 +470,123 @@ export class KademliaDHT extends DHT {
    *   geographically nearby nodes rather than XOR-nearby random nodes.
    */
   async lookup(sourceId, targetKey, { geoKey } = {}) {
+    // Self-resolution: turn the caller's own node id into its local
+    // KademliaNode reference. This is the simulator's analog of "the
+    // DHT instance owns its own state"; the production peer would
+    // already have its own node object in scope. Category B
+    // (legitimate). The lookup never reads `this.nodeMap` again after
+    // this line.
     const source = this.nodeMap.get(sourceId);
     if (!source || !source.alive) return null;
 
+    const transport = source.transport;
     const alpha = this.alpha;
     const k = this.k;
 
-    // In geographic mode, rank nodes by S2-cell XOR distance to geoKey.
-    // In standard mode, rank by node-ID XOR distance to targetKey.
+    // v0.3.51 (god's-eye audit fix): the shortlist is now an array of
+    // descriptors `{id, s2Cell}` rather than raw KademliaNode refs. The
+    // initial entries come from the source's own routing table (local
+    // state -- the source learned its peers' s2Cell when it added them
+    // to its buckets, so reading from those entries is a local-state
+    // read, not a god's-eye one). Subsequent entries are appended from
+    // FIND_NODE responses which are themselves `{id, s2Cell}`
+    // descriptors per the new wire format.
+    //
+    // Removed: `xorTo(id) => this.nodeMap.get(id).s2Cell ^ geoKey` --
+    // the geo-mode scorer that read peer.s2Cell via the global
+    // simulator nodeMap (audit C-9). `xorTo` now takes the descriptor
+    // and reads `.s2Cell` from the descriptor directly.
     const useGeo = geoKey !== undefined;
     const xorTo = useGeo
-      ? id => { const n = this.nodeMap.get(id); return n ? (n.s2Cell ^ geoKey) >>> 0 : 0xffffffff; }
-      : id => id ^ targetKey;  // BigInt XOR for non-geo mode
+      ? e => (e.s2Cell ^ geoKey) >>> 0
+      : e => e.id ^ targetKey;  // BigInt XOR for non-geo mode
 
-    // Bootstrap shortlist from source's routing table
-    let shortlist = useGeo
+    const toDescriptor = n => ({ id: n.id, s2Cell: n.s2Cell });
+    let shortlist = (useGeo
       ? source.findClosestByGeo(geoKey, k)
-      : source.findClosest(targetKey, k);
+      : source.findClosest(targetKey, k)
+    ).map(toDescriptor);
+
     const queried = new Set([sourceId]);
     const path = [sourceId];
 
     let totalHops = 0;
+    let totalTimeMs = 0;
     // Track the closest node seen so far for termination
-    let closestDist = shortlist.length ? xorTo(shortlist[0].id) : (useGeo ? 0xffffffff : 0xFFFFFFFFFFFFFFFFn);
+    let closestDist = shortlist.length ? xorTo(shortlist[0]) : (useGeo ? 0xffffffff : 0xFFFFFFFFFFFFFFFFn);
     let noProgressRounds = 0;
 
+    // v0.3.51: liveness comes from the local `_deadPeers` Set populated
+    // by `transport.onPeerDied` callbacks (set up in
+    // `_registerKDHTHandlers`). Replaces the legacy `peer.alive` reach
+    // through nodeMap (audit C-10).
+    const dead = source._deadPeers || new Set();
+
     while (true) {
-      // Pick the α closest unqueried live nodes from the shortlist
+      // Pick the α closest unqueried, not-known-dead descriptors.
       const toQuery = shortlist
-        .filter(n => n.alive && !queried.has(n.id))
+        .filter(d => !queried.has(d.id) && !dead.has(d.id))
         .slice(0, alpha);
 
       if (toQuery.length === 0) break;
 
-      toQuery.forEach(n => queried.add(n.id));
+      toQuery.forEach(d => queried.add(d.id));
       totalHops += 1; // one hop = one routing round (α queries sent in parallel)
 
-      // For the visualisation path, record only the node closest to target
-      // queried this round (the greedy "best hop"), so path.length-1 == hops.
+      // For the visualisation path, record only the descriptor closest to
+      // target queried this round (the greedy "best hop"), so
+      // path.length-1 == hops.
       const bestThisRound = toQuery.reduce(
-        (best, n) => xorTo(n.id) < xorTo(best.id) ? n : best, toQuery[0]
+        (best, d) => xorTo(d) < xorTo(best) ? d : best, toQuery[0]
       );
       path.push(bestThisRound.id);
 
-      // v0.70.09 — Send FIND_NODE to each candidate in TRUE parallel via
-      // transport.send.  Promise.allSettled is the right primitive: a slow
-      // or dead peer should not fail the whole batch — its rejection is
-      // dropped and the rest of the responses are processed.
-      //
-      // The previous implementation used `this.network.send()` in a
-      // serial for-loop, which the simulator's instantaneous clock made
-      // indistinguishable from parallel.  In production, serial would
-      // pay α × RTT per round; parallel pays one RTT.
-      const newNodes = [];
-      const transport = source.transport;
+      // v0.70.09 — FIND_NODE sent in TRUE parallel via transport.send.
+      // Promise.allSettled lets a slow or dead peer in one probe drop
+      // without failing the whole batch.
+      const newDescriptors = [];
       const settled = await Promise.allSettled(
-        toQuery.map(n => transport.send(n.id, 'FIND_NODE', { target: targetKey, geoKey }))
+        toQuery.map(d => transport.send(d.id, 'FIND_NODE', { target: targetKey, geoKey }))
       );
       for (const r of settled) {
         if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
-        for (const id of r.value) {
-          const peer = this.nodeMap.get(id);
-          if (peer && peer.alive && !queried.has(peer.id)) newNodes.push(peer);
+        for (const desc of r.value) {
+          // v0.3.51: FIND_NODE response is now `{id, s2Cell}` descriptors,
+          // not raw ids. Filter against local queried + dead sets, no
+          // `nodeMap.get(id)` rehydration (audit C-10).
+          if (!queried.has(desc.id) && !dead.has(desc.id)) {
+            newDescriptors.push(desc);
+          }
         }
       }
 
-      // Merge and re-sort shortlist
-      const combined = [...shortlist, ...newNodes];
+      // v0.3.51 (god's-eye audit fix): accumulate latency inline using
+      // `transport.getLatency(peerId)`, the same source-of-truth the
+      // protocol consumes for any other RTT decision. Replaces the
+      // legacy post-walk `roundTripLatency(nodeMap.get(prev),
+      // nodeMap.get(next))` reach (audit C-11). The round wire cost is
+      // the slowest of the parallel sends, so we take the max.
+      let roundLatency = 0;
+      for (let i = 0; i < toQuery.length; i++) {
+        if (settled[i].status !== 'fulfilled') continue;
+        const lat = transport.getLatency(toQuery[i].id);
+        if (lat > 0 && lat > roundLatency) roundLatency = lat;
+      }
+      totalTimeMs += roundLatency;
+
+      // Merge and re-sort shortlist (descriptors only).
+      const combined = [...shortlist, ...newDescriptors];
       const seen = new Set();
       shortlist = combined
-        .filter(n => n && n.alive && !seen.has(n.id) && seen.add(n.id))
+        .filter(d => d && !dead.has(d.id) && !seen.has(d.id) && seen.add(d.id))
         .sort((a, b) => {
-          const da = xorTo(a.id), db = xorTo(b.id);
+          const da = xorTo(a), db = xorTo(b);
           return da < db ? -1 : da > db ? 1 : 0;
         })
         .slice(0, k);
 
       // Termination: stop when no closer node is found after 2 fruitless rounds
-      const newClosest = shortlist.length ? xorTo(shortlist[0].id) : (useGeo ? 0xffffffff : 0xFFFFFFFFFFFFFFFFn);
+      const newClosest = shortlist.length ? xorTo(shortlist[0]) : (useGeo ? 0xffffffff : 0xFFFFFFFFFFFFFFFFn);
       if (newClosest >= closestDist) {
         if (++noProgressRounds >= this.noProgressLimit) break;
       } else {
@@ -524,37 +595,18 @@ export class KademliaDHT extends DHT {
       }
     }
 
-    // Correct the path terminus to the overall closest node found.
-    // The greedy per-round tracking can leave path[-1] pointing at a node
-    // from a "no-progress" round that ran after the true destination was
-    // already discovered.  shortlist[0] is always the closest node seen.
+    // Correct the path terminus to the overall closest descriptor found.
     if (shortlist.length > 0 && path.length > 1) {
       path[path.length - 1] = shortlist[0].id;
     }
 
-    // Compute total lookup time as the sum of RTTs along the greedy path.
-    // Each RTT is between consecutive nodes on the path (path[i] → path[i+1]),
-    // so only the successful, connected nodes on the actual route contribute.
-    let totalTimeMs = 0;
-    for (let i = 0; i < path.length - 1; i++) {
-      const fromNode = this.nodeMap.get(path[i]);
-      const toNode   = this.nodeMap.get(path[i + 1]);
-      if (fromNode && toNode) {
-        totalTimeMs += roundTripLatency(fromNode, toNode);
-      }
-    }
-
-    // In ID-XOR mode the target IS a real node's ID (receiver.id from the engine).
-    // A lookup truly succeeds only when that exact node is in the final shortlist
-    // (XOR distance 0 is the unique minimum — it can never be beaten or evicted).
-    // If the routing got stuck in a local cluster that doesn't include the target
-    // (e.g. geo8 + web limit routing only through same-cell nodes), the target
-    // will be absent and found = false, accurately reflecting the routing failure.
-    //
-    // In geo-key mode the target is an S2 cell key, not a node ID; any non-empty
-    // result is valid (keep original behaviour).
+    // In ID-XOR mode the target IS a real node's ID (receiver.id from
+    // the engine). A lookup truly succeeds only when that exact id is
+    // in the final shortlist (XOR distance 0 is the unique minimum --
+    // it can never be beaten or evicted). In geo-key mode the target
+    // is an S2 cell key, not a node id; any non-empty result is valid.
     const found = shortlist.length > 0 &&
-      (useGeo || shortlist.some(n => n.id === targetKey));
+      (useGeo || shortlist.some(d => d.id === targetKey));
 
     return {
       path,

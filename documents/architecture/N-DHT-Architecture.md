@@ -224,14 +224,16 @@ The benefit isn't just symmetry; it's that the protocol's emitted events become 
 
 ### 4.4 The remaining coupling is sim-only
 
-After the 15-commit migration the only `nodeMap.get(peerId)` sites in the protocol code are:
+Scope correction (v0.3.51): the migration claim below holds for **NH-1, K-DHT, and G-DHT**. NX-17 still inherits god's-eye routing from the NX-15 → NX-10 → NX-6 lineage and is queued for the same treatment. Earlier neuromorphic variants (NS-1 … NX-15) remain on the legacy god's-eye path and are kept for ablation only. See `documents/red team/protocol-layer-godseye-audit.md` for the per-protocol breakdown.
+
+For NH-1, K-DHT, and G-DHT, the only `nodeMap.get(peerId)` sites in the protocol code are:
 
 - `addNode` / `removeNode` — Engine bookkeeping (creating and destroying simulator nodes)
-- `bootstrapJoin` — the simulator's god's-eye stratified bootstrap, which production replaces with `BootstrapService.bootstrap(sponsor)` followed by stratified self-lookup
-- `lookup(sourceId, …)` — turning the caller's own node id into the local `NeuronNode` that owns the request (V1 only, no V2; production resolves this via the DHT instance owning its own state)
+- `bootstrapJoin` / `buildRoutingTables` — the simulator's god's-eye stratified bootstrap, which production replaces with `BootstrapService.bootstrap(sponsor)` followed by stratified self-lookup
+- `lookup(sourceId, …)` — turning the caller's own node id into the local node that owns the request (self-resolution, no cross-peer reach; production resolves this via the DHT instance owning its own state)
 - `_resolveNode` / shim utilities for AxonManager's hex/Node disambiguation — sim-only
 
-None of these are routing-tick V2 violations (cross-peer state reads). The protocol's central algorithm — the recursive-forwarding `lookup_step` chain — runs entirely on receiver-local state, with every cross-peer access going through the Transport contract.
+None of these are routing-tick cross-peer-state-reads. The protocol's central algorithms — NH-1's recursive-forwarding `lookup_step` chain, K-DHT's iterative parallel FIND_NODE rounds, G-DHT's K-DHT-inheriting lookup — all run entirely on receiver-local state, with every cross-peer access going through the Transport contract.
 
 ---
 
