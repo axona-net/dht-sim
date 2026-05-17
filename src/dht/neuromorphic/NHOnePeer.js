@@ -573,4 +573,288 @@ export class NHOnePeer extends DHT {
     const chosenId = candidates[Math.floor(Math.random() * candidates.length)];
     return { id: chosenId };
   }
+
+  // ─── Routed messaging + pub/sub primitives (Phase 3d–f) ────────────
+  //
+  // These deliver AxonManager's pub/sub on top of NH-1's transport
+  // contract.  Bodies are copied from the engine verbatim; `node` →
+  // `this._node`; the per-peer handler tables continue to live on
+  // `this._engine._routedHandlers` / `_directHandlers` until Phase 4
+  // splits the storage too.  This is intentional: minimising changes
+  // to handler-storage shape during Phase 3 keeps the gate strict.
+
+  /**
+   * K-closest iterative search.  Async; uses parallel
+   * `find_closest_set` RPCs.  Returns BigInt peer ids sorted by XOR
+   * distance to targetId.
+   */
+  async findKClosest(targetId, K = 5, { alpha = 3, maxRounds = 40 } = {}) {
+    const src = this._node;
+    if (!src) return [];
+    const targetBig = topicToBigInt(targetId);
+
+    const distances = new Map();
+    const addCandidate = (peerId) => {
+      if (typeof peerId !== 'bigint' || distances.has(peerId)) return;
+      distances.set(peerId, peerId ^ targetBig);
+    };
+
+    addCandidate(src.id);
+    for (const syn of src.synaptome.values())         addCandidate(syn.peerId);
+    for (const syn of src.incomingSynapses.values())  addCandidate(syn.peerId);
+
+    const visited = new Set();
+    let lastPoolSize = 0;
+    let stableRounds = 0;
+
+    for (let round = 0; round < maxRounds; round++) {
+      const sorted = [...distances.entries()]
+        .sort((a, b) => a[1] < b[1] ? -1 : 1)
+        .map(([peerId]) => peerId);
+      const topK = sorted.slice(0, K);
+      const topKAllVisited = topK.every(p => visited.has(p));
+
+      let toQuery = topK.filter(p => !visited.has(p)).slice(0, alpha);
+      if (toQuery.length < alpha) {
+        const remaining = alpha - toQuery.length;
+        const beyond = sorted
+          .filter(p => !visited.has(p) && !topK.includes(p))
+          .slice(0, remaining);
+        toQuery = toQuery.concat(beyond);
+      }
+      if (toQuery.length === 0) break;
+
+      const probes = toQuery.filter(p => p !== src.id);
+      for (const p of toQuery) visited.add(p);
+
+      if (probes.length > 0) {
+        const settled = await Promise.allSettled(
+          probes.map(peerId =>
+            src.transport.send(peerId, 'find_closest_set',
+              { target: targetBig, K: this._engine._k })
+          )
+        );
+        for (const r of settled) {
+          if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
+          for (const peerId of r.value) addCandidate(peerId);
+        }
+      }
+
+      const grew = distances.size > lastPoolSize;
+      lastPoolSize = distances.size;
+      stableRounds = grew ? 0 : stableRounds + 1;
+      if (topKAllVisited && stableRounds >= 1) break;
+    }
+
+    return [...distances.entries()]
+      .sort((a, b) => a[1] < b[1] ? -1 : 1)
+      .slice(0, K)
+      .map(([peerId]) => peerId);
+  }
+
+  /**
+   * Send a routed message starting from this peer.  Greedy 1-hop or
+   * 2-hop terminal check; dispatches local routed handler; if not
+   * consumed AND not terminal, forwards via route_msg request chain.
+   */
+  async routeMessage(targetId, type, payload, opts = {}) {
+    const originNode = this._node;
+    const originId   = opts.fromId ?? nodeIdToHex(originNode.id);
+    const targetBig  = topicToBigInt(targetId);
+
+    let nextHopId = this._greedyNextHopToward(targetBig);
+    let isTerminal = nextHopId === null;
+    if (isTerminal) {
+      const closer = await this._findCloserInTwoHops(targetBig);
+      if (closer !== null && closer !== originNode.id) {
+        nextHopId  = closer;
+        isTerminal = false;
+      }
+    }
+
+    const result = await this._deliverRouted(type, payload, {
+      fromId:   originId,
+      targetId: targetBig,
+      hopCount: 0,
+      isTerminal,
+      node:     originNode,
+    });
+
+    if (result === 'consumed') {
+      return { consumed: true, atNode: originNode.id, hops: 0 };
+    }
+    if (isTerminal) {
+      return { consumed: false, atNode: originNode.id, hops: 0, terminal: true };
+    }
+
+    try {
+      const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
+        type, payload, targetId: targetBig, hops: 1, originId,
+      });
+      return downstream;
+    } catch {
+      return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
+    }
+  }
+
+  /**
+   * Dispatch a routed message to the local handler for `type`.
+   * Returns the handler's return value (truthy = 'consumed' or other
+   * meaningful response; falsy/throw → 'forward').
+   */
+  async _deliverRouted(type, payload, meta) {
+    const node = this._node;
+    const handlers = this._engine._routedHandlers.get(node);
+    const handler = handlers?.get(type);
+    if (!handler) return 'forward';
+    try {
+      const result = await handler(payload, meta);
+      return result || 'forward';
+    } catch (err) {
+      console.error(`NHOnePeer routed handler error at ${node.id} for '${type}':`, err);
+      return 'forward';
+    }
+  }
+
+  /**
+   * Fire-and-forget direct notification to one peer.  `type` is the
+   * application name; the wire type is `direct_${type}`.
+   */
+  async sendDirect(peerId, type, payload) {
+    const fromNode = this._node;
+    if (!fromNode?.alive || !fromNode.transport) return false;
+    const peerBig = topicToBigInt(peerId);
+    try {
+      const ok = await fromNode.transport.notify(peerBig, `direct_${type}`, payload);
+      return ok !== false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Pick a child to promote as sub-axon — prefer existing high-weight
+   * synaptome children; fall back to XOR-closest existing child.
+   */
+  _pickRecruitPeer(role, meta, subscriberId) {
+    const node = this._node;
+    if (role.children.size === 0) return null;
+    const selfHex   = nodeIdToHex(node.id);
+    const forwarder = meta.fromId;
+    const dead      = node._deadPeers || new Set();
+
+    const synapseWeights = new Map();
+    for (const syn of node.synaptome.values()) {
+      if (dead.has(syn.peerId)) continue;
+      synapseWeights.set(nodeIdToHex(syn.peerId), {
+        weight:  syn.weight,
+        latency: syn.latency ?? syn.latencyMs ?? 0,
+      });
+    }
+
+    let bestChildId = null;
+    let bestScore = -Infinity;
+    for (const childId of role.children.keys()) {
+      if (childId === selfHex)   continue;
+      if (childId === forwarder) continue;
+      const s = synapseWeights.get(childId);
+      if (!s) continue;
+      const score = s.weight * 1_000_000 - s.latency;
+      if (score > bestScore) { bestScore = score; bestChildId = childId; }
+    }
+    if (bestChildId) return bestChildId;
+
+    const subBig = topicToBigInt(subscriberId);
+    let best = null;
+    let bestDist = null;
+    for (const childId of role.children.keys()) {
+      if (childId === selfHex)   continue;
+      if (childId === forwarder) continue;
+      const d = BigInt('0x' + childId) ^ subBig;
+      if (bestDist === null || d < bestDist) { bestDist = d; best = childId; }
+    }
+    return best;
+  }
+
+  /**
+   * Pick an external synaptome peer (not yet a child) to become a new
+   * sub-axon — XOR-closest to the new subscriber's id.
+   */
+  _pickRelayPeer(role, subscriberId, forwarderId) {
+    const node = this._node;
+    if (!node?.alive) return null;
+    const selfHex = nodeIdToHex(node.id);
+    const subBig  = topicToBigInt(subscriberId);
+    const dead    = node._deadPeers || new Set();
+
+    const considered = new Map();
+    for (const syn of node.synaptome.values()) {
+      const peerId = syn.peerId;
+      if (dead.has(peerId)) continue;
+      const hex = nodeIdToHex(peerId);
+      if (hex === selfHex)       continue;
+      if (hex === forwarderId)   continue;
+      if (hex === subscriberId)  continue;
+      if (role.children.has(hex)) continue;
+      if (considered.has(hex))    continue;
+      considered.set(hex, { peerId, distToSub: peerId ^ subBig });
+    }
+    if (considered.size === 0) return null;
+
+    let bestHex = null, bestDist = null;
+    for (const [hex, rec] of considered) {
+      if (bestDist === null || rec.distToSub < bestDist) {
+        bestDist = rec.distToSub;
+        bestHex  = hex;
+      }
+    }
+    return bestHex;
+  }
+
+  /**
+   * Register a routed-message handler for `type`.  Per-peer storage;
+   * engine version still works because engine delegates here.
+   */
+  onRoutedMessage(type, handler) {
+    const node = this._node;
+    let table = this._engine._routedHandlers.get(node);
+    if (!table) { table = new Map(); this._engine._routedHandlers.set(node, table); }
+    table.set(type, handler);
+  }
+
+  /**
+   * Register a direct-message handler for `type`.  Bridges to a
+   * transport.onNotification listener on `direct_${type}`.
+   */
+  onDirectMessage(type, handler) {
+    const node = this._node;
+    let table = this._engine._directHandlers.get(node);
+    if (!table) { table = new Map(); this._engine._directHandlers.set(node, table); }
+    const wireType = `direct_${type}`;
+    if (!table.has(type)) {
+      node.transport.onNotification(wireType, (fromId, payload) => {
+        const h = this._engine._directHandlers.get(node)?.get(type);
+        if (!h) return;
+        const fromHex = (typeof fromId === 'bigint') ? nodeIdToHex(fromId) : fromId;
+        try {
+          h(payload, { fromId: fromHex, type });
+        } catch (err) {
+          console.error(`NHOnePeer direct handler error at ${node.id} for '${type}':`, err);
+        }
+      });
+    }
+    table.set(type, handler);
+  }
+}
+
+// ─── Module-local helpers (mirror NeuromorphicDHTNH1) ────────────────
+
+function topicToBigInt(v) {
+  if (typeof v === 'bigint') return v;
+  return BigInt('0x' + v);
+}
+
+function nodeIdToHex(id) {
+  if (typeof id === 'string') return id;
+  return id.toString(16).padStart(16, '0');
 }

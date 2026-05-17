@@ -1481,10 +1481,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    *   'consumed' — message handled here; do not forward
    *   anything else — message not consumed; keep walking toward target
    */
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer.onRoutedMessage.
   onRoutedMessage(node, type, handler) {
-    let table = this._routedHandlers.get(node);
-    if (!table) { table = new Map(); this._routedHandlers.set(node, table); }
-    table.set(type, handler);
+    return this._peerFor(node).onRoutedMessage(type, handler);
   }
 
   /**
@@ -1498,24 +1498,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    * stored handler, since the notification handler reads the current
    * entry from the table at delivery time.
    */
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer.onDirectMessage.
   onDirectMessage(node, type, handler) {
-    let table = this._directHandlers.get(node);
-    if (!table) { table = new Map(); this._directHandlers.set(node, table); }
-    const wireType = `direct_${type}`;
-    if (!table.has(type)) {
-      // First registration for this type — install the transport bridge.
-      node.transport.onNotification(wireType, (fromId, payload) => {
-        const h = this._directHandlers.get(node)?.get(type);
-        if (!h) return;
-        const fromHex = (typeof fromId === 'bigint') ? nodeIdToHex(fromId) : fromId;
-        try {
-          h(payload, { fromId: fromHex, type });
-        } catch (err) {
-          console.error(`NH-1 direct handler error at ${node.id} for '${type}':`, err);
-        }
-      });
-    }
-    table.set(type, handler);
+    return this._peerFor(node).onDirectMessage(type, handler);
   }
 
   // ── K-closest iterative lookup (used for terminal-globality verification
@@ -1537,75 +1523,12 @@ export class NeuromorphicDHTNH1 extends DHT {
    * gone; `transport.send(peerId, 'find_closest_set', …)` bumps the
    * counter inside the transport adapter under that same per-type key.
    */
-  async findKClosest(sourceNode, targetId, K = 5, { alpha = 3, maxRounds = 40 } = {}) {
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer.findKClosest.
+  async findKClosest(sourceNode, targetId, K = 5, opts = {}) {
     const src = this._resolveNode(sourceNode);
     if (!src) return [];
-    const targetBig = topicToBigInt(targetId);
-
-    /** @type {Map<bigint, bigint>} peerId → distance */
-    const distances = new Map();
-    const addCandidate = (peerId) => {
-      if (typeof peerId !== 'bigint' || distances.has(peerId)) return;
-      distances.set(peerId, peerId ^ targetBig);
-    };
-
-    // Seed: source + own synaptome + own incoming.  All local-state reads.
-    addCandidate(src.id);
-    for (const syn of src.synaptome.values())         addCandidate(syn.peerId);
-    for (const syn of src.incomingSynapses.values())  addCandidate(syn.peerId);
-
-    const visited = new Set();
-    let lastPoolSize = 0;
-    let stableRounds = 0;
-
-    for (let round = 0; round < maxRounds; round++) {
-      const sorted = [...distances.entries()]
-        .sort((a, b) => a[1] < b[1] ? -1 : 1)
-        .map(([peerId]) => peerId);
-      const topK = sorted.slice(0, K);
-      const topKAllVisited = topK.every(p => visited.has(p));
-
-      let toQuery = topK.filter(p => !visited.has(p)).slice(0, alpha);
-      if (toQuery.length < alpha) {
-        const remaining = alpha - toQuery.length;
-        const beyond = sorted
-          .filter(p => !visited.has(p) && !topK.includes(p))
-          .slice(0, remaining);
-        toQuery = toQuery.concat(beyond);
-      }
-      if (toQuery.length === 0) break;
-
-      // Parallel find_closest_set RPCs.  Skip src.id (we don't RPC
-      // ourselves; we already seeded our own synaptome).  Use bucket
-      // size this._k as the per-peer response bound — see v0.66.07
-      // commentary in the prior implementation; bigger response = better
-      // convergence on local 2000km tests.
-      const probes = toQuery.filter(p => p !== src.id);
-      for (const p of toQuery) visited.add(p);
-
-      if (probes.length > 0) {
-        const settled = await Promise.allSettled(
-          probes.map(peerId =>
-            src.transport.send(peerId, 'find_closest_set',
-              { target: targetBig, K: this._k })
-          )
-        );
-        for (const r of settled) {
-          if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
-          for (const peerId of r.value) addCandidate(peerId);
-        }
-      }
-
-      const grew = distances.size > lastPoolSize;
-      lastPoolSize = distances.size;
-      stableRounds = grew ? 0 : stableRounds + 1;
-      if (topKAllVisited && stableRounds >= 1) break;
-    }
-
-    return [...distances.entries()]
-      .sort((a, b) => a[1] < b[1] ? -1 : 1)
-      .slice(0, K)
-      .map(([peerId]) => peerId);
+    return this._peerFor(src).findKClosest(targetId, K, opts);
   }
 
   // ── Greedy single-step routing (used by routeMessage entry) ──────────────
@@ -1675,46 +1598,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    * (Engine.snapshotTrafficLoad consumes msgsByType from the receiver
    * via SimulatedTransport's bumps).
    */
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer.routeMessage.
   async routeMessage(originNode, targetId, type, payload, opts = {}) {
-    const originId  = opts.fromId ?? nodeIdToHex(originNode.id);
-    const targetBig = topicToBigInt(targetId);
-
-    // ── Step 1: origin's own greedy 1-hop / terminal check ──
-    let nextHopId = this._greedyNextHopToward(originNode, targetBig);
-    let isTerminal = nextHopId === null;
-    if (isTerminal) {
-      const closer = await this._findCloserInTwoHops(originNode, targetBig);
-      if (closer !== null && closer !== originNode.id) {
-        nextHopId  = closer;
-        isTerminal = false;
-      }
-    }
-
-    // ── Step 2: dispatch origin's local routed handler ──
-    const result = await this._deliverRouted(originNode, type, payload, {
-      fromId:   originId,
-      targetId: targetBig,
-      hopCount: 0,
-      isTerminal,
-      node:     originNode,
-    });
-
-    if (result === 'consumed') {
-      return { consumed: true, atNode: originNode.id, hops: 0 };
-    }
-    if (isTerminal) {
-      return { consumed: false, atNode: originNode.id, hops: 0, terminal: true };
-    }
-
-    // ── Step 3: forward to first hop via route_msg request chain ──
-    try {
-      const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
-        type, payload, targetId: targetBig, hops: 1, originId,
-      });
-      return downstream;
-    } catch {
-      return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
-    }
+    return this._peerFor(originNode).routeMessage(targetId, type, payload, opts);
   }
 
   /**
@@ -1723,17 +1610,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    * the 'consumed'/'forward' decision reflects the post-await state.
    * Sync handlers still work — `await` over a non-Promise is a no-op.
    */
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._deliverRouted.
   async _deliverRouted(node, type, payload, meta) {
-    const handlers = this._routedHandlers.get(node);
-    const handler = handlers?.get(type);
-    if (!handler) return 'forward';
-    try {
-      const result = await handler(payload, meta);
-      return result || 'forward';
-    } catch (err) {
-      console.error(`NH-1 routed handler error at ${node.id} for '${type}':`, err);
-      return 'forward';
-    }
+    return this._peerFor(node)._deliverRouted(type, payload, meta);
   }
 
   // ── Point-to-point notify ───────────────────────────────────────────────
@@ -1758,15 +1638,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    * `onDirectMessage` as a transport.onNotification bridge, so
    * receiver-side dispatch is also free of nodeMap.
    */
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer.sendDirect.
   async sendDirect(fromNode, peerId, type, payload) {
-    if (!fromNode?.alive || !fromNode.transport) return false;
-    const peerBig = topicToBigInt(peerId);
-    try {
-      const ok = await fromNode.transport.notify(peerBig, `direct_${type}`, payload);
-      return ok !== false;
-    } catch {
-      return false;
-    }
+    return this._peerFor(fromNode).sendDirect(peerId, type, payload);
   }
 
   // ── Recruitment & relay policies (NX-15 / NX-17 parity) ──────────────────
@@ -1777,47 +1652,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    * synapses are LTP-validated as reliable, so the axon backbone sits on
    * proven connections. Falls back to XOR-closest existing child.
    */
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._pickRecruitPeer.
   _pickRecruitPeer(node, role, meta, subscriberId) {
-    if (role.children.size === 0) return null;
-    const selfHex   = nodeIdToHex(node.id);
-    const forwarder = meta.fromId;
-    const dead      = node._deadPeers || new Set();
-
-    // Index synaptome weights by hex peerId for quick lookup.
-    // v0.70.20 (refactor commit 14) — liveness via local `_deadPeers`
-    // Set populated by transport.onPeerDied callbacks; no nodeMap.get.
-    const synapseWeights = new Map();
-    for (const syn of node.synaptome.values()) {
-      if (dead.has(syn.peerId)) continue;
-      synapseWeights.set(nodeIdToHex(syn.peerId), {
-        weight:  syn.weight,
-        latency: syn.latency ?? syn.latencyMs ?? 0,
-      });
-    }
-
-    let bestChildId = null;
-    let bestScore = -Infinity;
-    for (const childId of role.children.keys()) {
-      if (childId === selfHex)   continue;
-      if (childId === forwarder) continue;
-      const s = synapseWeights.get(childId);
-      if (!s) continue;
-      const score = s.weight * 1_000_000 - s.latency;
-      if (score > bestScore) { bestScore = score; bestChildId = childId; }
-    }
-    if (bestChildId) return bestChildId;
-
-    // No synaptome match — fall back to XOR-closest existing child.
-    const subBig = topicToBigInt(subscriberId);
-    let best = null;
-    let bestDist = null;
-    for (const childId of role.children.keys()) {
-      if (childId === selfHex)   continue;
-      if (childId === forwarder) continue;
-      const d = BigInt('0x' + childId) ^ subBig;
-      if (bestDist === null || d < bestDist) { bestDist = d; best = childId; }
-    }
-    return best;
+    return this._peerFor(node)._pickRecruitPeer(role, meta, subscriberId);
   }
 
   /**
@@ -1829,38 +1667,10 @@ export class NeuromorphicDHTNH1 extends DHT {
    * Selection: XOR-closest synaptome peer to the new subscriber's id —
    * cheapest signal of "which direction is this group growing toward."
    */
+  // v0.71.3 (Phase 3 of per-node refactor) — body moved to
+  // NHOnePeer._pickRelayPeer.
   _pickRelayPeer(node, role, subscriberId, forwarderId) {
-    if (!node?.alive) return null;
-    const selfHex = nodeIdToHex(node.id);
-    const subBig  = topicToBigInt(subscriberId);
-    const dead    = node._deadPeers || new Set();
-
-    // v0.70.20 (refactor commit 14) — pure synaptome scan; no
-    // nodeMap.get.  We work in (peerId BigInt, hex) pairs derived
-    // from the local synaptome and skip dead peers via the
-    // transport-driven `_deadPeers` Set.
-    const considered = new Map();   // hexId → { peerId, distToSub }
-    for (const syn of node.synaptome.values()) {
-      const peerId = syn.peerId;
-      if (dead.has(peerId)) continue;
-      const hex = nodeIdToHex(peerId);
-      if (hex === selfHex)       continue;
-      if (hex === forwarderId)   continue;
-      if (hex === subscriberId)  continue;
-      if (role.children.has(hex)) continue;
-      if (considered.has(hex))    continue;
-      considered.set(hex, { peerId, distToSub: peerId ^ subBig });
-    }
-    if (considered.size === 0) return null;
-
-    let bestHex = null, bestDist = null;
-    for (const [hex, rec] of considered) {
-      if (bestDist === null || rec.distToSub < bestDist) {
-        bestDist = rec.distToSub;
-        bestHex  = hex;
-      }
-    }
-    return bestHex;
+    return this._peerFor(node)._pickRelayPeer(role, subscriberId, forwarderId);
   }
 
   // ── Dispose: release pub/sub state along with synaptic state ─────────────
