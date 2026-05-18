@@ -1,18 +1,18 @@
-# Neuromorphic Distributed Hash Table
+# Axona: A Learning-Adaptive DHT and Axonal Pub/Sub
 
-*An N-DHT explainer · v0.3.51 · 2026-05-16 · David A. Smith · YZ.social*
+*An Axona explainer · v0.3.53 · 2026-05-18 · David A. Smith · Axona.net*
 
 > *The technology is shaped by the mission.*
 
 ## The Mission
 
-N-DHT is the engineering substrate for a privacy-first decentralized internet. The protocol is designed for a specific job: to carry the routing and publish/subscribe workload of that internet, on consumer devices, in real browsers, against the actual physics of the network it runs on. Everything else about the design — the architecture, the algorithms, the simulator, the red team, the deployment path, the application analysis — is shaped by that job.
+Axona is the engineering substrate for a privacy-first decentralized internet. The protocol is designed for a specific job: to carry the routing and publish/subscribe workload of that internet, on consumer devices, in real browsers, against the actual physics of the network it runs on. Everything else about the design — the architecture, the algorithms, the simulator, the red team, the deployment path, the application analysis — is shaped by that job.
 
 The job is hard for an unfamiliar reason. The internet of 2026 has no shortage of clever distributed systems, but almost all of them are *distributed underneath, central on top*: a constellation of servers that the user reaches through a single corporate gateway. (The pattern is so common we have stopped noticing it. CDNs, federated identity providers, cloud auth, app stores, the "serverless" frameworks that run on three or four hyperscaler clouds — all examples of distribution-as-implementation-detail sitting under a single point of decision.) A real peer-to-peer internet — one where two strangers can find each other, exchange a message, and route around an outage without asking permission of any intermediary — requires a different kind of substrate. The substrate must be *federation-free at every layer*: addressing, routing, discovery, group communication, eventual delivery under churn.
 
 **A distributed hash table is the addressing layer of that substrate.** Without one, every other peer-to-peer primitive collapses back into a centralized service: there is no way to find the user you want to talk to, no way to discover the file you want to download, no way to subscribe to the channel you want to follow, without somebody telling you where it lives. With one, those operations are mechanical: the network itself routes you to the right peer.
 
-The mission is to build the addressing layer that a real peer-to-peer internet needs. The protocol described here is what that addressing layer looks like.
+The mission is to build the addressing layer that a real peer-to-peer internet needs. **Axona** is what that addressing layer looks like.
 
 ## The Problem: Finding Stuff on a Network Without a Boss
 
@@ -64,7 +64,7 @@ The cost: nodes can lie about where they are. This is a "cooperative trust" assu
 
 ## Idea #2: A Network That Learns Like a Brain
 
-The second idea — neuromorphic routing, which we call **N-DHT** — is the heart of the protocol. It asks a different question:
+The second idea — neuromorphic routing, which puts Axona in the family of **Neuromorphic DHTs (N-DHT)** — is the heart of the protocol. It asks a different question:
 
 **What if, instead of *engineering* shortcuts into the network, the network *learned* its own shortcuts based on which paths actually work?**
 
@@ -106,11 +106,11 @@ Every artificial neural network you've ever heard of — every part of ChatGPT, 
 
 The brain's mechanism translates *literally* to peer-to-peer routing — no metaphor needed.
 
-**NH-1 is the current state-of-the-art N-DHT implementation.** It is the result of a long sequence of experiments (NX-1 through NX-17) collapsing into twelve rules and twelve parameters governed by a single biology-derived equation. When this document refers to a specific number — a parameter value, a measured benchmark, a rule count — it is a number from NH-1. When it refers to the family of neuromorphic routing protocols generically, it says **N-DHT**.
+**NH-1 is the current Axona implementation** — a learning-adaptive DHT in the N-DHT (Neuromorphic DHT) family. It is the result of a long sequence of experiments (NX-1 through NX-17) collapsing into twelve rules and twelve parameters governed by a single biology-derived equation. When this document refers to a specific number — a parameter value, a measured benchmark, a rule count — it is a number from NH-1, the current implementation. When it refers to the broader family of neuromorphic routing protocols, it says **N-DHT**. When it refers to the protocol itself — addressing, routing, pub/sub semantics, deployment artifact — it says **Axona**.
 
-The mapping from neurons to NH-1's routing logic:
+The mapping from neurons to Axona's routing logic, as embodied in NH-1:
 
-| In the brain... | In NH-1... |
+| In the brain... | In Axona (NH-1)... |
 |---|---|
 | A synapse (neural connection) | A connection to a peer |
 | Synaptic strength (weight 0 to 1) | A learned weight on each connection |
@@ -119,11 +119,11 @@ The mapping from neurons to NH-1's routing logic:
 | Synaptic tagging (protection window) | Recently used connections are protected for a window of time |
 | Pruning unused connections | The lowest-scoring connection gets evicted when a new one wants in |
 
-That is what NH-1 *is*: a routing system where every connection has a weight that goes up when used and decays when not. The network's "memory" is its routing table, and the routing table evolves into whatever shape best serves the actual traffic.
+That is what Axona's NH-1 implementation *is*: a routing system where every connection has a weight that goes up when used and decays when not. The network's "memory" is its routing table, and the routing table evolves into whatever shape best serves the actual traffic.
 
 ### The Vitality Function
 
-The core of NH-1 is a single equation that scores every connection:
+The core of Axona's neuromorphic routing is a single equation that scores every connection:
 
 > **vitality = weight × recency**
 
@@ -145,9 +145,9 @@ NH-1 replaces all of that with the single vitality function plus **12 rules and 
 
 ## The Five Operations
 
-Every behavior in N-DHT falls into one of five categories — and the categories mirror how *any* adaptive system works:
+Every behavior in Axona falls into one of five categories — and the categories mirror how *any* adaptive system works:
 
-**1. NAVIGATE** — pick the next hop for a lookup. N-DHT scores each candidate by combining XOR distance progress, learned weight, and observed latency. The latency factor halves the score every 100 ms — so a peer that's mathematically a *bit* further but physically a *lot* closer wins.
+**1. NAVIGATE** — pick the next hop for a lookup. Axona scores each candidate by combining XOR distance progress, learned weight, and observed latency. The latency factor halves the score every 100 ms — so a peer that's mathematically a *bit* further but physically a *lot* closer wins.
 
 **2. LEARN** — strengthen what works. Four learning mechanisms run on every successful lookup:
 
@@ -158,7 +158,7 @@ Every behavior in N-DHT falls into one of five categories — and the categories
 
 **3. FORGET** — decay everything that isn't reinforced; evict by vitality.
 
-**4. EXPLORE** — inject occasional randomness. A purely greedy router would lock onto the first decent shortcut and never find better ones. N-DHT has two exploration tricks: a "temperature" that decays over time but spikes when something breaks (heat up when surprised, cool down when stable), and an "epsilon-greedy" rule that picks a random first hop 5% of the time, just to keep options alive.
+**4. EXPLORE** — inject occasional randomness. A purely greedy router would lock onto the first decent shortcut and never find better ones. Axona has two exploration tricks: a "temperature" that decays over time but spikes when something breaks (heat up when surprised, cool down when stable), and an "epsilon-greedy" rule that picks a random first hop 5% of the time, just to keep options alive.
 
 **5. STRUCTURE** — bootstrap and maintain the basic shape of the network when new nodes join.
 
@@ -170,7 +170,7 @@ A real peer-to-peer network needs more than just "find the node holding key X." 
 
 This is publish/subscribe, or "pub/sub." Think of how YouTube notifies subscribers of a new video — except without YouTube being in the middle.
 
-In neuroscience, the *output* of a neuron — the long branching cable that delivers signals to many downstream targets — is called an **axon**. N-DHT builds axonal delivery using a few simple rules:
+In neuroscience, the *output* of a neuron — the long branching cable that delivers signals to many downstream targets — is called an **axon**. Axona builds axonal delivery using a few simple rules — and it is precisely these axonal pub/sub primitives that the protocol takes its name from:
 
 **Topic identity.** Every topic has a 64-bit ID, computed offline by anyone who knows the topic. The top 8 bits are the publisher's geographic prefix (the same S2 cell scheme used for node IDs); the bottom 56 bits are a SHA-256 of the topic name. Publisher and subscriber compute the same ID without coordinating — no central registry.
 
@@ -196,7 +196,7 @@ The proof is geometric. Each hop in a DHT covers half the remaining distance. So
 
 For two decades, no published DHT had been measured at this floor. The best implementations got to maybe 2× the floor.
 
-NH-1's predecessor, NX-17, hits **1.16× the floor** at 25,000 nodes. NH-1 hits **1.27×**. They sit at the theoretical limit. The remaining ~20% overhead is structural — they take about 4 to 5 hops where an ideal protocol would take 3, and each "extra" hop costs about δ/2, exactly as the geometric series predicts.
+Axona's NH-1 implementation hits **1.27× the floor** at 25,000 nodes. Its research-grade predecessor, NX-17, hits **1.16×**. Both sit at the theoretical limit. The remaining ~20% overhead is structural — they take about 4 to 5 hops where an ideal protocol would take 3, and each "extra" hop costs about δ/2, exactly as the geometric series predicts.
 
 For comparison, plain Kademlia *gets worse* as the network grows: 2.01× the floor at 5,000 nodes, 2.65× at 50,000. It scales the wrong way.
 
@@ -230,7 +230,7 @@ The simulator is the lab — fifty thousand simulated peers in a single browser 
 
 The trick is keeping two things separate that everyone *wants* to merge: **the protocol** (the rules of routing — AP scoring, hop caching, vitality, axonal trees) and **the network** (the actual machinery that moves bytes between machines). If you tangle them together, the simulator becomes useless the moment you deploy, because the protocol code was wired into a fake network. If you keep them apart, the simulator becomes the deployment vehicle: same protocol, different network underneath.
 
-N-DHT keeps them apart with **two contracts**.
+Axona keeps them apart with **two contracts**.
 
 The first contract — call it the **DHT contract** — is what the application above sees. An app like a chat client doesn't care how routing works internally; it just wants to *do things*. So the DHT exposes eight verbs: `start`, `stop`, `join`, `leave` (lifecycle); `lookup`, `subscribe`, `unsubscribe`, `publish` (the actual operations); plus `getMetrics`, `getSynaptome`, and `onEvent` for telemetry — a way for the application to *watch* what the protocol is doing without being able to mess with it.
 
@@ -240,13 +240,13 @@ The protocol — the routing logic, the learning rules, all the brain-inspired m
 
 That last point is what matters. When the simulator says "NH-1 takes about 5 hops on average to find a target in a 25,000-node network," that number isn't a simulator artifact. It's a property of the protocol code, which is the same code that will run when this gets deployed. The Transport changes; the protocol doesn't. The simulator's hop counts, latency curves, churn-resilience numbers — they all transfer to the real internet because the routing decisions that produce those numbers are made in code that doesn't know it's being simulated.
 
-The legacy version of N-DHT did *not* have this property. The simulator code was god-like — it could reach into any node's internal state and read it, because they were all in the same process. The first version of the protocol exploited that, because of course it did. Then we spent fifteen commits unbinding the protocol from the god's-eye view: every cross-peer read had to go through the Transport contract, every liveness check had to come from a real heartbeat, every routing decision had to be made by the peer that owns the data, not by the source of the lookup. By the end, the only places the protocol still touches the global node-map are sim-only orchestration — the simulator's equivalent of "spin up a node" and "destroy a node," which production replaces with operating-system-level process startup and shutdown.
+An earlier version of Axona did *not* have this property. The simulator code was god-like — it could reach into any node's internal state and read it, because they were all in the same process. The first version of the protocol exploited that, because of course it did. Then we spent fifteen commits unbinding the protocol from the god's-eye view: every cross-peer read had to go through the Transport contract, every liveness check had to come from a real heartbeat, every routing decision had to be made by the peer that owns the data, not by the source of the lookup. By the end, the only places the protocol still touches the global node-map are sim-only orchestration — the simulator's equivalent of "spin up a node" and "destroy a node," which production replaces with operating-system-level process startup and shutdown.
 
 The benchmark check at the end of that fifteen-commit pass: 25,000 simulated nodes, before and after. NH-1 came out within five percent on hop counts and one percent on latency — the small drift upward is the architecturally-honest cost of letting each peer make its own decisions instead of having the source orchestrate the walk. The other protocols (Kademlia, G-DHT, NX-17) came out within one percent across the board.
 
-So the simulator is the deployment vehicle, and the plumbing on the other side now exists. A production Transport built on WebRTC data channels — `axona-peer`, the browser-resident node — runs at <https://axona.net>. A signaling broker — `axona-bridge` — handles the WebRTC offer/answer exchange that two peers behind NATs need to find each other; it runs at <https://bridge.axona.net> and is interchangeable (any operator can stand one up, and a federated mesh of them is on the roadmap). The cold-start problem — finding your first peer when you've never been on the network before — resolves through any of three `BootstrapEndpoint` variants: a rendezvous URL with a signed manifest, a QR-code-pasted pairing string for direct device-to-device pairing, or an in-process simulator pointer. Once bootstrap returns one open channel, the routing logic is unchanged — the same `lookup_step` chain that the simulator runs.
+So the simulator is the deployment vehicle, and the plumbing on the other side now exists. A production Transport built on WebRTC data channels — `axona-peer`, the browser-resident Axona node — runs at <https://axona.net>. A signaling broker — `axona-bridge` — handles the WebRTC offer/answer exchange that two peers behind NATs need to find each other; it runs at <https://bridge.axona.net> and is interchangeable (any operator can stand one up, and a federated mesh of them is on the roadmap). The cold-start problem — finding your first peer when you've never been on the network before — resolves through any of three `BootstrapEndpoint` variants: a rendezvous URL with a signed manifest, a QR-code-pasted pairing string for direct device-to-device pairing, or an in-process simulator pointer. Once bootstrap returns one open channel, the routing logic is unchanged — the same `lookup_step` chain that the simulator runs.
 
-The product name for this whole stack — the peer, the bridge, the protocol, the SDK that ships them to applications — is **Axona**. The protocol is N-DHT; the network of nodes running it is Axona. The first application running on it in production is `civildefense.io`, a tap-to-report incident map built in weeks because the substrate primitives (signed posts, geographic locality, 24-hour expiry, anonymous P2P) inherit directly from this protocol layer. Source for the three live components: <https://github.com/axona-net/axona-peer>, <https://github.com/axona-net/axona-bridge>, <https://github.com/axona-net/dht-sim>.
+**Naming, once and clearly.** *Axona* is the protocol — the addressing, routing, and pub/sub layer described here, and the deployed network running it. *N-DHT* (Neuromorphic DHT) is the family of learning-adaptive DHT designs Axona inherits from. *NH-1* is the current Axona implementation; the simulator's quoted numbers are NH-1 numbers. The first application running on Axona in production is `civildefense.io`, a tap-to-report incident map built in weeks because the substrate primitives (signed posts, geographic locality, 24-hour expiry, anonymous P2P) inherit directly from this protocol layer. Source for the three live components: <https://github.com/axona-net/axona-peer>, <https://github.com/axona-net/axona-bridge>, <https://github.com/axona-net/dht-sim>.
 
 ## The Honest Footnotes
 
@@ -256,7 +256,7 @@ The simulator runs about 25,000 lines of JavaScript code modeling the network, b
 
 - **Connection setup time.** Real WebRTC connections take 1.5–3 seconds to negotiate. The simulator treats them as instant, so real-world recovery from partitions will be slower than the simulator suggests.
 - **Timeout windows.** Real RPCs to dead nodes stall for seconds before failing. The simulator detects death instantly.
-- **Bandwidth saturation.** Initially feared as a *success-disaster* failure mode for adaptive routing — that AP scoring's preference for fast peers might funnel traffic onto a few overloaded nodes, oscillating as they collapse and recover. Recent simulations measure the per-node traffic distribution directly and the result is the opposite: at every tested scale (5K–50K nodes), N-DHT distributes load broadly across the population while plain Kademlia and G-DHT concentrate it. At 50,000 nodes, *zero* N-DHT nodes process more than 100× the network mean traffic; K-DHT produces 56 such nodes, G-DHT produces 62. Bandwidth concentration is much less of an issue for N-DHT than for K-DHT — not a non-issue, but not the deploy blocker first feared.
+- **Bandwidth saturation.** Initially feared as a *success-disaster* failure mode for adaptive routing — that AP scoring's preference for fast peers might funnel traffic onto a few overloaded nodes, oscillating as they collapse and recover. Recent simulations measure the per-node traffic distribution directly and the result is the opposite: at every tested scale (5K–50K nodes), Axona distributes load broadly across the population while plain Kademlia and G-DHT concentrate it. At 50,000 nodes, *zero* Axona nodes process more than 100× the network mean traffic; K-DHT produces 56 such nodes, G-DHT produces 62. Bandwidth concentration is much less of an issue for Axona than for K-DHT — not a non-issue, but not the deploy blocker first feared.
 - **Latency jitter.** Real round-trip times vary by ±30% from queuing and congestion. The simulator's latencies are clean and monotone.
 
 These get called out in a separate red-team analysis. The protocol's measured results show **the brain working perfectly**; the *body* — actually deploying it on real internet conditions — still needs work.
@@ -265,7 +265,7 @@ These get called out in a separate red-team analysis. The protocol's measured re
 
 The most interesting future direction is **metaplasticity** — plasticity of plasticity. In real brains, the rules governing learning *themselves* change based on the brain's activity level. A neuron that's been very active becomes harder to strengthen further (otherwise everything saturates). A neuron that's been quiet becomes easier. The learning rules adapt.
 
-NH-1's parameters — decay rate, protection window, exploration rate — are currently hand-picked constants. A metaplastic version would let the network self-tune them based on local conditions. A peer in a stable region would adapt slowly. A peer in a high-churn region would adapt aggressively. The user would set one knob — "I want my lookup failure rate below 1%" — and the network would tune itself to hit it.
+Axona's parameters in NH-1 — decay rate, protection window, exploration rate — are currently hand-picked constants. A metaplastic version would let the network self-tune them based on local conditions. A peer in a stable region would adapt slowly. A peer in a high-churn region would adapt aggressively. The user would set one knob — "I want my lookup failure rate below 1%" — and the network would tune itself to hit it.
 
 That's the next layer of brain-inspired self-organization, and the natural endpoint of the path the protocol lays out.
 

@@ -3,8 +3,8 @@ marp: true
 theme: default
 size: 16:9
 paginate: true
-header: "N-DHT"
-footer: "v0.3.52 · sim v0.70.22 · 2026-05-18"
+header: "Axona"
+footer: "v0.3.53 · sim v0.70.22 · 2026-05-18"
 style: |
   section {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -53,7 +53,7 @@ style: |
 
 <!-- _class: title -->
 
-# N-DHT
+# Axona
 
 ## A Learning-Adaptive Distributed Hash Table
 ## with Axonal Publish-Subscribe
@@ -64,7 +64,7 @@ style: |
 
 <br>
 
-**David A Smith** · [YZ.social](https://YZ.social)
+**David A Smith** · [Axona.net](https://Axona.net)
 davidasmith@gmail.com
 
 <br>
@@ -107,7 +107,7 @@ A **distributed hash table** is the foundation for finding *anything* in a decen
 
 **Why a next generation now:**
 
-The systems above were designed for one workload at a time — file-sharing, blockchain peer discovery, content addressing — on networks of stable nodes. **NH-1 targets a different deployment**: heterogeneous device classes (browser to server), high churn, integrated pub/sub, and locality awareness as a first-class property of routing rather than a layered afterthought.
+The systems above were designed for one workload at a time — file-sharing, blockchain peer discovery, content addressing — on networks of stable nodes. **Axona targets a different deployment**: heterogeneous device classes (browser to server), high churn, integrated pub/sub, and locality awareness as a first-class property of routing rather than a layered afterthought.
 
 <span class="callout">The next-generation DHT is not "Kademlia plus locality." It is a routing fabric that **adapts** — that learns from the traffic it carries and survives the network it actually lives on.</span>
 
@@ -133,7 +133,7 @@ The brain and a DHT face the **same engineering problem**: a node with a fixed b
 
 The intuitive summary, from Donald Hebb's *Organization of Behavior* (1949):
 
-<span class="callout">**"Neurons that fire together, wire together."**<br>This is the **Hebbian rule** — and it's what every weight in every artificial neural network ultimately abstracts. The Neuromorphic DHT applies it not to perception, but to *routing*.</span>
+<span class="callout">**"Neurons that fire together, wire together."**<br>This is the **Hebbian rule** — and it's what every weight in every artificial neural network ultimately abstracts. Axona, a Neuromorphic DHT (N-DHT), applies it not to perception, but to *routing*.</span>
 
 ---
 
@@ -143,7 +143,7 @@ The translation is direct, not metaphorical. The brain and a peer-to-peer overla
 
 <br>
 
-| Neuroscience | N-DHT |
+| Neuroscience | Axona (NH-1) |
 |---|---|
 | **Synapse** — a connection between neurons | A peer entry in the routing table (`Synapse` class) |
 | **Synaptic weight** — readiness to fire next time | `weight ∈ [0, 1]` |
@@ -153,17 +153,17 @@ The translation is direct, not metaphorical. The brain and a peer-to-peer overla
 | **Synaptic tagging** (Frey & Morris 1997) — recently potentiated synapses are protected from overwriting | NH-1's `inertiaDuration` epochs prevent eviction of recently reinforced synapses |
 | **Pruning** — neurons with weak / unused connections lose them | `_addByVitality` evicts the lowest-vitality (`weight × recency`) edge to make room |
 
-<span class="callout">**The N-DHT is the Hebbian rule applied to overlay routing.** Every "weight," every "synapse," every "potentiation" in this deck refers to a precise, measurable mechanism in the source code — see *NeuronNode.js*, *Synapse.js*, and the `_reinforceWave` / `_addByVitality` methods that implement LTP and pruning directly.</span>
+<span class="callout">**Axona is the Hebbian rule applied to overlay routing.** Every "weight," every "synapse," every "potentiation" in this deck refers to a precise, measurable mechanism in the source code — see *NeuronNode.js*, *Synapse.js*, and the `_reinforceWave` / `_addByVitality` methods that implement LTP and pruning directly.</span>
 
 ---
 
-## The Neuromorphic DHT — how it differs
+## Axona — how it differs
 
 Traditional DHTs (Kademlia, Pastry, Tapestry) treat the routing table as a **static data structure**: fixed buckets, one rule for replacement, no awareness of the traffic flowing through. They were designed in 2001-2002 for stable nodes — and they do not adapt to the network they live in.
 
-The **Neuromorphic DHT** treats every peer as a *synapse*: a learnable edge with a weight that grows with successful traffic (LTP) and decays without it (LTD). Routing consults those weights. Eviction picks the least-vital edge. The table changes as the network changes.
+**Axona** is a Neuromorphic DHT (N-DHT): every peer is a *synapse* — a learnable edge with a weight that grows with successful traffic (LTP) and decays without it (LTD). Routing consults those weights. Eviction picks the least-vital edge. The table changes as the network changes.
 
-| | Traditional DHT | Neuromorphic DHT |
+| | Traditional DHT | Axona (N-DHT) |
 |---|---|---|
 | Routing table | Fixed K-bucket per stratum | Weighted **synaptome** *(the per-node set of weighted outgoing edges)* |
 | Edge state | Live / dead | Weight ∈ [0, 1], recency, locked-on-use |
@@ -199,7 +199,7 @@ The trade is "fixed and analytical" → "adaptive and empirical". The whitepaper
 
 <br>
 
-<span class="callout">This is the architectural commitment NH-1 inherits from the start. The whole DHT exists to make this delivery primitive viable.</span>
+<span class="callout">This is the architectural commitment Axona inherits from the start. The whole DHT exists to make this delivery primitive viable.</span>
 
 ---
 
@@ -260,12 +260,12 @@ This work spans DHT engineering, reinforcement-learning ideas, and neuroscience.
 
 | Term | Domain | One-line definition |
 |---|---|---|
-| **Synapse** | Neuro → N-DHT | One directed *outgoing* routing edge with a learned weight ∈ [0, 1] |
-| **Synaptome** | Neuro → N-DHT | The full set of outgoing synapses at a node — bounded at **50** |
-| **Neuron** | Neuro → N-DHT | A node: synaptome + temperature + message handlers |
-| **Axon** | Neuro → N-DHT | A directed delivery tree for one pub/sub topic, grown by routed subscribe |
-| **Vitality** | N-DHT | The unified `weight × recency` score that drives every admission and eviction decision. See *FORGET* |
-| **AP score** *(Action Potential)* | N-DHT | Learned-weight ranking on candidate next-hops — combines XOR progress, weight, and latency. See *NAVIGATE* |
+| **Synapse** | Neuro → Axona | One directed *outgoing* routing edge with a learned weight ∈ [0, 1] |
+| **Synaptome** | Neuro → Axona | The full set of outgoing synapses at a node — bounded at **50** |
+| **Neuron** | Neuro → Axona | A node: synaptome + temperature + message handlers |
+| **Axon** | Neuro → Axona | A directed delivery tree for one pub/sub topic, grown by routed subscribe |
+| **Vitality** | Axona | The unified `weight × recency` score that drives every admission and eviction decision. See *FORGET* |
+| **AP score** *(Action Potential)* | Axona | Learned-weight ranking on candidate next-hops — combines XOR progress, weight, and latency. See *NAVIGATE* |
 | **K-bucket** | DHT (Kademlia) | Per-stratum routing-table slot, holding up to K=20 peers at a given XOR distance |
 | **XOR distance** | DHT | The Kademlia metric `d(a,b) = a ⊕ b` — symmetric, halving-friendly |
 | **Stratum** | DHT | One XOR-distance level. Stratum *b* = peers whose IDs first differ from yours at bit *b* |
@@ -288,24 +288,24 @@ We benchmark four DHTs at 25 K nodes under identical conditions. Each builds on 
 | **K-DHT** (Kademlia, 2002) | XOR distance metric, K-buckets, α-parallel lookup | — |
 | **G-DHT** (geographic, this work, 2025) | S2 cell prefix in node IDs ⇒ regional locality | K-DHT |
 | **NX-17** (predecessor state of the art, **SOTA**) | 18 specialized rules, peak performance under tight cap | G-DHT *(via NX-1 … NX-15)* |
-| **NH-1** (this work, 2026) | Vitality-driven synaptome, unified admission gate | **NX-17** *(consolidation)* |
+| **Axona / NH-1** (this work, 2026) | Vitality-driven synaptome, unified admission gate | **NX-17** *(consolidation)* |
 
 <br>
 
-NH-1 is *not* a fresh parallel design — it is the result of a careful analysis of NX-17 and every protocol before it. Each NX-17 rule was studied for what it does, why it was added, and whether its work could be folded into a smaller surface area.
+Axona's current implementation, NH-1, is *not* a fresh parallel design — it is the result of a careful analysis of NX-17 and every protocol before it. Each NX-17 rule was studied for what it does, why it was added, and whether its work could be folded into a smaller surface area.
 
 - **NX-17** carries the lineage: 18 specialized rules, 44 parameters, ~2300 lines.
-- **NH-1** consolidates that lineage: 12 rules, 12 parameters, ~270 lines — every admission decision through a single vitality score.
+- **NH-1** consolidates that lineage into the form Axona ships: 12 rules, 12 parameters, ~270 lines — every admission decision through a single vitality score.
 
 <br>
 
-<span class="callout">We selected NH-1 as the deployment target for its **maintainability and understandability**. We continue to use NX-17 as the reference benchmark — the bar that NH-1 should approach, and that future work should match or surpass.</span>
+<span class="callout">We selected NH-1 as the deployment target for Axona based on its **maintainability and understandability**. We continue to use NX-17 as the reference benchmark — the bar that NH-1 should approach, and that future work should match or surpass.</span>
 
 ---
 
 ## K-DHT — Kademlia, the foundation
 
-**Kademlia** (Maymounkov & Mazières, IPTPS 2002) is the routing substrate **every NH-1 node still uses at its bottom layer**. Full mechanism + N-DHT comparison appears later in the deck (*Kademlia vs N-DHT* in the comparison section).
+**Kademlia** (Maymounkov & Mazières, IPTPS 2002) is the routing substrate **every Axona node still uses at its bottom layer**. Full mechanism + Axona comparison appears later in the deck (*Kademlia vs Axona* in the comparison section).
 
 <br>
 
@@ -321,7 +321,7 @@ NH-1 is *not* a fresh parallel design — it is the result of a careful analysis
 
 > **Average message time ≈ 20 hops × 100 ms ≈ 2 seconds (at 1 M nodes).**
 
-Too slow for real-time applications. *This is the gap N-DHT exists to close.*
+Too slow for real-time applications. *This is the gap Axona exists to close.*
 
 <br>
 
@@ -332,7 +332,7 @@ Too slow for real-time applications. *This is the gap N-DHT exists to close.*
 | Lazy churn repair | Broken edges persist until next bucket refresh |
 | Broadcast cost O(audience) | Each pub/sub recipient reached by an independent lookup |
 
-<span class="callout">The data structure is frozen. The network is not. K-buckets were a 2002 answer to "what's a stable routing table?" — N-DHT keeps the structure and replaces the eviction policy with vitality.</span>
+<span class="callout">The data structure is frozen. The network is not. K-buckets were a 2002 answer to "what's a stable routing table?" — Axona keeps the structure and replaces the eviction policy with vitality.</span>
 
 ---
 
@@ -402,7 +402,7 @@ The S2 prefix in a node ID is **self-declared**. A node can claim any prefix it 
 
 ---
 
-## NH-1 — our chosen design
+## Axona / NH-1 — our chosen design
 
 **The change:** every peer becomes a *synapse* with a learnable weight. The routing table is no longer fixed K-buckets — it is a **synaptome** that adapts to traffic, prunes by vitality, and grows via learning rules (LTP, triadic closure, hop caching).
 
@@ -429,7 +429,7 @@ The S2 prefix in a node ID is **self-declared**. A node can claim any prefix it 
 
 <br>
 
-<span class="muted">**Lineage note.** NH-1's synaptome **consolidates Pastry's three-tier routing state** (Rowstron & Druschel 2001) into a single vitality-scored set: high-vitality entries play the role of Pastry's **leaf set** (terminal-hop core), mid-vitality entries play the role of the **routing table R** (XOR-stratum coverage), low-vitality and 2-hop-sample entries play the role of the **neighborhood set M** (annealing replacement pool). The roles persist; the bookkeeping is unified.</span>
+<span class="muted">**Lineage note.** Axona's synaptome **consolidates Pastry's three-tier routing state** (Rowstron & Druschel 2001) into a single vitality-scored set: high-vitality entries play the role of Pastry's **leaf set** (terminal-hop core), mid-vitality entries play the role of the **routing table R** (XOR-stratum coverage), low-vitality and 2-hop-sample entries play the role of the **neighborhood set M** (annealing replacement pool). The roles persist; the bookkeeping is unified.</span>
 
 ---
 
@@ -453,9 +453,9 @@ It carries 18 specialized rules, 44 parameters, and ~2300 lines. Each rule earne
 
 ---
 
-## NH-1 in one slide — five operations, one vitality model
+## Axona in one slide — five operations, one vitality model
 
-NH-1 collapses the entire protocol into **five operations**, each scored by a unified vitality function.
+Axona's NH-1 implementation collapses the entire protocol into **five operations**, each scored by a unified vitality function.
 
 | Operation | What it does |
 |---|---|
@@ -477,7 +477,7 @@ A single `_addByVitality()` admission gate replaces stratified eviction, two-tie
 
 ## What we call vitality
 
-NH-1 admits and evicts every synapse via one scalar:
+Axona's NH-1 admits and evicts every synapse via one scalar:
 
 ```
 vitality(syn) = weight × recency(syn)
@@ -499,7 +499,7 @@ The two factors are conventional individually. Hebbian potentiation (Hebb, 1949)
 
 ---
 
-## NH-1 rules — the full set, by operation
+## Axona / NH-1 rules — the full set, by operation
 
 | # | Rule | Operation | Why this rule |
 |---|---|---|---|
@@ -616,7 +616,7 @@ This single function replaces:
 
 Five requirements — the rest of this section is the answer to each.
 
-| # | Requirement | Why hard on a DHT | NH-1's answer |
+| # | Requirement | Why hard on a DHT | Axona's answer |
 |---:|---|---|---|
 | 1 | **Reliable delivery** at steady state | A naïve broadcast = N independent lookups → O(N²) cost | Routed axonal tree, fan-out via direct sends |
 | 2 | **Churn resilience** | K-closest sets drift; publisher/subscriber views diverge | Routed re-subscribe; tree heals on every refresh |
@@ -624,7 +624,7 @@ Five requirements — the rest of this section is the answer to each.
 | 4 | **ID stability** | Topic identity can't change as the membership churns | `topicId = publisher.cellPrefix(8b) ‖ hash₅₆(name)` — fixed at publisher's S2 cell |
 | 5 | **Recovery from missed messages** | Subscribers reconnecting want history, not just future messages | Bounded replay cache at every relay; replay piggy-backs on subscribe |
 
-<span class="callout">The NH-1 pub/sub stack is a direct, point-by-point response to these five constraints. The next four slides show the mechanism for each.</span>
+<span class="callout">Axona's pub/sub stack is a direct, point-by-point response to these five constraints. The next four slides show the mechanism for each.</span>
 
 ---
 
@@ -642,7 +642,7 @@ Five requirements — the rest of this section is the answer to each.
 
 <br>
 
-**The four NX-17 fixes that work** (and that NH-1 inherits)
+**The four NX-17 fixes that work** (and that Axona inherits)
 
 1. **Publisher-prefix topic IDs** — `topicId = publisher.cellPrefix(8b) ‖ hash₅₆(name)`. Publisher and subscribers derive the same root deterministically. No negotiation, no drift.
 2. **Terminal globality check** — when greedy routing thinks it has reached the topic, do one `findKClosest(topicId, 1)` to confirm no globally-closer peer exists. Without this, two subscribers can elect different roots.
@@ -657,7 +657,7 @@ Five requirements — the rest of this section is the answer to each.
 
 **Why the name?** In a biological neuron, the **axon** is the *output* projection — a single fibre that branches, branches again, and finally synapses onto many downstream targets. Information flows *outward* from one source to many recipients along this branching tree. That is exactly the shape of a healthy publisher-to-subscribers fan-out.
 
-**The analogy is structural, not poetic.** A pub/sub topic in NH-1 is rooted at one node (the topic's "soma"). Direct subscribers attach to the root; when the root has too many children, it delegates a sub-axon (a "branch") that takes over a subset of the subscribers. The tree grows toward the population that wants the topic — just as a real axon grows toward its targets during development.
+**The analogy is structural, not poetic.** A pub/sub topic in Axona is rooted at one node (the topic's "soma"). Direct subscribers attach to the root; when the root has too many children, it delegates a sub-axon (a "branch") that takes over a subset of the subscribers. The tree grows toward the population that wants the topic — just as a real axon grows toward its targets during development.
 
 ---
 
@@ -679,7 +679,7 @@ Five requirements — the rest of this section is the answer to each.
 
 <br>
 
-<span class="muted">**Lineage.** This mechanism is structurally **SCRIBE** (Castro, Druschel, Kermarrec, Rowstron — JSAC 2002, layered on Pastry): routed subscribe + reverse-path forwarding multicast tree. NH-1 inherits the recipe and adds two refinements — *adaptive re-subscribe* as the liveness primitive (no separate ping) and *batch adoption on overflow* (axon trees grow in O(1) DHT operations rather than per-subscriber). Bayeux (Zhuang et al. 2001, on Tapestry) is the analogous mechanism in the OceanStore family.</span>
+<span class="muted">**Lineage.** This mechanism is structurally **SCRIBE** (Castro, Druschel, Kermarrec, Rowstron — JSAC 2002, layered on Pastry): routed subscribe + reverse-path forwarding multicast tree. Axona inherits the recipe and adds two refinements — *adaptive re-subscribe* as the liveness primitive (no separate ping) and *batch adoption on overflow* (axon trees grow in O(1) DHT operations rather than per-subscriber). Bayeux (Zhuang et al. 2001, on Tapestry) is the analogous mechanism in the OceanStore family.</span>
 
 ---
 
@@ -699,19 +699,19 @@ The decentralized axon tree means every re-publish node — not just the publish
 
 <br>
 
-<span class="callout">A subscribe message in NH-1 is simultaneously a liveness probe, a tree-attach request, and a request for missed history. Three jobs, one envelope — that's the axonal healing model.</span>
+<span class="callout">A subscribe message in Axona is simultaneously a liveness probe, a tree-attach request, and a request for missed history. Three jobs, one envelope — that's the axonal healing model.</span>
 
 ---
 
 ## Production refinements — three patches from real-network deployment
 
-The textbook K-closest model passed the simulator. Live deployment (the **Axona** project) surfaced three corner cases:
+The textbook K-closest model passed the simulator. Live deployment of **Axona** surfaced three corner cases:
 
 **Lazy-axon promotion.** Upstream protocol *dropped* publishes that landed at a K-closest node which didn't yet hold a role → publish-before-subscribe lost messages. **Fix:** any K-closest receiver promotes itself on first publish and seeds the replay cache. Empty roles GC after `rootGraceMs` (60 s) so cost stays bounded.
 
 **Self-replay (lastSeenTs override).** When a node receives a publish-k it advances its `_lastSeenTsByTopic` at the *network* layer. If that same node later subscribes, the cache filter `m.publishTs > lastSeenTs` excludes everything — even though the messages sit in its own cache. **Fix:** when `subscriberId === self`, replay the full cache directly into the local handler, ignoring `lastSeenTs`.
 
-**Multi-hop sendDirect.** K-closest assumes any peer can reach any other in one hop. In a real WebRTC mesh, browsers behind NATs may not have direct DataChannels with every other browser. `sendDirect` to an unbound target was silently dropping. **Fix:** transport-layer fallback — wrap the message in `__tunneled_direct__` and route hop-by-hop via the existing NH-1 walk. The bridge becomes a routing hop among many, not a privileged relay.
+**Multi-hop sendDirect.** K-closest assumes any peer can reach any other in one hop. In a real WebRTC mesh, browsers behind NATs may not have direct DataChannels with every other browser. `sendDirect` to an unbound target was silently dropping. **Fix:** transport-layer fallback — wrap the message in `__tunneled_direct__` and route hop-by-hop via the existing Axona walk. The bridge becomes a routing hop among many, not a privileged relay.
 
 <span class="muted">All three patches are upstream in `@axona/protocol`. None change wire format; mixed-version networks degrade gracefully.</span>
 
@@ -764,7 +764,7 @@ periodically: decay_all_weights()      // FORGET
 
 Every operation cost is bounded: O(synaptome.size). At 50 synapses the per-hop compute is ~0.2 ms — small relative to the 10 ms transit cost.
 
-<span class="callout">A complete NH-1 hop fits in this pseudocode. Five operations interleave on every lookup; learning is a side-effect of routing, not a separate phase.</span>
+<span class="callout">A complete Axona hop fits in this pseudocode. Five operations interleave on every lookup; learning is a side-effect of routing, not a separate phase.</span>
 
 ---
 
@@ -829,7 +829,7 @@ A non-obvious result from running every NX variant under two starting conditions
 
 <br>
 
-<span class="callout">Both NX-17 and NH-1 dominate Kademlia and G-DHT on every distance band. NX-17 retains a small lead at the cap = 100 ceiling — see "NH-1 vs NX-17" later in this deck.</span>
+<span class="callout">Both NX-17 and Axona's NH-1 dominate Kademlia and G-DHT on every distance band. NX-17 retains a small lead at the cap = 100 ceiling — see "Axona / NH-1 vs NX-17" later in this deck.</span>
 
 <span class="muted">Native-init numbers (each protocol's own bootstrap strategy) sit within 5–10 ms of these on a per-cell basis; the 4-way ranking is identical. Canonical init is the headline measurement because it removes bootstrap variance from the algorithmic claim.</span>
 
@@ -871,7 +871,7 @@ At every benchmark sweep we sample **10 000 random node pairs** from the live po
 
 ---
 
-## N-DHT lives at the floor
+## Axona lives at the floor
 
 Same global lookup test (500 random source/destination pairs). Each cell shows **measured median ms (× the 3δ floor for that N)**, so the reader sees both the absolute latency and how far above the theoretical lower bound it sits:
 
@@ -885,7 +885,7 @@ Same global lookup test (500 random source/destination pairs). Each cell shows *
 
 <br>
 
-- **N-DHT plateaus at ~1.18 × the floor** between 25 K and 50 K. NX-17 sits at **241 → 243 ms** — only ~36 ms above the 3δ lower bound.
+- **Axona (and the broader N-DHT family) plateaus at ~1.18 × the floor** between 25 K and 50 K. NX-17 sits at **241 → 243 ms** — only ~36 ms above the 3δ lower bound.
 - **Kademlia worsens with N** (2.01× → 2.65×, **410 → 548 ms**) — its log N hop tax compounds.
 - **NH-1 trails NX-17 by ~10 %** (**~21 ms** at 50 K) — a real but recoverable cost of the 12-parameter simplification vs NX-17's 44.
 
@@ -928,7 +928,7 @@ A skeptical reader of the 3δ floor result might suspect the **S2 geographic pre
 
 ## Highway %: deployment-realistic knee
 
-**What this slide measures.** Real P2P networks are heterogeneous: most participants run inside a browser (~50–100 connections, the WebRTC ceiling), but some run on real servers with effectively unlimited inbound capacity. We sweep the *fraction* of server-class nodes from 0 → 100 % and measure NH-1 latency at each point.
+**What this slide measures.** Real P2P networks are heterogeneous: most participants run inside a browser (~50–100 connections, the WebRTC ceiling), but some run on real servers with effectively unlimited inbound capacity. We sweep the *fraction* of server-class nodes from 0 → 100 % and measure Axona (NH-1) latency at each point.
 
 **What "highway" means.** A **highway node** is a server-class peer: `maxConnections = ∞`, synaptome cap raised from 50 to 256. It accepts unlimited inbound and acts as a transit hub. The rest of the network stays browser-class.
 
@@ -996,7 +996,7 @@ At setup only **Hawaii** is green — it is the sole bridge between the partitio
 
 With **Kademlia**, that picture stays frozen during training: no learning, no recovery.
 
-With **NX-17** or **NH-1**, green spreads outward as hop caching, triadic closure, and lateral spread deposit new cross-hem synapses on every successful path through the bridge.
+With **NX-17** or **Axona**, green spreads outward as hop caching, triadic closure, and lateral spread deposit new cross-hem synapses on every successful path through the bridge.
 
 ---
 
@@ -1011,7 +1011,7 @@ A diagnostic run shows the recovery happening directly. Starting from a freshly 
 | Lookups that succeeded | 7 / 10 |
 | Avg new cross-hem synapses per success | ~3 |
 
-**Each successful bridge crossing seeds new connectivity.** When a path goes `west-source → … → bridge → … → east-target`, NH-1's learning rules fire on every node along the way:
+**Each successful bridge crossing seeds new connectivity.** When a path goes `west-source → … → bridge → … → east-target`, Axona's learning rules fire on every node along the way:
 
 - **`_hopCache`** — every intermediate node adds the *destination* to its synaptome (a fresh cross-hem edge for every west node on the path)
 - **`_recordTransit`** — observed `(prev → next)` pairs become triadic-closure candidates
@@ -1019,13 +1019,13 @@ A diagnostic run shows the recovery happening directly. Starting from a freshly 
 
 **By 500 lookups, the partition has effectively dissolved.** Hundreds of cross-hem synapses now exist; only the earliest lookups depended exclusively on the bridge. The 95 % aggregate success rate is the *integral* of recovery, not a snapshot of bridge-finding.
 
-<span class="callout">**This is what the test was designed to measure.** Single-shot bridge-finding is the opening move; learning-driven re-stitching is the play. NH-1 doesn't route through the partition — it *dissolves* it.</span>
+<span class="callout">**This is what the test was designed to measure.** Single-shot bridge-finding is the opening move; learning-driven re-stitching is the play. Axona doesn't route through the partition — it *dissolves* it.</span>
 
 ---
 
 ## Pub/sub robustness
 
-| Metric | NH-1 at 25 K |
+| Metric | Axona (NH-1) at 25 K |
 |---|---:|
 | Baseline delivery | 100.0 % |
 | Immediate (post-kill, no refresh) | 99.9 % |
@@ -1067,13 +1067,13 @@ A continuous live-simulation: 25 K nodes, 79 groups × 32 subscribers, **1 % of 
 2. **K-overlap predicts delivery 1:1.** The dominant residual failure isn't broken routing — it's subscribers temporarily captured at relay nodes that have lost their delivery path to the root. The replay cache (next slide *"Temporal pub/sub"*) was designed to close exactly this gap.
 3. **Axon-role count grows with churn but plateaus.** From 537 axons at 0 % churn to ~2,200 at 30 %, leveling off. The tree absorbs growth into deeper structure rather than unbounded fan-out.
 
-<span class="callout">**Through 20 % cumulative churn, NH-1 holds delivery above 86 % with no replication, no gossip, and no parent tracking.** Above 25 % churn the protocol enters a recovery-paced regime where steady-state delivery is the equilibrium of recruitment vs. loss.</span>
+<span class="callout">**Through 20 % cumulative churn, Axona holds delivery above 86 % with no replication, no gossip, and no parent tracking.** Above 25 % churn the protocol enters a recovery-paced regime where steady-state delivery is the equilibrium of recruitment vs. loss.</span>
 
 ---
 
 ## Honesty: locality vs. latency
 
-**N-DHT's priorities are speed and robustness** — fast lookup, reliable delivery. Geographic location is *not a goal*; it is one input.
+**Axona's priorities are speed and robustness** — fast lookup, reliable delivery. Geographic location is *not a goal*; it is one input.
 
 **What the simulator does.** Every protocol's hop latency is computed from physical (haversine) distance between simulated nodes — a faithful Internet model. This is what the real Internet looks like to all four protocols.
 
@@ -1089,7 +1089,7 @@ The protocol cannot ask another node *"where are you?"* — there is no such mes
 
 <br>
 
-<span class="muted">**Lineage note.** *Putting locality in the routing layer itself* is the canonical contribution of the parallel **Tapestry** (Zhao et al., JSAC 2004) and **Pastry** (Rowstron & Druschel, Middleware 2001) lineages — both store the closest match by RTT in each routing-table slot, and Pastry's locality-preserving join carries the property to new nodes without exhaustive search. NH-1 inherits the instinct from both and pushes it further: **structural** (S2 prefix at bootstrap, three-tier role decomposition via vitality) plus **dynamic** (latency penalty in AP scoring, evolving via LTP). Both axes are descended from the Pastry / Tapestry choice; the *learning* is what we add.</span>
+<span class="muted">**Lineage note.** *Putting locality in the routing layer itself* is the canonical contribution of the parallel **Tapestry** (Zhao et al., JSAC 2004) and **Pastry** (Rowstron & Druschel, Middleware 2001) lineages — both store the closest match by RTT in each routing-table slot, and Pastry's locality-preserving join carries the property to new nodes without exhaustive search. Axona inherits the instinct from both and pushes it further: **structural** (S2 prefix at bootstrap, three-tier role decomposition via vitality) plus **dynamic** (latency penalty in AP scoring, evolving via LTP). Both axes are descended from the Pastry / Tapestry choice; the *learning* is what we add.</span>
 
 ---
 
@@ -1172,7 +1172,7 @@ Global lookup latency in milliseconds. **Canonical** = every protocol starts fro
 
 ---
 
-## N-1 → NH-1 — three phases of research
+## N-1 → Axona (NH-1) — three phases of research
 
 | Phase | Generation | Contribution |
 |---|---|---|
@@ -1195,7 +1195,7 @@ Global lookup latency in milliseconds. **Canonical** = every protocol starts fro
 
 <!-- _class: dense -->
 
-## NX-17 rules and their NH-1 disposition
+## NX-17 rules and their Axona (NH-1) disposition
 
 <span class="muted">*Reference table — the full audit trail of which NX-17 rules survived consolidation and which were dropped. Skip on a first read; consult when you want to know what specifically changed.*</span>
 
@@ -1226,7 +1226,7 @@ Global lookup latency in milliseconds. **Canonical** = every protocol starts fro
 
 ---
 
-## NH-1 vs NX-17 — and why
+## Axona (NH-1) vs NX-17 — and why
 
 | Test | NX-17 | **NH-1** | Δ (NH-1 vs NX-17) |
 |---|---:|---:|---:|
@@ -1254,7 +1254,7 @@ The residual gap reflects two things:
 
 ## What is Kademlia?
 
-**Maymounkov & Mazières** (NYU — IPTPS 2002, *Kademlia: A Peer-to-peer Information System Based on the XOR Metric*) is **the foundational paper N-DHT is built on**. Every Kademlia idea — the XOR metric, K-buckets, α-parallel lookup, the four-RPC protocol — survives literally inside NH-1. Without Kademlia, there is no N-DHT.
+**Maymounkov & Mazières** (NYU — IPTPS 2002, *Kademlia: A Peer-to-peer Information System Based on the XOR Metric*) is **the foundational paper Axona is built on**. Every Kademlia idea — the XOR metric, K-buckets, α-parallel lookup, the four-RPC protocol — survives literally inside Axona's NH-1 implementation. Without Kademlia, there is no Axona.
 
 <br>
 
@@ -1268,15 +1268,15 @@ The residual gap reflects two things:
 
 **Production deployments.** BitTorrent Mainline DHT (millions of simultaneous nodes since 2005), Ethereum devp2p (peer discovery for blockchain consensus), IPFS / libp2p (content routing), Tor v3 hidden services (onion-service descriptor lookup). **The most-deployed DHT family in production.**
 
-<span class="callout">**For this project:** Kademlia is N-DHT's literal substrate. Every learning rule, every vitality calculation, every axonal tree sits *on top of* Kademlia routing. When AP scoring fails (NX-4 iterative fallback), the protocol falls back to *unmodified Kademlia*. The relationship is not analogical — it is **structural inclusion**.</span>
+<span class="callout">**For this project:** Kademlia is Axona's literal substrate. Every learning rule, every vitality calculation, every axonal tree sits *on top of* Kademlia routing. When AP scoring fails (NX-4 iterative fallback), the protocol falls back to *unmodified Kademlia*. The relationship is not analogical — it is **structural inclusion**.</span>
 
 ---
 
-## Kademlia vs N-DHT
+## Kademlia vs Axona
 
-The most important comparison in this section. **N-DHT does not replace Kademlia — it adds learning on top of it.**
+The most important comparison in this section. **Axona does not replace Kademlia — it adds learning on top of it.**
 
-| Aspect | Kademlia | N-DHT |
+| Aspect | Kademlia | Axona |
 |---|---|---|
 | **Distance metric** | XOR, symmetric, triangle-inequality | **Same XOR metric** — inherited unchanged |
 | **Routing-table structure** | K-buckets, K=20 per stratum | **K-buckets become the synaptome** — same per-stratum layout, K capped at 50 total entries |
@@ -1291,9 +1291,9 @@ The most important comparison in this section. **N-DHT does not replace Kademlia
 
 **Where they overlap.** **Everything below the synaptome layer is Kademlia.** XOR distance, K-buckets, α-parallel lookup, the four-RPC protocol surface, the symmetric-metric self-organization, the "trust old peers" heuristic — all retained literally. NX-4 iterative fallback is the path the protocol takes when learning provides no signal: pure Kademlia.
 
-**Where N-DHT continues.** Three additions, in order of impact: **(1)** synapses carry weights reinforced by LTP (Hebbian learning replaces XOR-only ranking); **(2)** S2 prefix in IDs gives bootstrap locality (Kademlia is locality-blind); **(3)** axonal trees provide a built-in pub/sub primitive (Kademlia has no broadcast).
+**Where Axona continues.** Three additions, in order of impact: **(1)** synapses carry weights reinforced by LTP (Hebbian learning replaces XOR-only ranking); **(2)** S2 prefix in IDs gives bootstrap locality (Kademlia is locality-blind); **(3)** axonal trees provide a built-in pub/sub primitive (Kademlia has no broadcast).
 
-<span class="callout">**The relationship is structural, not analogical.** N-DHT's value proposition is *"everything Kademlia does, plus learning."* The 3δ-floor result and the Slice World recovery are improvements *on top of* a working Kademlia substrate — not replacements for it. When you read NH-1 source code, you read Kademlia idioms throughout.</span>
+<span class="callout">**The relationship is structural, not analogical.** Axona's value proposition is *"everything Kademlia does, plus learning."* The 3δ-floor result and the Slice World recovery are improvements *on top of* a working Kademlia substrate — not replacements for it. When you read the NH-1 source code, you read Kademlia idioms throughout.</span>
 
 ---
 
@@ -1313,21 +1313,21 @@ The most important comparison in this section. **N-DHT does not replace Kademlia
 
 **Locality-preserving join.** When a new node X joins, it asks a nearby existing node A to route a "join" message with key=X. Each node along the path sends X its tables; **X takes row n of its routing table from the n-th node along the route**. Triangulation-inequality argument preserves locality without exhaustive search. A second-stage refinement queries each entry's own tables for closer alternatives.
 
-**SCRIBE pub/sub** (Castro, Druschel, Kermarrec, Rowstron — JSAC 2002, layered on Pastry): `topicId = hash(name)` → subscribe routed to the rendezvous point; **every node along the path records subscriber state**; publisher sends to rendezvous; multicast tree formed by the **reverse paths** of all subscribes. **This is structurally identical to NH-1's axonal-tree mechanism** — same recipe, our terminology.
+**SCRIBE pub/sub** (Castro, Druschel, Kermarrec, Rowstron — JSAC 2002, layered on Pastry): `topicId = hash(name)` → subscribe routed to the rendezvous point; **every node along the path records subscriber state**; publisher sends to rendezvous; multicast tree formed by the **reverse paths** of all subscribes. **This is structurally identical to Axona's axonal-tree mechanism** — same recipe, our terminology.
 
 **Headline metrics.** ~5 hops at 100 K nodes (= `⌈log_16 100K⌉`); RDP ~1.3–1.4× the complete-routing-table optimum; locates closest of k=5 replicas 76 % (92 % top-2) of the time; 57 RPCs to repair tables per failed node; ~3000 msg/s per Java node, unoptimized.
 
-<span class="callout">**For this project:** Pastry contributed the **three-tier routing state** that NH-1's vitality-scored synaptome consolidates, and **SCRIBE** is the structural ancestor of axonal-tree pub/sub. Pastry is the *structural* sibling of Tapestry's *architectural* contribution.</span>
+<span class="callout">**For this project:** Pastry contributed the **three-tier routing state** that Axona's vitality-scored synaptome consolidates, and **SCRIBE** is the structural ancestor of axonal-tree pub/sub. Pastry is the *structural* sibling of Tapestry's *architectural* contribution.</span>
 
 ---
 
-## Pastry vs N-DHT
+## Pastry vs Axona
 
-The cleanest one-paragraph framing: **NH-1's synaptome is Pastry's R/L/M collapsed into a single tier scored by `weight × recency`. The roles persist; the bookkeeping is unified.**
+The cleanest one-paragraph framing: **Axona's synaptome is Pastry's R/L/M collapsed into a single tier scored by `weight × recency`. The roles persist; the bookkeeping is unified.**
 
 <br>
 
-| Aspect | Pastry | NH-1 |
+| Aspect | Pastry | Axona |
 |---|---|---|
 | **Routing state** | **Three explicit tables** (R, L, M) | **One vitality-scored synaptome** that places each peer into its effective tier |
 | **Leaf set role** | Numerically-closest 16–32 peers, terminal-hop guarantee | Synaptome's **high-vitality core** — well-trafficked nearby peers, dominate terminal-hop routing |
@@ -1339,11 +1339,11 @@ The cleanest one-paragraph framing: **NH-1's synaptome is Pastry's R/L/M collaps
 
 <br>
 
-**Where they overlap (deeply).** Three concrete inheritances: **(1)** the three-tier routing state, even if NH-1 collapses it; **(2)** locality-preserving join — Pastry formalized it, we still use it; **(3)** SCRIBE → axonal trees — *the same mechanism*, named differently.
+**Where they overlap (deeply).** Three concrete inheritances: **(1)** the three-tier routing state, even if Axona collapses it; **(2)** locality-preserving join — Pastry formalized it, we still use it; **(3)** SCRIBE → axonal trees — *the same mechanism*, named differently.
 
-**Where N-DHT continues.** Pastry's locality is *static after bootstrap*; ours *evolves* via LTP. SCRIBE trees are *fixed by routing topology*; our axon trees *re-shape* via re-subscribe and incoming promotion. Pastry's leaf set is fixed-size and ID-proximal; our high-vitality core is *traffic-earned*.
+**Where Axona continues.** Pastry's locality is *static after bootstrap*; ours *evolves* via LTP. SCRIBE trees are *fixed by routing topology*; our axon trees *re-shape* via re-subscribe and incoming promotion. Pastry's leaf set is fixed-size and ID-proximal; our high-vitality core is *traffic-earned*.
 
-<span class="callout">**Pastry is the structural ancestor; Tapestry is the architectural ancestor.** Together they give us the two foundational lineages, and NH-1 sits at the synthesis point: Pastry's three-tier structure (consolidated into vitality), Tapestry's locality-aware routing (made dynamic via AP scoring), Pastry's SCRIBE (made adaptive via re-subscribe), Tapestry's soft-state repair (event-triggered + Patchwork). NH-1 = Berkeley + Cambridge + learning.</span>
+<span class="callout">**Pastry is the structural ancestor; Tapestry is the architectural ancestor.** Together they give us the two foundational lineages, and Axona sits at the synthesis point: Pastry's three-tier structure (consolidated into vitality), Tapestry's locality-aware routing (made dynamic via AP scoring), Pastry's SCRIBE (made adaptive via re-subscribe), Tapestry's soft-state repair (event-triggered + Patchwork). Axona = Berkeley + Cambridge + learning.</span>
 
 ---
 
@@ -1362,15 +1362,15 @@ The cleanest one-paragraph framing: **NH-1's synaptome is Pastry's R/L/M collaps
 
 **Headline metric — RDP (Relative Delay Penalty)** = `Tapestry route latency ÷ direct IP latency`. Median ≈ 1 in the wide area; 90th percentile ~2–3. With `(k backups, l nearest, m hops)` location-pointer optimization, 90th-percentile RDP drops below 4 even at short distances. **~100 % routing success under massive failures (20 % kill, 50 % join) and continuous churn (4-min mean lifetime).**
 
-<span class="callout">**For this project:** Tapestry is *not* a parallel mechanism to compare against — it is the **historical precedent** for three of NH-1's four design pillars (locality, soft-state, resilience). Where it stops, our learning continues; where it ends with Bayeux-on-top, our pub/sub is built-in.</span>
+<span class="callout">**For this project:** Tapestry is *not* a parallel mechanism to compare against — it is the **historical precedent** for three of Axona's four design pillars (locality, soft-state, resilience). Where it stops, our learning continues; where it ends with Bayeux-on-top, our pub/sub is built-in.</span>
 
 ---
 
-## Tapestry vs N-DHT
+## Tapestry vs Axona
 
 The closest-shaped ancestor — and the clearest "what we inherit, what we add" comparison.
 
-| Aspect | Tapestry / DOLR | N-DHT |
+| Aspect | Tapestry / DOLR | Axona |
 |---|---|---|
 | **Routing primitive** | Prefix matching, base β=16 | Kademlia XOR (Kademlia base-2 strata) |
 | **Locality in routing table** | **Closest node by RTT** stored per prefix slot, built at insertion | **Latency-penalized AP score** evaluated dynamically per lookup; S2 prefix in IDs structurally seeds locality |
@@ -1383,9 +1383,9 @@ The closest-shaped ancestor — and the clearest "what we inherit, what we add" 
 
 <br>
 
-**Where they overlap (deeply).** *Soft-state location pointers along the publish path* is structurally identical to *axonal subscribe-attach along the routed path*. *Surrogate routing* is exactly NX-4 iterative fallback. *Mesh repair* (event + Patchwork) is the same family as our reheat + anneal. *Multiple backup pointers per slot* is what our weighted synaptome candidates do at the slot level. The deeper overlaps are not coincidence — they are *NH-1 inheriting Tapestry's architectural choices and pushing them further with learning*.
+**Where they overlap (deeply).** *Soft-state location pointers along the publish path* is structurally identical to *axonal subscribe-attach along the routed path*. *Surrogate routing* is exactly NX-4 iterative fallback. *Mesh repair* (event + Patchwork) is the same family as our reheat + anneal. *Multiple backup pointers per slot* is what our weighted synaptome candidates do at the slot level. The deeper overlaps are not coincidence — they are *Axona inheriting Tapestry's architectural choices and pushing them further with learning*.
 
-**Where N-DHT continues.** Tapestry's locality is *static after bootstrap*; ours is *continuously evolved* via LTP, triadic closure, hop caching, lateral spread. Tapestry's pub/sub was layered (Bayeux); ours is built-in. Tapestry's deployment was server-class; ours targets browser-WebRTC.
+**Where Axona continues.** Tapestry's locality is *static after bootstrap*; ours is *continuously evolved* via LTP, triadic closure, hop caching, lateral spread. Tapestry's pub/sub was layered (Bayeux); ours is built-in. Tapestry's deployment was server-class; ours targets browser-WebRTC.
 
 <span class="callout">**The lineage is direct.** Tapestry put locality and resilience in the routing layer; NH-1 makes those properties *learn from traffic*. Citing Tapestry prominently doesn't dilute our claim — it positions our work in continuity with two decades of validated foundational research. The Berkeley OceanStore family is the closest-shaped ancestor; we are an evolutionary step on that line, not a clean-room reinvention.</span>
 
@@ -1415,11 +1415,11 @@ Most DHTs (Chord, Pastry, CAN) run **periodic stabilization** — a fixed-interv
 
 ---
 
-## Adaptive stabilization vs N-DHT
+## Adaptive stabilization vs Axona
 
 Both reject fixed-schedule maintenance. Different observables, different actions.
 
-| Aspect | Ghinita & Teo (Adaptive Stabilization) | N-DHT |
+| Aspect | Ghinita & Teo (Adaptive Stabilization) | Axona |
 |---|---|---|
 | **What's adapted** | Stabilization rate per routing pointer | Synaptome composition (which peers are kept) |
 | **Trigger** | `P_dead` or `P_inacc` exceeds threshold | Dead-peer discovery (reheat); per-lookup probabilistic anneal |
@@ -1433,9 +1433,9 @@ Both reject fixed-schedule maintenance. Different observables, different actions
 
 **Where they overlap.** Decentralized self-monitoring + threshold-triggered protocol response — the same control-loop architecture as our **temperature reheat** (NX-6), Makris's **DFE migration**, and the proposed **load-aware AP scoring**. *Four independent works converging on the same architectural pattern* is meaningful evidence that this is a recognizable design class, not a one-off choice.
 
-**Where they differ.** Ghinita-Teo is purely *statistical* — derive analytical formulas, estimate parameters, threshold. NH-1 is *biological* — synaptic weights, vitality, decay. Both work; both have limits. **The synthesis would be NH-1 with Ghinita-style statistical estimation of churn driving adaptive anneal/reheat parameters.**
+**Where they differ.** Ghinita-Teo is purely *statistical* — derive analytical formulas, estimate parameters, threshold. Axona is *biological* — synaptic weights, vitality, decay. Both work; both have limits. **The synthesis would be Axona with Ghinita-style statistical estimation of churn driving adaptive anneal/reheat parameters.**
 
-<span class="callout">**The headline trade.** Their stabilization brings a Chord routing table back to its canonical ideal under churn. Our learning evolves the routing table *away* from the canonical ideal toward a traffic-shaped one. **Combining the two — Ghinita's adaptive *cadence* with NH-1's adaptive *content* — is the metaplastic NH-1 we keep gesturing at.**</span>
+<span class="callout">**The headline trade.** Their stabilization brings a Chord routing table back to its canonical ideal under churn. Our learning evolves the routing table *away* from the canonical ideal toward a traffic-shaped one. **Combining the two — Ghinita's adaptive *cadence* with Axona's adaptive *content* — is the metaplastic Axona we keep gesturing at.**</span>
 
 ---
 
@@ -1451,15 +1451,15 @@ Both reject fixed-schedule maintenance. Different observables, different actions
 
 **Production deployments:** Coral CDN (2004 – ~2015) — handled millions of cache requests per day at peak, served as a free CDN for academic and small-publisher sites.
 
-<span class="callout">**For this project:** Coral's hierarchical-cluster idea is *parallel* to NH-1's weighted-synaptome approach. Both achieve latency-aware routing; they make very different structural commitments to get there.</span>
+<span class="callout">**For this project:** Coral's hierarchical-cluster idea is *parallel* to Axona's weighted-synaptome approach. Both achieve latency-aware routing; they make very different structural commitments to get there.</span>
 
 ---
 
-## Coral vs N-DHT
+## Coral vs Axona
 
 Both adapt to network latency. They make opposite structural choices.
 
-| Aspect | Coral DSHT | N-DHT |
+| Aspect | Coral DSHT | Axona |
 |---|---|---|
 | **Structure** | Multiple nested DHTs, one per RTT cluster | A single flat synaptome with weighted edges |
 | **Locality discovery** | Active RTT measurement at join + cluster membership | Passive — observed traffic reinforces useful edges; S2 prefix seeds initial regional bias |
@@ -1473,9 +1473,9 @@ Both adapt to network latency. They make opposite structural choices.
 
 **Where they overlap:** both reject the "one fixed routing structure for all distances" approach. Both treat geographic locality as a property to *exploit*, not just record.
 
-**Where they differ:** Coral *enforces* locality through the hierarchical cluster structure — every node *knows* what's near. N-DHT *learns* locality through usage — every node *discovers* what's near via routed traffic. Coral relaxes the DHT promise to be local-first; N-DHT preserves the strict DHT promise and learns shortcuts on top.
+**Where they differ:** Coral *enforces* locality through the hierarchical cluster structure — every node *knows* what's near. Axona *learns* locality through usage — every node *discovers* what's near via routed traffic. Coral relaxes the DHT promise to be local-first; Axona preserves the strict DHT promise and learns shortcuts on top.
 
-<span class="callout">Coral's design choice was: "give up the canonical mapping to win locality." NH-1's design choice was: "keep the canonical mapping; make locality emerge from learning." Different engineering trade-offs against the same core problem.</span>
+<span class="callout">Coral's design choice was: "give up the canonical mapping to win locality." Axona's design choice was: "keep the canonical mapping; make locality emerge from learning." Different engineering trade-offs against the same core problem.</span>
 
 ---
 
@@ -1489,15 +1489,15 @@ Both adapt to network latency. They make opposite structural choices.
 
 **Production deployments:** Coral CDN, Azureus / Vuze (BitTorrent), some content-addressable overlays. The most influential predecessor for *latency-aware* peer-to-peer design.
 
-<span class="callout">**For this project:** a Vivaldi-style coordinate system is a candidate for replacing NH-1's *structural* S2 prefix with a *learned* locality primitive. Future benchmarks may include a Vivaldi-style protocol for completeness — both as a comparison reference and as a forward-looking direction.</span>
+<span class="callout">**For this project:** a Vivaldi-style coordinate system is a candidate for replacing Axona's *structural* S2 prefix with a *learned* locality primitive. Future benchmarks may include a Vivaldi-style protocol for completeness — both as a comparison reference and as a forward-looking direction.</span>
 
 ---
 
-## Vivaldi vs N-DHT
+## Vivaldi vs Axona
 
 Both are adaptive routing systems. They optimize different things.
 
-| Aspect | Vivaldi | N-DHT |
+| Aspect | Vivaldi | Axona |
 |---|---|---|
 | **Mechanism** | Synthetic coordinates in N-D Euclidean space | Hebbian reinforcement on routing edges |
 | **What's learned** | A position vector per node that predicts RTT to any peer | A weight per synapse, reinforced by traffic on successful paths |
@@ -1511,7 +1511,7 @@ Both are adaptive routing systems. They optimize different things.
 
 **Where they overlap:** both treat the network as something to *measure and adapt to*, not a fixed topology to traverse.
 
-**Where they differ:** Vivaldi predicts RTT, then any routing layer uses those predictions. N-DHT learns *paths* via reinforcement on the routing layer itself — locality is built into the IDs, learning sharpens the path within that locality.
+**Where they differ:** Vivaldi predicts RTT, then any routing layer uses those predictions. Axona learns *paths* via reinforcement on the routing layer itself — locality is built into the IDs, learning sharpens the path within that locality.
 
 ---
 
@@ -1539,11 +1539,11 @@ The replicas are placed by **varying the length of common prefix** among replica
 
 ---
 
-## Route-diversity DHTs vs N-DHT
+## Route-diversity DHTs vs Axona
 
 Both families care about routing robustness. They commit to different mechanisms.
 
-| Aspect | Castro / Harvesf-Blough | N-DHT |
+| Aspect | Castro / Harvesf-Blough | Axona |
 |---|---|---|
 | **Threat model** | Byzantine — malicious nodes that lie about routing | Crash-failure — honest peers that disappear |
 | **Mechanism** | Replicate the *target* at d disjoint placements; query in parallel | Maintain a weighted *synaptome* with overlapping candidates per logical destination |
@@ -1556,9 +1556,9 @@ Both families care about routing robustness. They commit to different mechanisms
 
 **Where they overlap.** Both reject "one route is enough." Both treat the routing fabric as something whose redundancy can be *engineered for* rather than hoped for.
 
-**Where they differ.** Castro / Harvesf-Blough is **storage-side redundancy** (the same key lives in d places, queries are parallel). N-DHT is **synaptome-side redundancy** (one key lives in one place, the routing table holds many candidates per direction). The two are complementary, not competing — a real production system would likely use both.
+**Where they differ.** Castro / Harvesf-Blough is **storage-side redundancy** (the same key lives in d places, queries are parallel). Axona is **synaptome-side redundancy** (one key lives in one place, the routing table holds many candidates per direction). The two are complementary, not competing — a real production system would likely use both.
 
-<span class="callout">**The headline trade.** Their work delivers strong Byzantine resilience (90 % success at 50 % malicious) at the cost of d× storage and parallel query load. N-DHT delivers strong crash-failure resilience (100 % delivery under 5 % churn) at the cost of zero extra storage. Combining the two — MaxDisjoint replication of NH-1 axon-tree roots — is the obvious next step for a Byzantine-tolerant pub/sub.</span>
+<span class="callout">**The headline trade.** Their work delivers strong Byzantine resilience (90 % success at 50 % malicious) at the cost of d× storage and parallel query load. Axona delivers strong crash-failure resilience (100 % delivery under 5 % churn) at the cost of zero extra storage. Combining the two — MaxDisjoint replication of Axona axon-tree roots — is the obvious next step for a Byzantine-tolerant pub/sub.</span>
 
 ---
 
@@ -1582,15 +1582,15 @@ Fully decentralized: each node operates independently, no central coordinator.
 
 **Headline result.** Hotspot N3's response time **dropped 86 %**; load uniformized across the cluster (~10 K – 25 K requests per node, down from 222 K on N3). The other nodes saw response time rise ~3.9× — but stayed well below the threshold.
 
-<span class="callout">**For this project:** the *hot-key migration* pattern maps directly onto NH-1's pub/sub *gateway concentration* failure mode. A topic with millions of subscribers is the same engineering problem as Redis's hot key — and the DFE mechanism is the family of answers that fits.</span>
+<span class="callout">**For this project:** the *hot-key migration* pattern maps directly onto Axona's pub/sub *gateway concentration* failure mode. A topic with millions of subscribers is the same engineering problem as Redis's hot key — and the DFE mechanism is the family of answers that fits.</span>
 
 ---
 
-## Hotspot-aware vs N-DHT
+## Hotspot-aware vs Axona
 
 Both care about routing performance under *non-uniform* conditions. Different non-uniformities.
 
-| Aspect | Makris et al. (DFE) | N-DHT |
+| Aspect | Makris et al. (DFE) | Axona |
 |---|---|---|
 | **Skew dimension** | Request rate per key (Zipf-distributed gets) | Crash failure / churn (nodes disappearing) |
 | **Trigger** | Local threshold on RT or NR exceeded | Lookup failure / dead-peer discovery |
@@ -1606,19 +1606,19 @@ Both care about routing performance under *non-uniform* conditions. Different no
 
 **Where they differ.** They assume **stable cooperative nodes with global load knowledge**; we cannot. Their FFD requires snapshot information our overlay can't cheaply collect. The *adaptation* needs translation: their migration becomes our *axon-tree root migration*, their FFD becomes our *load-aware AP scoring*.
 
-<span class="callout">**The headline trade.** Their work targets *content-popularity skew* in stable clusters. N-DHT targets *node-failure / churn skew* in dynamic overlays. Bringing the two together — **load-aware AP scoring + threshold-triggered axon-root migration** — closes the *gateway concentration* failure mode the deck currently leaves open.</span>
+<span class="callout">**The headline trade.** Their work targets *content-popularity skew* in stable clusters. Axona targets *node-failure / churn skew* in dynamic overlays. Bringing the two together — **load-aware AP scoring + threshold-triggered axon-root migration** — closes the *gateway concentration* failure mode the deck currently leaves open.</span>
 
 ---
 
 ## Example Message Protocol
 
-<span class="muted">*Reference slide — the wire-level protocol surface. Skim if you only care about results; consult when you want to know what NH-1 actually exchanges between peers.*</span>
+<span class="muted">*Reference slide — the wire-level protocol surface. Skim if you only care about results; consult when you want to know what Axona actually exchanges between peers.*</span>
 
 **Two layers.** The application sees exactly two messages — SEND and RECEIVE. Everything else is the lower-level p2p wire protocol that implements them.
 
 <br>
 
-**Application layer** — what an application built on NH-1 actually calls:
+**Application layer** — what an application built on Axona actually calls:
 
 | Message | Purpose |
 |---|---|
@@ -1627,7 +1627,7 @@ Both care about routing performance under *non-uniform* conditions. Different no
 
 <br>
 
-**P2P wire layer** — the messages NH-1 exchanges between peers to make SEND / RECEIVE work. Application code never constructs these directly.
+**P2P wire layer** — the messages Axona exchanges between peers to make SEND / RECEIVE work. Application code never constructs these directly.
 
 | Message | Purpose |
 |---|---|
@@ -1653,7 +1653,7 @@ Both care about routing performance under *non-uniform* conditions. Different no
 
 ---
 
-## The two-layer API — how N-DHT becomes real software
+## The two-layer API — how Axona becomes real software
 
 A working DHT has **two interfaces**, not one:
 
@@ -1663,7 +1663,7 @@ A working DHT has **two interfaces**, not one:
 The **protocol** sits between them and depends on neither side directly.
 
 ```
-Application → DHT contract → Protocol (NH-1) → Transport contract → Network
+Application → DHT contract → Axona protocol (NH-1) → Transport contract → Network
 ```
 
 The simulator's `SimulatedNetwork` and the production `WebRTCTransport` both implement the **same** Transport contract — twelve methods, one signature each. **The protocol code does not know which it is talking to.** This is the property that lets the simulator be the deployment vehicle.
@@ -1701,7 +1701,7 @@ Canonical pattern for parallel probes: `Promise.allSettled(peers.map(p => transp
 
 ## Parity gate — same code path, both worlds
 
-Years of N-DHT benchmark numbers transfer directly to production because **the protocol code is unchanged** between simulator and deployment. Twelve transport methods are the entire surface that swaps.
+Years of Axona benchmark numbers transfer directly to production because **the protocol code is unchanged** between simulator and deployment. Twelve transport methods are the entire surface that swaps.
 
 A 25 K-node parity-gate benchmark (post-refactor sim v0.70.22 vs pre-refactor v0.70.04 reference) confirmed every protocol within the 10 % target band:
 
@@ -1716,15 +1716,15 @@ NH-1's small drift upward is the architecturally-honest cost: each peer makes it
 
 ---
 
-## Live deployment — Axona
+## Live deployment
 
-The production-side of both contracts is now live. **Axona** is the product name for the network running N-DHT.
+The production-side of both contracts is now live. **Axona** is the protocol — and the name of the deployed network running it.
 
 | Contract | Production implementation | Live at |
 |---|---|---|
 | Transport | `axona-peer` — WebRTC data channels, 1 Hz heartbeat | <https://axona.net> |
 | BootstrapService | `axona-bridge` — WebRTC offer/answer signaling | <https://bridge.axona.net> |
-| DHT | `NeuromorphicDHTNH1` — unchanged from the simulator | runs inside `axona-peer` |
+| DHT (Axona / NH-1) | `NeuromorphicDHTNH1` — unchanged from the simulator | runs inside `axona-peer` |
 
 `axona-peer` runs in the browser on Mac, Windows, Linux, iOS, and Android over real-world NATs (cellular, hotel WiFi, double-NAT). `axona-bridge` carries only the WebRTC offer/answer payloads between two peers — no application traffic — so the rendezvous role is interchangeable and a federated bridge mesh is on the Q4 2026 roadmap.
 
@@ -1765,7 +1765,7 @@ Honest accounting of where the axonal tree shows seams:
 ## Limitations and future directions
 
 **Known limitations**
-- **Warmup dependency.** N-DHT needs ~5 000 lookups before the synaptome converges. The first minute of deployment is suboptimal.
+- **Warmup dependency.** Axona needs ~5 000 lookups before the synaptome converges. The first minute of deployment is suboptimal.
 - **Synaptome capacity bounded at 50.** A deliberate cross-browser target. Server deployments could use 200–500.
 - **Locality requires geographic IDs.** Without S2 prefix, regional locality collapses. *(Vivaldi-style RTT-only locality is future work.)*
 - **Training is compute-optimizing, not path-shortening.** Cannot close the bootstrap → omniscient hop gap without changes to bootstrap or annealing.
@@ -2067,16 +2067,16 @@ The **protocol** has improved. The **environment** it lives in has not. NH-1 ove
 - Clark · *The Design Philosophy of the DARPA Internet Protocols* (SIGCOMM 1988)
 
 ### Foundational DHT work
-- Maymounkov & Mazières · ***Kademlia: A Peer-to-peer Information System Based on the XOR Metric*** (IPTPS 2002) — **the literal substrate of N-DHT**. XOR distance, K-buckets, α-parallel lookup, four-RPC protocol — all retained unchanged below the synaptome layer. NX-4 iterative fallback is unmodified Kademlia routing
-- Rowstron & Druschel · ***Pastry: Scalable, decentralized object location and routing*** (Middleware 2001) — the canonical **three-tier routing state** (R / L / M) and **locality-preserving join**; substrate for SCRIBE and PAST. NH-1's synaptome consolidates Pastry's three tables into a single vitality-scored set
-- Zhao, Huang, Stribling, Rhea, Joseph, Kubiatowicz · ***Tapestry: A Resilient Global-Scale Overlay for Service Deployment*** (IEEE JSAC 2004) — the closest historical ancestor of NH-1's combined locality + soft-state + resilience architecture; substrate for OceanStore, Bayeux multicast, and Mnemosyne
+- Maymounkov & Mazières · ***Kademlia: A Peer-to-peer Information System Based on the XOR Metric*** (IPTPS 2002) — **the literal substrate of Axona**. XOR distance, K-buckets, α-parallel lookup, four-RPC protocol — all retained unchanged below the synaptome layer. NX-4 iterative fallback is unmodified Kademlia routing
+- Rowstron & Druschel · ***Pastry: Scalable, decentralized object location and routing*** (Middleware 2001) — the canonical **three-tier routing state** (R / L / M) and **locality-preserving join**; substrate for SCRIBE and PAST. Axona's synaptome consolidates Pastry's three tables into a single vitality-scored set
+- Zhao, Huang, Stribling, Rhea, Joseph, Kubiatowicz · ***Tapestry: A Resilient Global-Scale Overlay for Service Deployment*** (IEEE JSAC 2004) — the closest historical ancestor of Axona's combined locality + soft-state + resilience architecture; substrate for OceanStore, Bayeux multicast, and Mnemosyne
 
 ---
 
 ## References — Pub/sub and latency
 
 ### Pub/sub infrastructure
-- Castro, Druschel, Kermarrec, Rowstron · ***SCRIBE: A Large-Scale and Decentralized Application-Level Multicast Infrastructure*** (IEEE JSAC 2002) — routed subscribe + **reverse-path forwarding multicast tree** layered on Pastry; **the structural ancestor of NH-1's axonal-tree pub/sub**
+- Castro, Druschel, Kermarrec, Rowstron · ***SCRIBE: A Large-Scale and Decentralized Application-Level Multicast Infrastructure*** (IEEE JSAC 2002) — routed subscribe + **reverse-path forwarding multicast tree** layered on Pastry; **the structural ancestor of Axona's axonal-tree pub/sub**
 - Zhuang, Zhao, Joseph, Katz, Kubiatowicz · *Bayeux: An architecture for scalable and fault-tolerant wide-area data dissemination* (NOSSDAV 2001) — the analogous multicast layer on Tapestry
 
 <br>
@@ -2121,7 +2121,7 @@ The **protocol** has improved. The **environment** it lives in has not. NH-1 ove
 
 ## References — substrate
 
-The learning, decay, pruning, and topology priors that the N-DHT translates from biology and classical CS into routing-table maintenance.
+The learning, decay, pruning, and topology priors that Axona translates from biology and classical CS into routing-table maintenance.
 
 <br>
 

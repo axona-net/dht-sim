@@ -1,4 +1,4 @@
-% NH-1: A Vitality-Driven, Learning-Adaptive Distributed Hash Table
+% Axona: A Learning-Adaptive Distributed Hash Table and Axonal Publish/Subscribe
 % Author: David A. Smith, Axona.net
 % Target: 12-page two-column conference format (IEEE P2P / ICDCS / NSDI workshop)
 %
@@ -25,15 +25,16 @@
 \hypersetup{colorlinks=true, linkcolor=black, citecolor=black, urlcolor=blue}
 
 % ── Custom commands ──────────────────────────────────────────────────────────
-\newcommand{\nhone}{NH-1\xspace}
 \usepackage{xspace}
+\newcommand{\axona}{Axona\xspace}
+\newcommand{\nhone}{NH-1\xspace}
 \newcommand{\NDHT}{N-DHT\xspace}
 \newcommand{\KDHT}{K-DHT\xspace}
 \newcommand{\GDHT}{G-DHT\xspace}
 \newcommand{\NXseventeen}{NX-17\xspace}
 
 % ── Title and authors ────────────────────────────────────────────────────────
-\title{Axona: A Learning-Adaptive Distributed Hash Table\\and Axonal Publish/Subscribe\\[0.3em]{\normalsize\normalfont v0.3.52 \quad 2026-05-18}}
+\title{Axona: A Learning-Adaptive Distributed Hash\\Table and Axonal Publish/Subscribe\\[0.3em]{\normalsize\normalfont v0.3.53 \quad 2026-05-18}}
 
 \author{
 \IEEEauthorblockN{David A. Smith}
@@ -54,33 +55,38 @@
 Distributed hash tables (DHTs) are the substrate of content-addressable
 peer-to-peer systems, but the canonical Kademlia design routes messages in
 $O(\log N)$ hops without regard to network locality, yielding multi-second
-tail latency on million-node networks. We present two contributions.
-First, the \emph{Geographic DHT} (\GDHT) embeds an S2 cell prefix in
-node identifiers so that XOR distance in ID space approximates physical
-distance --- a simple structural change that reduces $500$\,km regional
-lookup latency by $3.4\times$ over Kademlia at $25\,000$ nodes. Second,
-\nhone is a learning-adaptive DHT layered above the Kademlia/\GDHT
-substrate that introduces \emph{vitality} --- a per-edge score
-$\mathrm{weight} \times \mathrm{recency}$ in which the weight is
+tail latency on million-node networks. We present \axona, a learning-adaptive
+DHT and axonal publish/subscribe protocol, and report two technical
+contributions and a deployed implementation. First, the \emph{Geographic DHT}
+(\GDHT) embeds an S2 cell prefix in node identifiers so that XOR distance in
+ID space approximates physical distance --- a simple structural change that
+reduces $500$\,km regional lookup latency by $3.4\times$ over Kademlia at
+$25\,000$ nodes. Second, \axona introduces \emph{vitality} --- a per-edge
+score $\mathrm{weight} \times \mathrm{recency}$ in which the weight is
 reinforced by successful traffic (Hebbian long-term potentiation) and
 recency exponentially decays after a synaptic-tagging-style protection
 window. A single vitality-based admission gate replaces five distinct
 mechanisms in the predecessor \NXseventeen, consolidating eighteen
-specialized rules and forty-four parameters into twelve each. On a
+specialized rules and forty-four parameters into twelve each. The current
+\axona implementation, \nhone, embodies this consolidation. On a
 $50\,000$-node simulator, \NXseventeen routes at $1.18\times$ the Dabek
 $3\delta$ analytical floor~\cite{dabek2004designing} --- within $36$\,ms
 of the analytical lower bound for any recursive $O(\log N)$ DHT --- and
-\nhone plateaus at $1.28\times$. \nhone provides built-in publish/subscribe
+\nhone plateaus at $1.28\times$. \axona provides built-in publish/subscribe
 via axonal delivery trees, achieving 100\% baseline and 100\% recovered
 delivery under $5\%$ churn, and recovers from single-bridge network
 partitions through cooperative re-stitching driven by hop caching and
 triadic closure. An ablation that strips the \GDHT prefix shows learning
-alone outperforms Kademlia by $26\%$, demonstrating that the
-contribution is structural rather than a consequence of locality
-engineering. \nhone is the protocol currently deployed in the
-\emph{Axona} peer-to-peer mesh (\url{https://axona.net}); when this
-paper refers to \nhone, it refers to the same code path validated in
-production browsers across real WebRTC networks.
+alone outperforms Kademlia by $26\%$, demonstrating that the contribution
+is structural rather than a consequence of locality engineering. \nhone is
+the implementation currently deployed in the \axona peer-to-peer mesh
+(\url{https://axona.net}); when this paper refers to \nhone, it refers to
+the same code path validated in production browsers across real WebRTC
+networks. \emph{Naming convention used throughout:} \axona names the
+protocol described here, \NDHT (Neuromorphic DHT) names the broader
+family of learning-adaptive DHT designs to which \axona belongs, and
+\nhone names the specific implementation against which the empirical
+results in this paper were measured.
 \end{abstract}
 
 % ═════════════════════════════════════════════════════════════════════════════
@@ -158,13 +164,14 @@ distance in identifier space approximates physical distance, and a
 node's bootstrap routing table is biased toward local peers without
 any change to the routing algorithm itself. \GDHT reduces $500$\,km
 regional lookup latency by $3.4\times$ over Kademlia at $25\,000$
-nodes (\S\ref{sec:gdht}), and is the substrate on which \nhone's
+nodes (\S\ref{sec:gdht}), and is the substrate on which \axona's
 learning is layered.
 
-\item \textbf{\nhone}, a learning-adaptive DHT layered above the
-Kademlia/\GDHT substrate, that consolidates the $18$-rule, $44$-parameter
-\NXseventeen lineage into a $12$-rule, $12$-parameter protocol
-governed by a single vitality-based admission gate (\S\ref{sec:nh1}).
+\item \textbf{\axona (current implementation \nhone)}, a learning-adaptive
+DHT layered above the Kademlia/\GDHT substrate, that consolidates the
+$18$-rule, $44$-parameter \NXseventeen lineage into a $12$-rule,
+$12$-parameter protocol governed by a single vitality-based admission gate
+(\S\ref{sec:nh1}).
 The consolidation is a direct application of Hebbian long-term
 potentiation~\cite{hebb1949organization,bliss1973long}: every
 successful lookup reinforces the synaptic weights along the traversed
@@ -179,15 +186,15 @@ the same range (\S\ref{sec:eval-floor}).
 
 \item \textbf{Axonal publish/subscribe}, a built-in delivery primitive
 structurally equivalent to SCRIBE~\cite{castro2002scribe} but adaptive
-under churn. \nhone achieves $100\%$ baseline delivery and $100\%$
+under churn. \axona achieves $100\%$ baseline delivery and $100\%$
 recovered delivery at $5\%$ churn through routed re-subscribe alone ---
 no replication, no gossip, no parent tracking (\S\ref{sec:pubsub}).
 
 \item \textbf{Geography ablation.} Stripping the \GDHT prefix and
 re-running the comparison shows that with \emph{no} geographic
 structure, \NXseventeen still routes $26\%$ faster than Kademlia and
-\nhone routes $8\%$ faster (\S\ref{sec:eval-geo}). Learning is doing
-real work, not sharpening pre-existing geographic structure.
+\axona (\nhone) routes $8\%$ faster (\S\ref{sec:eval-geo}). Learning is
+doing real work, not sharpening pre-existing geographic structure.
 \end{enumerate}
 
 \noindent
@@ -199,8 +206,8 @@ repository~\cite{dhtsim2026}.
 \S\ref{sec:related} surveys the lineage and related work. \S\ref{sec:substrate}
 presents the neuromorphic substrate --- the biology of long-term
 potentiation and its precise mapping into routing-table mechanics.
-\S\ref{sec:nh1} describes \nhone's five operations, twelve rules, and
-vitality function in detail. \S\ref{sec:pubsub} covers axonal pub/sub.
+\S\ref{sec:nh1} describes \axona's five operations, twelve rules, and
+vitality function in detail (as embodied in \nhone). \S\ref{sec:pubsub} covers axonal pub/sub.
 \S\ref{sec:gdht} covers the geographic prefix used as a bootstrap seed.
 \S\ref{sec:eval} reports the four headline results. \S\ref{sec:discussion}
 discusses limitations, including a third-party red-team analysis identifying
@@ -212,14 +219,14 @@ work, and \S\ref{sec:conclusion} concludes.
 \label{sec:related}
 
 \paragraph{The Berkeley/Cambridge DHT lineage.}
-\nhone inherits structurally from three foundational designs. Kademlia
+\axona inherits structurally from three foundational designs. Kademlia
 \cite{maymounkov2002kademlia} provides the substrate: $160$-bit random
 identifiers, a symmetric XOR distance metric (which makes routing
 self-organizing because every incoming or outgoing message updates a
 $k$-bucket), $K=20$ peers per stratum, and $\alpha$-parallel asynchronous
 \textsc{find\_node} queries. Kademlia's empirical observation that old
 peers are more reliable than new peers~\cite{saroiu2003measurement}
-becomes \nhone's vitality recency multiplier. Pastry~\cite{rowstron2001pastry}
+becomes \axona's vitality recency multiplier. Pastry~\cite{rowstron2001pastry}
 contributes
 the three-tier routing state ($R$, $L$, $M$), the locality-preserving
 join algorithm in which a new node $X$ takes row $n$ of its routing
@@ -229,7 +236,7 @@ Tapestry~\cite{zhao2004tapestry} contributes the locality-aware
 routing table (closest node by RTT per slot, built at insertion),
 soft-state location pointers along publish paths, and surrogate
 routing (when the deterministic root is dead, route to the closest
-live identifier). \nhone retains all of these mechanisms in some form;
+live identifier). \axona retains all of these mechanisms in some form;
 the contribution is to make them \emph{learn} from observed traffic.
 
 \paragraph{Latency analysis.}
@@ -241,7 +248,7 @@ companion measurement~\cite{zhao2004tapestry} reports a complementary
 metric --- relative delay penalty (RDP) --- with median wide-area RDP
 near $1$ and $90$th-percentile near $2$--$3$. These analyses set the
 methodological standard for DHT-latency reporting and the
-target~\nhone aims to match.
+target \axona aims to match.
 
 \paragraph{Adaptive maintenance.}
 A recurring instinct in the post-2003 DHT literature is that routing-table
@@ -256,7 +263,7 @@ network size $N$; computes pointer-staleness probabilities; and
 triggers cheap liveness checks or expensive accuracy checks only when
 warranted. Their headline --- $3.4\times$ lower lookup failure at
 $2.4\times$ lower communication overhead under variable churn ---
-demonstrates that self-tuning works. \nhone applies the same instinct
+demonstrates that self-tuning works. \axona applies the same instinct
 to a different observable: not maintenance rate but routing-table
 \emph{composition}.
 
@@ -271,9 +278,9 @@ success at $50\%$ malicious nodes. Makris
 Zipf-distributed request rates with the Directory For Exceptions
 mechanism --- a hybrid of consistent hashing~\cite{karger1997consistent}
 and a small distributed
-override that migrates hot keys to less-loaded peers. \nhone~\S\ref{sec:future}
-identifies these as the canonical mitigations for two open security
-and load-balancing gaps.
+override that migrates hot keys to less-loaded peers. \axona's
+\S\ref{sec:future} identifies these as the canonical mitigations for
+two open security and load-balancing gaps.
 
 \paragraph{Locality alternatives.}
 Beyond Pastry/Tapestry's structural locality, two adaptive alternatives
@@ -282,7 +289,7 @@ at increasing RTT thresholds, relaxing the strict DHT promise (sloppy
 hashing) to deliver content-distribution at scale.
 Vivaldi~\cite{dabek2004vivaldi} computes synthetic per-node coordinates
 that predict pair-wise RTT to peers a node has never directly contacted.
-Both treat the network as something to measure and adapt to. \nhone
+Both treat the network as something to measure and adapt to. \axona
 goes further: rather than measure or predict, it learns paths
 themselves through reinforcement on the routing layer.
 
@@ -290,10 +297,10 @@ themselves through reinforcement on the routing layer.
 \section{The Neuromorphic Substrate}
 \label{sec:substrate}
 
-The framing of \nhone as ``neuromorphic'' is not decorative. The brain
-and a peer-to-peer DHT face a precisely shared engineering problem,
-and the solution that biological evolution found applies to
-overlay routing with no metaphorical slippage.
+The framing of \axona as a ``neuromorphic'' DHT (placing it in the
+\NDHT family) is not decorative. The brain and a peer-to-peer DHT face
+a precisely shared engineering problem, and the solution that biological
+evolution found applies to overlay routing with no metaphorical slippage.
 
 \paragraph{The shared engineering problem.}
 A single neuron carries on the order of $10^4$ synapses --- a hard upper
@@ -347,8 +354,8 @@ between the coincidence detection (milliseconds) and the protein
 synthesis that consolidates the change (tens of minutes). Without it,
 learning would be self-destructive: the very synapses just discovered
 to be useful would be the most likely to be overwritten by the next
-high-frequency event. \nhone's \texttt{INERTIA\_DURATION} parameter
-implements precisely this protection in routing.
+high-frequency event. \axona's \texttt{INERTIA\_DURATION} parameter
+(\nhone) implements precisely this protection in routing.
 
 \paragraph{The Hebbian rule.}
 Donald Hebb's 1949 formulation~\cite{hebb1949organization} predates
@@ -361,17 +368,17 @@ abstraction:
 
 \noindent
 Every weight in every artificial neural network ultimately invokes
-this rule. \nhone applies it not to perception but to \emph{routing}:
+this rule. \axona applies it not to perception but to \emph{routing}:
 peers that successfully carry traffic together earn higher weights;
 peers that carry no traffic decay. The routing table is shaped by
 the queries it serves, in exactly the way a cortical region's
 synaptic structure is shaped by the sensory input it processes.
 
 \paragraph{Mapping table.}
-The translation from neuroscience mechanisms to \nhone source-code
-mechanisms is direct, not analogical (Figure~\ref{fig:mapping},
-Table~\ref{tab:mapping}). Every term has one corresponding artifact
-in the codebase.
+The translation from neuroscience mechanisms to \axona source-code
+mechanisms (as embodied in the \nhone implementation) is direct, not
+analogical (Figure~\ref{fig:mapping}, Table~\ref{tab:mapping}). Every
+term has one corresponding artifact in the codebase.
 
 \begin{figure}[t]
 \centering
@@ -405,21 +412,21 @@ in the codebase.
 \draw[ar] (s5) -- (n5);
 \end{tikzpicture}
 \caption{Direct correspondence between neuromorphic mechanisms (left)
-and \nhone routing-table operations (right). Every term on the right
-has one corresponding artifact in the codebase. Arrows are shown on a
-representative subset to avoid visual clutter; the full mapping is in
-Table~\ref{tab:mapping}.}
+and \axona routing-table operations as implemented in \nhone (right).
+Every term on the right has one corresponding artifact in the
+codebase. Arrows are shown on a representative subset to avoid visual
+clutter; the full mapping is in Table~\ref{tab:mapping}.}
 \label{fig:mapping}
 \end{figure}
 
 \begin{table}[t]
 \centering
-\caption{Direct mapping from biological mechanisms to \nhone routing-table operations.}
+\caption{Direct mapping from biological mechanisms to \axona routing-table operations (in the \nhone implementation).}
 \label{tab:mapping}
 \small
 \begin{tabular}{@{}p{0.42\columnwidth}p{0.50\columnwidth}@{}}
 \toprule
-\textbf{Neuroscience} & \textbf{\nhone} \\
+\textbf{Neuroscience} & \textbf{\axona (\nhone)} \\
 \midrule
 Synapse --- a connection between neurons & A peer entry in the routing table (\texttt{Synapse} class) \\
 Synaptic weight --- readiness to fire & \texttt{weight} $\in [0,1]$ \\
@@ -439,28 +446,30 @@ that the threshold separating LTP from LTD is itself an adaptive
 variable, sliding based on the post-synaptic neuron's recent average
 activity. This is \emph{metaplasticity} --- plasticity of plasticity ---
 and it produces homeostatic self-balancing toward a target activity
-level rather than runaway potentiation or silence. \nhone's parameters
-are presently fixed constants chosen by sweep. A metaplastic \nhone,
+level rather than runaway potentiation or silence. \axona's parameters
+are presently fixed constants chosen by sweep. A metaplastic \axona,
 in which \texttt{decayGamma}, \texttt{INERTIA\_DURATION}, and the
 annealing schedule are themselves observation-driven, is the natural
 next step (\S\ref{sec:future}).
 
 % ═════════════════════════════════════════════════════════════════════════════
-\section{\nhone Architecture}
+\section{\axona Architecture (current implementation: \nhone)}
 \label{sec:nh1}
 
-\nhone is a learning-adaptive DHT layered above an unmodified Kademlia
+\axona is a learning-adaptive DHT layered above an unmodified Kademlia
 substrate. The contribution sits between Kademlia's $k$-buckets and the
 application: every routing decision, every bucket admission, every churn
 response runs through a single vitality function. This section walks the
 architecture in five operations, presents the unified admission gate that
 replaces five distinct mechanisms in the predecessor \NXseventeen, and
-gives end-to-end pseudocode for one lookup.
+gives end-to-end pseudocode for one lookup. The architecture is described
+once and embodied in \nhone, the implementation against which the
+empirical results in \S\ref{sec:eval} were measured.
 
 \subsection{Five operations, one vitality model}
 \label{sec:nh1-overview}
 
-Every \nhone behavior decomposes into one of five operations:
+Every \axona behavior decomposes into one of five operations:
 
 \begin{itemize}
 \item \textbf{NAVIGATE} --- choose a next hop given a target.
@@ -478,7 +487,7 @@ DHT literature (\S\ref{sec:related}); none was added speculatively.
 
 \begin{table}[t]
 \centering
-\caption{The twelve rules of \nhone, organized by operation.}
+\caption{The twelve rules of \axona (\nhone), organized by operation.}
 \label{tab:rules}
 \small
 \begin{tabular}{@{}cp{0.40\columnwidth}p{0.30\columnwidth}@{}}
@@ -544,7 +553,7 @@ weight faster than decay erodes it; unused edges fade.
 The bounded, vitality-scored set of outgoing edges at a node is the
 \emph{synaptome}, capped at $50$ entries (a safe cross-browser WebRTC
 target; Safari measured at $\sim\!95$ peak connections). The synaptome is
-\nhone's analog of Pastry's three-tier routing
+\axona's analog of Pastry's three-tier routing
 state~\cite{rowstron2001pastry} (routing table $R$, leaf set $L$,
 neighborhood set $M$) consolidated into a single tier scored by vitality.
 The roles persist in latent form:
@@ -584,7 +593,7 @@ insertion.
 
 \paragraph{Two-hop lookahead (Rule~4).}
 When the top-$\alpha$ AP scores are bunched (no decisive first hop),
-\nhone probes the top $\alpha = 2$ first hops for \emph{their} best
+\axona probes the top $\alpha = 2$ first hops for \emph{their} best
 second hops and picks the path with the highest combined
 $\mathrm{AP}(\mathrm{first}) \times \mathrm{AP}(\mathrm{second})$. The
 lookahead is exactly two hops --- never three --- so each step is
@@ -593,7 +602,7 @@ $O(\alpha \cdot |\mathrm{synaptome}|)$ per step.
 
 \paragraph{Iterative fallback (Rule~5).}
 When AP returns no candidate --- every neighbor has $\mathrm{progress} \le 0$,
-i.e.\ would move \emph{away} from the target --- \nhone falls back to
+i.e.\ would move \emph{away} from the target --- \axona falls back to
 $k$-closest-from-synaptome regardless of progress. This rescues lookups
 that would otherwise stall in dead corridors. The mechanism is \emph{surrogate
 routing} in Tapestry's terminology~\cite{zhao2004tapestry}: when the
@@ -619,7 +628,7 @@ target. The path becomes shorter on the next lookup to the same
 destination from that intermediate node. Lateral spread propagates the
 new edge to the source's geographic neighbors, so nearby peers see the
 shortcut on their first lookup, not just after they generate one
-themselves. This is the key mechanism behind \nhone's partition-recovery
+themselves. This is the key mechanism behind \axona's partition-recovery
 behavior in \S\ref{sec:eval-slice}.
 
 \paragraph{Triadic closure (Rule~7).}
@@ -630,7 +639,7 @@ social-network theory: dense triangles emerge in networks shaped by
 indirect interaction.
 
 \paragraph{Incoming promotion (Rule~9).}
-\nhone tracks which peers reach \emph{out} to the local node. When an
+\axona tracks which peers reach \emph{out} to the local node. When an
 incoming peer accumulates a threshold number of successful uses, it is
 promoted to a real outgoing synapse via \texttt{\_addByVitality}. This is
 passive learning: peers that \emph{want} to reach me become candidates
@@ -639,7 +648,7 @@ for routing through.
 \subsection{FORGET: the unified admission gate}
 \label{sec:nh1-forget}
 
-The single most important consolidation in \nhone is the function
+The single most important consolidation in \axona is the function
 \texttt{\_addByVitality}, which serves as the admission gate for
 \emph{every} synapse insertion --- bootstrap, LTP, triadic closure,
 hop caching, incoming promotion, annealing. It replaces five distinct
@@ -670,7 +679,7 @@ floors, no tiers, no stratum-specific quotas.
 \label{sec:nh1-explore}
 
 A purely greedy AP-scored router would lock onto early-discovered
-shortcuts and never find better ones. \nhone injects two sources of
+shortcuts and never find better ones. \axona injects two sources of
 controlled randomness:
 
 \paragraph{Temperature annealing (Rule~11).}
@@ -705,7 +714,7 @@ the network never reaches global connectivity.
 \paragraph{Mixed-capacity deployment (Rule~2).}
 Real peer-to-peer networks are heterogeneous: most peers run in browsers
 (WebRTC $\sim\!100$-connection ceiling), some on servers (effectively
-unlimited). \nhone tags a configurable \texttt{highwayPct} fraction of
+unlimited). \axona tags a configurable \texttt{highwayPct} fraction of
 nodes as \emph{server-class}: unlimited inbound, synaptome cap raised
 from $50$ to $256$. The remaining nodes are browser-class. All other
 mechanisms are identical across both classes. \S\ref{sec:eval-highway}
@@ -739,7 +748,7 @@ on lookup(target):
 on success:    reinforce_path()            // LEARN: LTP
 periodically:  decay_all_weights()         // FORGET
 \end{verbatim}}
-\caption{End-to-end NH-1 lookup tick. All five operations
+\caption{End-to-end Axona (\nhone) lookup tick. All five operations
 (\textsc{navigate}, \textsc{learn}, \textsc{forget}, \textsc{explore},
 \textsc{structure}) interleave on every routing step; learning is a
 side-effect of routing rather than a separate maintenance phase.}
@@ -752,7 +761,7 @@ to the $10$\,ms simulated transit cost.
 
 \begin{table}[t]
 \centering
-\caption{The twelve parameters of \nhone with default values.}
+\caption{The twelve parameters of \axona (\nhone) with default values.}
 \label{tab:params}
 \small
 \begin{tabular}{@{}lrl@{}}
@@ -784,7 +793,7 @@ deliver a message to all subscribers of a topic without enumerating them.
 Layered approaches such as SCRIBE on Pastry~\cite{castro2002scribe} and
 Bayeux on Tapestry~\cite{zhuang2001bayeux} demonstrate that routed
 subscribe plus reverse-path-forwarding multicast is the canonical
-mechanism. \nhone integrates the same mechanism directly into the
+mechanism. \axona integrates the same mechanism directly into the
 protocol: pub/sub is a built-in primitive, not an application-layer
 overlay. The result is an axonal tree (the term reflects the biological
 analog: an axon is the single output projection of a neuron, branching
@@ -962,7 +971,7 @@ way, collapsing the K-replicated topic into whichever single peer
 remains directly bound. The production fix is a transport-layer
 fallback: if the target is not directly bound, wrap the message in
 a $\texttt{\_\_tunneled\_direct\_\_}$ routed envelope and let the
-existing NH-1 routing walk hop-by-hop toward the target. A small
+existing \axona routing walk hop-by-hop toward the target. A small
 handler at the destination unwraps the envelope and dispatches into
 the same direct-handler table that a single-hop delivery would
 have hit. The bridge becomes a routing hop among many rather than
@@ -992,8 +1001,8 @@ The Geographic DHT (\GDHT) is the second protocol contribution of this
 paper. It is a simple structural extension of Kademlia that gives the
 overlay an awareness of physical locality without changing the routing
 algorithm itself. \GDHT serves throughout the rest of the paper as the
-geographically-aware substrate on which \nhone's learning is layered,
-and as the comparative baseline against which \nhone is measured.
+geographically-aware substrate on which \axona's learning is layered,
+and as the comparative baseline against which \axona (\nhone) is measured.
 
 \subsection{Construction}
 \label{sec:gdht-construction}
@@ -1060,11 +1069,11 @@ class of mechanism as Pastry's locality-preserving
 join~\cite{rowstron2001pastry} or Tapestry's RTT-sorted routing
 table~\cite{zhao2004tapestry}, and it shares the same limitation:
 without learning, the table cannot improve as the network changes.
-\nhone's contribution (\S\ref{sec:nh1}) is to layer
+\axona's contribution (\S\ref{sec:nh1}) is to layer
 traffic-driven learning on top of \GDHT's structural locality.
 The geography ablation in \S\ref{sec:eval-geo} confirms that the
 two contributions are independent: with the \GDHT prefix removed
-($\mathrm{geoBits} = 0$), \nhone still routes $8\%$ faster than
+($\mathrm{geoBits} = 0$), \axona still routes $8\%$ faster than
 Kademlia purely from learning.
 
 \subsection{Cooperative trust and security tradeoff}
@@ -1579,34 +1588,34 @@ deploy-blocker framing of the broader issue is retired.
 \section{Discussion and Limitations}
 \label{sec:discussion}
 
-\subsection{What \nhone adds beyond predecessors}
+\subsection{What \axona adds beyond predecessors}
 
 \paragraph{Versus Pastry and Tapestry.} Both put locality in the
 routing table; both populate routing-table slots with closest-by-RTT
-peers at insertion time. \nhone retains this property dynamically
+peers at insertion time. \axona retains this property dynamically
 through AP scoring and extends it: routing tables \emph{evolve} via
 LTP, hop caching, triadic closure, and lateral spread, rather than
 being set once at insertion and lazily repaired.
 
 \paragraph{Versus Coral DSHT.} Coral builds nested RTT clusters
-explicitly. \nhone consolidates the cluster hierarchy into a single
+explicitly. \axona consolidates the cluster hierarchy into a single
 vitality-scored set: the high-vitality core plays the local-cluster
 role, mid-vitality entries cover wider strata, and low-vitality peers
 serve as candidate replacements during annealing. The structural
 choice is opposite (one flat table vs.\ multiple nested) but the goal
 --- latency-aware routing --- is shared.
 
-\paragraph{Versus SCRIBE on Pastry.} \nhone integrates pub/sub directly
+\paragraph{Versus SCRIBE on Pastry.} \axona integrates pub/sub directly
 into the protocol rather than layering it on top. The mechanism
 (routed subscribe + reverse-path forwarding) is identical to SCRIBE; the
-difference is that \nhone's axon trees adapt under churn through routed
+difference is that \axona's axon trees adapt under churn through routed
 re-subscribe alone, with no replication, no gossip, and no parent
 tracking. This is structurally simpler and (per
 \S\ref{sec:eval-slice}) measurably effective.
 
 \subsection{Measurement limitations}
 
-\paragraph{Warmup dependency.} \nhone needs $\sim\!5\,000$ lookups
+\paragraph{Warmup dependency.} \axona needs $\sim\!5\,000$ lookups
 before the synaptome converges to its trained asymptote. The first
 minute of deployment is suboptimal. We address this in
 \S\ref{sec:eval-method} via warmup, but a freshly bootstrapped real
@@ -1643,7 +1652,7 @@ until they are addressed:
 \paragraph{Connection-setup friction.} The simulator treats new
 synapses as immediately usable. Real WebRTC requires ICE + STUN/TURN
 + DTLS, taking $1.5$--$3$\,s per new synapse under typical NAT
-conditions. \nhone's most important behavioral results
+conditions. \axona's most important behavioral results
 (Slice World re-stitching, annealing replacement, hop-caching
 cascade) all depend on synapses becoming usable rapidly. Production
 recovery times will be substantially worse than simulator measurements
@@ -1689,7 +1698,7 @@ becomes the lab bench for the next iteration.
 A working DHT has two interfaces, not one. The application above
 wants to publish, subscribe, and look things up; the network below
 wants to open a channel, send a message, and notice when a peer
-goes silent. The protocol is the thing in between. \nhone is
+goes silent. The protocol is the thing in between. \axona is
 structured so the protocol code is genuinely between those two
 layers --- neither the application nor the network is hardwired
 into the routing logic --- which is what makes the same body of
@@ -1735,7 +1744,7 @@ it. Twelve methods in four bands:
   \texttt{notify}, \texttt{onRequest}, \texttt{onNotification}).
   Two outbound primitives: request/response and fire-and-forget.
   The split matters because production transports pay round-trip
-  latency for \texttt{send} but not for \texttt{notify}. \nhone
+  latency for \texttt{send} but not for \texttt{notify}. \axona
   uses \texttt{send} for the routing-tick chain
   (\texttt{lookup\_step}, \texttt{lookahead\_probe},
   \texttt{find\_closest\_set}, \texttt{local\_probe}) and
@@ -1767,7 +1776,7 @@ production runs them through WebRTC data channels with real RTT.
 The protocol code does not switch on which transport it is using.
 
 This is the property that lets the simulator be the deployment
-vehicle. Years of \nhone benchmark numbers --- the hop counts,
+vehicle. Years of \axona benchmark numbers --- the hop counts,
 latency distributions, pub/sub coverage, churn-resilience curves
 in \S\ref{sec:eval} --- transfer directly to production because
 the same code path runs in both worlds. A 25\,K-node parity-gate
@@ -1785,22 +1794,22 @@ stratified bootstrap, and the local self-resolution in
 manifest signature verification, and QR-code pairing
 out-of-band.
 
-\paragraph{Live deployment.} As of v0.3.51 the production
+\paragraph{Live deployment.} As of v0.3.53 the production
 Transport and BootstrapService implementations are live. The
-browser-resident peer (\texttt{axona-peer}) runs at
+browser-resident \axona peer (\texttt{axona-peer}) runs at
 \url{https://axona.net} on Mac, Windows, Linux, iOS, and Android
 behind real-world NATs. The signaling broker
 (\texttt{axona-bridge}) at \url{https://bridge.axona.net}
 handles the WebRTC offer/answer exchange for browser-to-browser
 channels; it carries no application traffic and any operator
 can stand one up, so the rendezvous role is interchangeable.
-The product name for the running network --- peer, bridge,
-SDK --- is \emph{Axona}; \nhone is the routing protocol it
-runs internally. The first end-user application on the live
-network is \texttt{civildefense.io}, a tap-to-report incident
-map whose primitives (signed posts, geographic locality,
-24-hour expiry, anonymous P2P) inherit directly from this
-protocol layer.
+The product name for the protocol and the running network --- peer,
+bridge, SDK --- is \axona; \nhone is the current \axona implementation,
+and the code path it runs internally is the same one against which the
+empirical results in \S\ref{sec:eval} were measured. The first end-user
+application on the live network is \texttt{civildefense.io}, a tap-to-report
+incident map whose primitives (signed posts, geographic locality,
+24-hour expiry, anonymous P2P) inherit directly from this protocol layer.
 
 % ═════════════════════════════════════════════════════════════════════════════
 \section{Future Work}
@@ -1841,7 +1850,7 @@ all become functions of $(\mu, \lambda)$ rather than fixed constants.
 A peer in a stable region anneals slowly; a peer in a high-churn
 region anneals aggressively, automatically.
 
-\paragraph{Metaplastic \nhone.} The natural endpoint of the previous
+\paragraph{Metaplastic \axona.} The natural endpoint of the previous
 direction: expose a single QoS knob (target lookup failure rate) and
 let the system self-tune underlying constants
 (\texttt{decayGamma}, \texttt{INERTIA\_DURATION}, the annealing
@@ -1855,12 +1864,13 @@ constants.
 \section{Conclusion}
 \label{sec:conclusion}
 
-We have presented \nhone, a learning-adaptive distributed hash table
-that operates within $1.18$--$1.28\times$ the Dabek $3\delta$
+We have presented \axona, a learning-adaptive distributed hash table
+and axonal publish/subscribe protocol whose current implementation,
+\nhone, operates within $1.18$--$1.28\times$ the Dabek $3\delta$
 analytical floor for recursive $O(\log N)$ routing on a $50\,000$-node
-network. \nhone consolidates eighteen specialized rules and
-forty-four parameters from its predecessor into twelve rules and
-twelve parameters governed by a single vitality function ---
+network. \axona consolidates eighteen specialized rules and
+forty-four parameters from its predecessor \NXseventeen into twelve rules
+and twelve parameters governed by a single vitality function ---
 $\mathrm{weight} \times \mathrm{recency}$ --- that is a direct
 application of Hebbian long-term potentiation to overlay routing.
 Built-in axonal pub/sub achieves $100\%$ baseline and $100\%$

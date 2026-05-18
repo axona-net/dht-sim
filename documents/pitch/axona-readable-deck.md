@@ -4,7 +4,7 @@ size: 16:9
 theme: default
 paginate: true
 header: ""
-footer: "AXONA · v0.14 · May 2026 · confidential"
+footer: "AXONA · v0.16 · May 2026 · confidential"
 style: |
   /* ── Tufte-inspired typography + cream paper ─────────────────── */
   @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;500;600&family=Inconsolata:wght@400;500&display=swap');
@@ -164,7 +164,7 @@ style: |
 
 <div class="meta">
 
-May 2026 · v0.15 · readable deck
+May 2026 · v0.16 · readable deck
 Source: <a href="https://github.com/axona-net">github.com/axona-net</a> · live: <a href="https://axona.net">axona.net</a>
 Contact: <a href="mailto:davidasmith@gmail.com">davidasmith@gmail.com</a>
 
