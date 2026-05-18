@@ -164,7 +164,7 @@ style: |
 
 <div class="meta">
 
-May 2026 · v0.14 · readable deck
+May 2026 · v0.15 · readable deck
 Source: <a href="https://github.com/axona-net">github.com/axona-net</a> · live: <a href="https://axona.net">axona.net</a>
 Contact: <a href="mailto:davidasmith@gmail.com">davidasmith@gmail.com</a>
 
@@ -331,8 +331,8 @@ Stripe (2010), Twilio (2008), Plaid (2013), MongoDB (2007) — each funded at th
 
 - <span class="head">Neuromorphic routing — the network gets faster the more it's used.</span>
   Every node's routing table is a population of "synapses" — peer references with adaptive weights. Successful deliveries strengthen synapses (Hebbian: *fire together, wire together*); unused ones decay; dead peers prune. After a brief warmup, the table mirrors the actual traffic graph instead of a fixed XOR-distance metric.
-- <span class="head">Axonal pub/sub tree — biology, not coordination.</span>
-  For each topic, the node closest to <code>hash(topic)</code> becomes the <strong>root</strong>. Subscribers attach as direct children. When a root saturates (>20), it recruits one as a <strong>sub-axon</strong> — recursively, mirroring how biological axons branch by receiver density. No central coordinator.
+- <span class="head">Axonal pub/sub — K-replicated, lazy-cached, no central root.</span>
+  The K=5 peers whose IDs are XOR-closest to <code>hash(topic)</code> each independently hold a copy of the subscriber list and a 100-message replay cache. Publish lands at all K; subscribe registers at all K. As long as any one is reachable, the topic works. When a relay's direct-children exceed 20, it recruits a <strong>sub-axon</strong> from its synaptome — branching mirrors how biological axons grow toward receiver density. **Publish-before-subscribe works**: late-arriving subscribers receive a batched replay of cached messages from whichever K-closest peer they reach.
 - <span class="head"><code>publish</code> · <code>subscribe</code> · <code>pull</code> · <code>reshare</code> · <code>metrics</code></span>
   Five verbs cover the application surface. Encryption, schema, ordering — application choice. Same protocol routes a social-media post, an agent's analysis output, a sensor stream, or a multi-party encrypted DM.
 
@@ -361,7 +361,7 @@ Routing picks the highest-weight synapse among those that move closer to the tar
          leaf leaf leaf
 ```
 
-Root recruits sub-axons at >20 direct subscribers · sub-axons recursively recruit · churn detection reheats and re-routes.
+K=5 root replication · lazy cache for publish-before-subscribe · recruits sub-axons at >20 direct subscribers · 100-peer stress test: 100% delivery across publish, replay, and multi-topic scenarios.
 
 #### The five verbs
 

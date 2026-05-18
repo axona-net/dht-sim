@@ -518,6 +518,26 @@ On subscribe arrival, the relay filters its cache to `publishTs > lastSeenTs` an
 
 A subscribe message in NH-1 is simultaneously a liveness probe, a tree-attach request, and a request for missed history. Three jobs, one envelope — the axonal healing model.
 
+### 6.7 Production Refinements (Axona deployment)
+
+Real-network deployment of the pub/sub layer (the **Axona** project, see §17) exposed three corner cases the simulator's abstracted network model hadn't surfaced. Each was fixed in the protocol layer; the production semantics now diverge slightly from the textbook K-closest model.
+
+**Lazy-axon promotion.** Under the upstream protocol, a K-closest node that received a `pubsub:publish-k` for a topic it didn't yet hold a role for would *drop* the message (forwarding it via a routed walk that landed on another empty-role node and gave up). This meant **publish-before-subscribe lost messages**: by the time a subscriber registered, the publisher's earlier messages had been discarded everywhere. The fix is to promote any K-closest receiver to a (childless) root role on first publish, immediately seeding the replay cache. When a subscriber later attaches, the existing `_maybeSendReplay` path serves the cache. Empty-role rootGraceMs (60 s default) bounds the cost: nodes that never accumulate subscribers garbage-collect during the refresh sweep.
+
+**Self-replay (lastSeenTs override).** A subtler interaction: when a node receives a `publish-k` it advances `lastSeenTs[topicId]` to the latest cached publishTs — at the *network* layer. If that same node later subscribes to the topic, the subscribe payload carries that `lastSeenTs`, and the cache filter `m.publishTs > lastSeenTs` excludes every cached message. Net effect: any node in the K-closest set that subscribes to a topic it was implicitly hosting receives **nothing** from replay, even though the messages sit in its own cache. The application-level view (what's been delivered to the local handler) is independent of the network-level view (what publishIds the AxonManager has seen). When `subscriberId === this.nodeId`, replay therefore ignores `lastSeenTs` and fans the full cache directly into the delivery callback.
+
+**Multi-hop sendDirect (tunneled-direct).** The K-closest model assumes any peer can reach any other in one hop. In a real WebRTC mesh, this isn't always true: browsers behind NATs may not have established a direct DataChannel with every other browser. When `peer.sendDirect(target, ...)` is called on a peer that doesn't have `target` in its local transport binding map, the message would silently drop — losing 4 of 5 fan-out attempts in a sparse mesh. The fix is a transport-layer fallback: when the target isn't directly bound, wrap the message in a `__tunneled_direct__` routed envelope and let the existing NH-1 routing walk hop-by-hop to the target. A small handler at the destination unwraps the envelope and dispatches into the local direct-handler table — i.e., the message ends up in `_onSubscribeDirect` / `_onPublishDirect` / `_onDeliver` / `_onReplayBatch` exactly as if a real direct message had arrived. The bridge becomes a routing hop among many, not a privileged relay.
+
+**Production validation.** A 100-peer in-process stress test (`smoke_stress_100.js`) exercises the full pub/sub surface without any bridge process:
+
+| Scenario | Setup | Result |
+|---|---|---|
+| A — single-topic broadcast | 1 publisher, 99 subscribers, 3 messages | **99/99 full delivery**, K=5 axons + recruited sub-axons |
+| B — publish-before-subscribe | 1 publisher emits 5 messages, then 50 subscribers join | **50/50 receive all 5** via replay |
+| C — multi-topic | 5 publishers / 5 topics / 95 subscribers round-robin | **5/5 topics**, all subscribers receive, K=5 axons per topic |
+
+Per-peer participation histogram at N=100: 62 subscriber-only nodes, 33 subscriber+axon, 3 publisher+subscriber, 1 publisher+axon, 1 all-roles — every peer plays at least one role, axon-roles distribute across the network.
+
 ---
 
 ## 7. Performance Characteristics

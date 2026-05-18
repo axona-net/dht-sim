@@ -4,7 +4,7 @@ theme: default
 size: 16:9
 paginate: true
 header: "N-DHT"
-footer: "v0.3.51 · sim v0.70.22 · 2026-05-16"
+footer: "v0.3.52 · sim v0.70.22 · 2026-05-18"
 style: |
   section {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -700,6 +700,44 @@ The decentralized axon tree means every re-publish node — not just the publish
 <br>
 
 <span class="callout">A subscribe message in NH-1 is simultaneously a liveness probe, a tree-attach request, and a request for missed history. Three jobs, one envelope — that's the axonal healing model.</span>
+
+---
+
+## Production refinements — three patches from real-network deployment
+
+The textbook K-closest model passed the simulator. Live deployment (the **Axona** project) surfaced three corner cases:
+
+**Lazy-axon promotion.** Upstream protocol *dropped* publishes that landed at a K-closest node which didn't yet hold a role → publish-before-subscribe lost messages. **Fix:** any K-closest receiver promotes itself on first publish and seeds the replay cache. Empty roles GC after `rootGraceMs` (60 s) so cost stays bounded.
+
+**Self-replay (lastSeenTs override).** When a node receives a publish-k it advances its `_lastSeenTsByTopic` at the *network* layer. If that same node later subscribes, the cache filter `m.publishTs > lastSeenTs` excludes everything — even though the messages sit in its own cache. **Fix:** when `subscriberId === self`, replay the full cache directly into the local handler, ignoring `lastSeenTs`.
+
+**Multi-hop sendDirect.** K-closest assumes any peer can reach any other in one hop. In a real WebRTC mesh, browsers behind NATs may not have direct DataChannels with every other browser. `sendDirect` to an unbound target was silently dropping. **Fix:** transport-layer fallback — wrap the message in `__tunneled_direct__` and route hop-by-hop via the existing NH-1 walk. The bridge becomes a routing hop among many, not a privileged relay.
+
+<span class="muted">All three patches are upstream in `@axona/protocol`. None change wire format; mixed-version networks degrade gracefully.</span>
+
+---
+
+## 100-peer stress test — axonal pub/sub at scale
+
+Single-process N=100 stress (`smoke_stress_100.js`): all peers form a full mesh, no bridge process, three scenarios.
+
+| Scenario | Setup | Result |
+|---|---|---|
+| **A** | 1 publisher → 99 subscribers, 1 topic, 3 messages | **99/99** full delivery |
+| **B** | publish-before-subscribe — 5 messages, then 50 late subscribers | **50/50** receive all 5 via replay |
+| **C** | 5 publishers × 5 topics × 95 round-robin subscribers | **5/5 topics**, all subscribers receive |
+
+Per-peer participation histogram at N=100:
+
+| Role | Count |
+|---|---:|
+| subscriber-only | 62 |
+| subscriber + axon | 33 |
+| publisher + subscriber | 3 |
+| publisher + axon | 1 |
+| all roles | 1 |
+
+<span class="hi">Every peer plays at least one role.</span> Axon-roles distribute across the network as the K-closest set varies per topic — no concentration, no single point of failure.
 
 ---
 

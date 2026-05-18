@@ -170,18 +170,23 @@ A real peer-to-peer network needs more than just "find the node holding key X." 
 
 This is publish/subscribe, or "pub/sub." Think of how YouTube notifies subscribers of a new video — except without YouTube being in the middle.
 
-In neuroscience, the *output* of a neuron — the long branching cable that delivers signals to many downstream targets — is called an **axon**. N-DHT builds axonal delivery trees:
+In neuroscience, the *output* of a neuron — the long branching cable that delivers signals to many downstream targets — is called an **axon**. N-DHT builds axonal delivery using a few simple rules:
 
-- A topic has an ID, derived from the publisher's location and the topic name.
-- Subscribers send a message routed through the DHT toward that topic ID.
-- The first node already participating in the topic's tree intercepts the subscriber and adds them as a child.
-- When a publisher publishes, the message flows from the root down through all the branches.
+**Topic identity.** Every topic has a 64-bit ID, computed offline by anyone who knows the topic. The top 8 bits are the publisher's geographic prefix (the same S2 cell scheme used for node IDs); the bottom 56 bits are a SHA-256 of the topic name. Publisher and subscriber compute the same ID without coordinating — no central registry.
 
-That part is standard. The useful property is that **the tree heals itself with no special machinery**. Every member of the tree periodically re-issues its subscribe message. If the tree is intact, nothing changes. If a parent died, the re-subscribe naturally lands on whichever live ancestor is now closest. No heartbeats, no failure detection, no parent tracking. The same mechanism that *builds* the tree *repairs* it.
+**K-closest replication.** Instead of routing a publish or subscribe to a single "root" node (which would be a single point of failure), the protocol replicates the topic at the **K nodes in the network whose IDs are XOR-closest to the topic ID** — by default K=5. Five different peers each hold a copy of the subscriber list and a small replay cache. A publisher pushes to those K peers; a subscriber registers at those K peers. As long as any one of them is reachable, the topic works.
 
-Result: under 5% churn (5% of nodes joining and leaving constantly), NH-1 still delivers 100% of messages. After three refresh cycles, it recovers from any disruption.
+**Lazy axon promotion.** A node that receives a publish but isn't yet hosting the topic *promotes itself* to a role-holder and starts caching messages immediately. When subscribers arrive later, they find the cache already populated. This makes publish-before-subscribe work: a publisher can broadcast even when nobody is listening yet, and the messages wait for up to ~60 seconds in case someone shows up.
 
-Above the axonal tree sits a feed-style application layer with **five verbs** — `publish`, `subscribe`, `pull`, `reshare`, `metrics`. They cover everything a real social or agent-collaboration application asks of a substrate: author new content, attach to a topic, fetch a referenced post on demand, forward with provenance, and let a publisher see verifiable reach across the cascade — without identifying any individual subscriber. Encryption, schema, and ordering belong to the application above this layer; the protocol carries opaque bytes.
+**Replay on subscribe.** When a subscriber attaches to a K-closest axon, the axon replays its cached messages in a single batch — bounded at 100 messages per topic, with a `lastSeenTs` filter so a re-attaching subscriber only gets what it missed, not everything from scratch. Healing and replay are the same mechanism.
+
+**Tree self-healing.** Subscribers re-issue their subscribe periodically. If an axon died, the re-subscribe naturally lands on whichever K-closest node is now alive — no heartbeats, no failure detection, no parent tracking. Under 5% churn, delivery stays at 100%; after three refresh cycles the tree has fully reformed.
+
+**No special "bridge" or relay node.** In a sufficiently meshed network, peers communicate directly. A signaling server (used to introduce browsers to each other when the network is bootstrapping) is not in the data path once direct peer connections exist. If the signaling server dies, ongoing pub/sub keeps working through the peer mesh.
+
+In production validation, 100 peers in a single network deliver pub/sub messages with 100% success across multiple topics, including the case where five subscribers join *after* the publishes have already happened and pull them from the axons' replay caches. Each peer plays its own role — pure subscriber, axon role-holder, occasional relay — and the load distributes naturally as the K-closest set varies per topic.
+
+Above this delivery layer sits a feed-style application surface with **five verbs** — `publish`, `subscribe`, `pull`, `reshare`, `metrics`. They cover what a real social or agent-collaboration application asks of a substrate: author new content, attach to a topic, fetch a referenced post on demand, forward with provenance, and let a publisher see verifiable reach without identifying any individual subscriber. Encryption, schema, and ordering belong to the application above this layer; the protocol carries opaque bytes.
 
 ## The Big Result: Hitting the Theoretical Floor
 

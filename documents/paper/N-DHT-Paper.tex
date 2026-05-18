@@ -1,5 +1,5 @@
 % NH-1: A Vitality-Driven, Learning-Adaptive Distributed Hash Table
-% Author: David A. Smith, YZ.social
+% Author: David A. Smith, Axona.net
 % Target: 12-page two-column conference format (IEEE P2P / ICDCS / NSDI workshop)
 %
 % Build:  tectonic nh1-paper.tex
@@ -33,11 +33,11 @@
 \newcommand{\NXseventeen}{NX-17\xspace}
 
 % ── Title and authors ────────────────────────────────────────────────────────
-\title{N-DHT: A Learning-Adaptive Distributed Hash Table\\and Axonal Publish/Subscribe\\[0.3em]{\normalsize\normalfont v0.3.51 \quad 2026-05-16}}
+\title{Axona: A Learning-Adaptive Distributed Hash Table\\and Axonal Publish/Subscribe\\[0.3em]{\normalsize\normalfont v0.3.52 \quad 2026-05-18}}
 
 \author{
 \IEEEauthorblockN{David A. Smith}
-\IEEEauthorblockA{YZ.social\\
+\IEEEauthorblockA{Axona.net\\
 \texttt{davidasmith@gmail.com}}
 }
 
@@ -77,7 +77,10 @@ partitions through cooperative re-stitching driven by hop caching and
 triadic closure. An ablation that strips the \GDHT prefix shows learning
 alone outperforms Kademlia by $26\%$, demonstrating that the
 contribution is structural rather than a consequence of locality
-engineering.
+engineering. \nhone is the protocol currently deployed in the
+\emph{Axona} peer-to-peer mesh (\url{https://axona.net}); when this
+paper refers to \nhone, it refers to the same code path validated in
+production browsers across real WebRTC networks.
 \end{abstract}
 
 % ═════════════════════════════════════════════════════════════════════════════
@@ -715,7 +718,7 @@ latency improvement over an all-browser baseline.
 Putting the operations together, one routing tick proceeds as in
 Figure~\ref{fig:tick}.
 
-\begin{figure}[t]
+\begin{figure*}[t]
 {\footnotesize
 \begin{verbatim}
 on lookup(target):
@@ -741,7 +744,7 @@ periodically:  decay_all_weights()         // FORGET
 \textsc{structure}) interleave on every routing step; learning is a
 side-effect of routing rather than a separate maintenance phase.}
 \label{fig:tick}
-\end{figure}
+\end{figure*}
 
 Every operation cost is bounded by $O(|\mathrm{synaptome}|)$. At the
 $50$-synapse cap, per-hop compute is $\sim\!0.2$\,ms --- small relative
@@ -900,6 +903,86 @@ as a single batched message before forwarding the subscribe upstream.
 Healing and replay are the \emph{same} mechanism: a subscriber
 attaching to a new branch after parent death receives both the
 attachment and any messages that elapsed during the gap.
+
+\subsection{Production refinements}
+\label{sec:pubsub-production}
+
+Live deployment of the axonal pub/sub layer on a
+real WebRTC mesh surfaced three corner cases the simulator's abstract
+network model had not exercised. Each is fixed in the protocol layer;
+the production semantics diverge slightly from the simulator-textbook
+description above.
+
+\paragraph{Lazy-axon promotion.}
+The simulator implementation drops a $\mathrm{publish\_k}$ that lands
+at a K-closest node which does not yet hold a role for the topic ---
+falling back to a routed walk that lands on another empty-role node
+and gives up. In a real network, this manifests as
+\emph{publish-before-subscribe lost messages}: the publisher emits
+content before any subscriber has registered, the K-closest peers
+silently discard it, and by the time subscribers attach the messages
+are gone. The fix is to promote any K-closest receiver of an unhandled
+$\mathrm{publish\_k}$ to a (childless) root role immediately and seed
+the replay cache. When a subscriber later attaches, the existing
+replay path serves the cache. Empty roles garbage-collect after
+$\mathrm{rootGraceMs}$ (default $60$\,s) so cost remains bounded:
+nodes that never accumulate subscribers shed their role on the next
+refresh sweep.
+
+\paragraph{Self-replay (\boldmath$\mathrm{lastSeenTs}$ override).}
+A subtler interaction arises from the dual role of
+$\mathrm{lastSeenTs}$. When a K-closest node receives a
+$\mathrm{publish\_k}$ it advances
+$\mathrm{lastSeenTsByTopic}[\mathrm{topicId}]$ to the latest cached
+$\mathrm{publishTs}$ --- recording ``I have seen on the wire.'' If
+that same node \emph{later} subscribes to the topic (a common case
+since K-closest is computed from local synaptome state and may
+include the node itself), the subscribe payload carries that
+$\mathrm{lastSeenTs}$, and the cache filter
+$\mathrm{publishTs} > \mathrm{lastSeenTs}$ excludes every cached
+message --- even though those messages reside in the node's own
+cache and have never been delivered to a local handler. The
+application-level view (``messages delivered to my subscription'')
+is logically independent of the network-level view (``publishIds my
+relay has observed''). For the self-replay case
+($\mathrm{subscriberId} = \mathrm{this.nodeId}$), the protocol
+ignores $\mathrm{lastSeenTs}$ and dispatches the full cache directly
+into the local delivery callback.
+
+\paragraph{Multi-hop \texttt{sendDirect} (tunneled-direct).}
+The K-closest replication model assumes any pair of peers can
+communicate in one hop. In a real WebRTC mesh, this is only true
+when both endpoints have established a direct DataChannel ---
+something NAT traversal does not always achieve. The simulator
+implementation of $\mathrm{sendDirect}$ is a single
+$\mathrm{transport.notify}$ call; with an unbound target, the call
+returns successfully but the message is silently dropped. Under
+sparse mesh conditions, $4$ of $5$ fan-out attempts evaporate this
+way, collapsing the K-replicated topic into whichever single peer
+remains directly bound. The production fix is a transport-layer
+fallback: if the target is not directly bound, wrap the message in
+a $\texttt{\_\_tunneled\_direct\_\_}$ routed envelope and let the
+existing NH-1 routing walk hop-by-hop toward the target. A small
+handler at the destination unwraps the envelope and dispatches into
+the same direct-handler table that a single-hop delivery would
+have hit. The bridge becomes a routing hop among many rather than
+a privileged relay.
+
+\paragraph{Stress validation.}
+A $100$-peer in-process stress harness exercises three scenarios in
+a single Node.js process with no bridge, no WebSockets, and no
+WebRTC --- pure protocol semantics. (1) One publisher, $99$
+subscribers, three messages: $99/99$ full delivery, K=5 axons
+plus recruited sub-axons. (2) Publish-before-subscribe: publisher
+emits five messages with no subscribers, then $50$ subscribers
+join late: all $50$ receive all five via replay. (3) Multi-topic:
+five publishers, five topics, $95$ subscribers round-robin: every
+topic delivered to every assigned subscriber, with K=5 axons per
+topic spread across the network. Per-peer participation profile at
+$N=100$: $62$ subscriber-only, $33$ subscriber+axon, $3$
+publisher+subscriber, $1$ publisher+axon, $1$ all-roles. No idle
+peers, axon-roles distribute as the K-closest set varies per
+topic.
 
 % ═════════════════════════════════════════════════════════════════════════════
 \section{The Geographic DHT (\GDHT)}
