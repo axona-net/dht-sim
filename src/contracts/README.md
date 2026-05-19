@@ -96,6 +96,6 @@ refactor. The plan:
    bottom layer is swapped.
 
 See whitepaper Part IV (the simulator) and Part VI (deployment) for
-the architectural rationale; see the implementation plan in
-`documents/implementation/N-DHT-Implementation-Plan-*.md` for the
-production-pathway sequencing.
+the architectural rationale; see the implementation plans in
+[axona-docs/implementation/](https://github.com/axona-net/axona-docs/tree/main/implementation)
+for the production-pathway sequencing.

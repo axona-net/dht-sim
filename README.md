@@ -23,7 +23,7 @@ This simulator enforces three invariants on every benchmark, with guard rails th
 2. **Locality** — no inter-node information sharing in optimisation paths; each node's `findKClosest` runs independently using only its own routing table.
 3. **Bounded RPC** — `findKClosest` simulates real Kademlia FIND_NODE responses bounded to `k` (= 20) per peer, not full routing-table dumps.
 
-The full technical write-up is in [`documents/Neuromorphic-DHT-Architecture.md`](documents/Neuromorphic-DHT-Architecture.md) / [`.pdf`](documents/Neuromorphic-DHT-Architecture.pdf).
+Full documentation — paper, whitepaper, explainer, presentation deck, readable pitch, architecture references, and red-team analyses — lives in the [**axona-docs**](https://github.com/axona-net/axona-docs) repository. The Whitepaper (Synthesis Edition) is the closest equivalent to the prior `Neuromorphic-DHT-Architecture.md` and is preserved alongside it in [`axona-docs/history/whitepaper/`](https://github.com/axona-net/axona-docs/tree/main/history/whitepaper).
 
 The simulator renders a live WebGL globe of up to 100,000 nodes distributed on land, routes messages between them in real time, and benchmarks every protocol side by side — measuring hop counts, latency, churn resilience, regional performance, load distribution, and learning convergence over time.
 
@@ -1050,7 +1050,7 @@ All NX-6 churn-resilience mechanisms are inherited, so the tree survives node fa
 
 NX-10 also inherits every point-to-point routing optimization from NX-4 and NX-5, making it the current State of the Art for both routing and pub/sub workloads.
 
-See [`documents/Neuromorphic-DHT-Architecture.md`](documents/Neuromorphic-DHT-Architecture.md) for a full rule-by-rule breakdown of NX-10's 16 rules and the biological principles they implement.
+See the original [`Neuromorphic-DHT-Architecture.md`](https://github.com/axona-net/axona-docs/blob/main/history/whitepaper/Neuromorphic-DHT-Architecture.md) (preserved in `axona-docs/history/whitepaper/`) for a full rule-by-rule breakdown of NX-10's 16 rules and the biological principles they implement.
 
 ---
 
@@ -1141,7 +1141,7 @@ All latencies are means over 500 lookups per cell, aggregated over multiple benc
 - Local and concentrated workloads (the dominant real-world case) see the largest improvements.
 - Pub/sub comparison is not head-to-head: Kademlia and G-DHT use flat delivery (relay looks up each subscriber). Only NX-10's Axonal Pub/Sub tree delivers workable pub/sub at scale.
 
-See [`documents/Neuromorphic-DHT-Architecture.md`](documents/Neuromorphic-DHT-Architecture.md) Chapter 7 for full benchmark tables including uncapped-connection results (where NX-10's global latency drops to 191 ms and the gap over Kademlia widens further).
+See the original [`Neuromorphic-DHT-Architecture.md`](https://github.com/axona-net/axona-docs/blob/main/history/whitepaper/Neuromorphic-DHT-Architecture.md) Chapter 7 for full benchmark tables including uncapped-connection results (where NX-10's global latency drops to 191 ms and the gap over Kademlia widens further).
 
 ### Parameters at a glance
 

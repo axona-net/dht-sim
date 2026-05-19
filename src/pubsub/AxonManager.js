@@ -20,8 +20,9 @@
  *   DIRECT:
  *     pubsub:deliver     — payload: { topicId, json }
  *
- * See documents/Phase3-Membership-Protocol-Plan.md for the full design
- * rationale, state model, and parameter defaults.
+ * See axona-docs Phase3-Membership-Protocol-Plan.md
+ * (https://github.com/axona-net/axona-docs/blob/main/Phase3-Membership-Protocol-Plan.md)
+ * for the full design rationale, state model, and parameter defaults.
  */
 
 // ── Defaults (simulator-tuned; production would use much longer values) ────

@@ -59,7 +59,8 @@
 // Earlier NX-17 inherited from NeuromorphicDHTNX15 → NX10 → NX6 and
 // thus carried that lineage's god's-eye `nodeMap.get(peerId)` reads
 // inside its routing primitives (see
-// `documents/red team/protocol-layer-godseye-audit.md`).  Those reads
+// https://github.com/axona-net/axona-docs/blob/main/red%20team/protocol-layer-godseye-audit.md
+// — preserved in the axona-docs repo).  Those reads
 // are now gone, by construction: this NX-17 inherits NH-1's
 // Transport-conformant body without modification.  The benchmark
 // numbers it produces are production-faithful in the same sense NH-1's

@@ -27,7 +27,8 @@
  *
  * Production deployment uses AxonaEngine exclusively.  All
  * V1+V2 cleanup, contract compliance, and observability work targets
- * NH-1.  See `documents/implementation/N-DHT-refactor-punchlist.md`
+ * NH-1.  See axona-docs N-DHT-refactor-punchlist.md
+ * (https://github.com/axona-net/axona-docs/blob/main/implementation/N-DHT-refactor-punchlist.md)
  * for the full violation tally and migration plan.
  *
  * ── Original design notes (preserved for context) ────────────────────
