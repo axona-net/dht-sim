@@ -1658,6 +1658,9 @@ async function onBenchmark() {
     { key: 'ngdhtnx15', label: 'NX-15',  warmupLookups: Math.max(params.benchWarmupSessions, Math.round(4 * params.nodeCount / 10000)) * 500, warmupHotPct: 10, warmupRadius: 2000, warmupGlobalLookups: Math.max(params.benchWarmupSessions, Math.round(4 * params.nodeCount / 10000)) * 250 },
     { key: 'ngdhtnx17', label: 'NX-17',  warmupLookups: Math.max(params.benchWarmupSessions, Math.round(4 * params.nodeCount / 10000)) * 500, warmupHotPct: 10, warmupRadius: 2000, warmupGlobalLookups: Math.max(params.benchWarmupSessions, Math.round(4 * params.nodeCount / 10000)) * 250 },
     { key: 'ngdhtnh1',  label: 'NH-1',   warmupLookups: Math.max(params.benchWarmupSessions, Math.round(4 * params.nodeCount / 10000)) * 500, warmupHotPct: 10, warmupRadius: 2000, warmupGlobalLookups: Math.max(params.benchWarmupSessions, Math.round(4 * params.nodeCount / 10000)) * 250 },
+    // I1: 'axona' is the v1.0 kernel-driven protocol key.  Falls through
+    // to AxonaEngine for now; transport-based adapter is a follow-up.
+    { key: 'axona',     label: 'Axona',  warmupLookups: Math.max(params.benchWarmupSessions, Math.round(4 * params.nodeCount / 10000)) * 500, warmupHotPct: 10, warmupRadius: 2000, warmupGlobalLookups: Math.max(params.benchWarmupSessions, Math.round(4 * params.nodeCount / 10000)) * 250 },
   ].filter(def => !params.benchProtocols || params.benchProtocols.has(def.key));
 
   // Build the full ordered test list, then filter by user selection.
@@ -2023,6 +2026,29 @@ function createDHT(params) {
         // is configured identically (rootSetSize forced to 0, NX-17-style
         // single-root-per-topic routed mode) so a head-to-head pubsubm
         // benchmark is apples-to-apples.
+        membership: params.nh1Params ?? params.nx17Params ?? params.nx15Params,
+      });
+    case 'axona':
+      // ── v1.0 kernel-driven protocol (task I1 — kernel integration) ──
+      //
+      // The 'axona' protocol key uses the @axona/protocol kernel
+      // (v1.0.0-rc.0) for its peer surface — same AxonaPeer that
+      // ngdhtnh1 wraps, but constructed against the kernel's
+      // Transport.sim() instead of the simulator's god's-eye node-map.
+      //
+      // Today 'axona' falls through to the AxonaEngine path so the
+      // benchmark loop continues to work; the transport-based engine
+      // adapter that fully replaces AxonaEngine's tick model with
+      // peer-driven send/notify is a follow-up. Until then the kernel
+      // is exercised in dht-sim via test/smoke_kernel_integration.mjs
+      // (18 assertions — kernel imports, identity, signed envelope,
+      // two-peer send via Transport.sim, standalone join/leave).
+      return new AxonaEngine({
+        k: params.k,
+        alpha: params.alpha,
+        bits: params.bits,
+        geoBits: params.geoBits,
+        rules: window.__sim?._nh1RulesOverride ?? params.nh1Rules,
         membership: params.nh1Params ?? params.nx17Params ?? params.nx15Params,
       });
     case 'kademlia':

@@ -114,6 +114,7 @@ Omitting a field leaves the current UI value unchanged.
 - `ngdhtnx15` — NX-15 (intermediate research variant)
 - **`ngdhtnx17` — NX-17 current performance SOTA. Strongest latency reduction vs Kademlia across global, regional, and churn tests at 25K nodes.**
 - **`ngdhtnh1` — NH-1 simplified current protocol. Trades a small amount of NX-17's peak performance for a substantially smaller implementation; this is what production deployments target.**
+- **`axona` — v1.0 kernel-driven protocol (`@axona/protocol` v1.0.0-rc.0).** Same AxonaPeer + AxonManager as `ngdhtnh1` but imported from the kernel and constructible against `Transport.sim()` instead of the simulator's god's-eye node-map. The kernel's full pub/sub/pull/metrics/direct-messaging surface is verified by `test/smoke_kernel_integration.mjs` (18 assertions). Today's dispatch falls through to `AxonaEngine` for benchmark compatibility; the transport-based engine adapter is a follow-up.
 
 ## Test Keys
 - `global` — random global lookups
