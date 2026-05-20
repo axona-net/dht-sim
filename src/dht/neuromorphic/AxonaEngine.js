@@ -33,13 +33,38 @@ import {
   Synapse,
   NeuronNode,
   AxonManager,
-  randomU64,
-  clz64,
+  randomU32,
   roundTripLatency,
   geoCellId,
 } from '@axona/protocol';
 // `buildXorRoutingTable` is reachable via the deep sub-path import.
 import { buildXorRoutingTable } from '@axona/protocol/utils/geo.js';
+
+// ── Local 64-bit shims ──────────────────────────────────────────────
+// @axona/protocol v1.0 dropped randomU64 and clz64 in favour of the
+// 264-bit primitives in utils/hexid.js (randomU256, clz264).  The
+// simulator's AxonaEngine still drives the legacy BigInt 64-bit
+// node-id path (the kernel's transport-driven peer is the eventual
+// replacement, queued behind the transport-engine adapter).  Inline
+// the two missing helpers locally so the engine compiles against the
+// kernel without dragging legacy exports back into the package.
+//
+// When the engine migrates to the kernel's 264-bit hex identities,
+// these shims and every clz64 call site go away together.
+function randomU64() {
+  const hi = BigInt(randomU32());
+  const lo = BigInt(randomU32());
+  return (hi << 32n) | lo;
+}
+function clz64(x) {
+  if (x === 0n) return 64;
+  let n = 0;
+  for (let i = 63n; i >= 0n; i--) {
+    if ((x >> i) & 1n) break;
+    n++;
+  }
+  return n;
+}
 
 // ── Identity conversions for the AxonManager boundary ────────────────────────
 // AxonManager works in 16-char hex strings; NeuronNode uses BigInt. NH-1
