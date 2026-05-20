@@ -58,12 +58,15 @@ function randomU64() {
 }
 function clz64(x) {
   if (x === 0n) return 64;
-  let n = 0;
-  for (let i = 63n; i >= 0n; i--) {
-    if ((x >> i) & 1n) break;
-    n++;
-  }
-  return n;
+  // Mirror the kernel's clz264 strategy: split into 32-bit chunks and
+  // delegate to Math.clz32 — single-instruction CLZ vs the ~64-iter
+  // BigInt-shift loop the naive version uses (~100× faster).  Critical
+  // at >1K nodes where buildRoutingTables makes ~O(N · synaptome) clz64
+  // calls.
+  const hi = Number((x >> 32n) & 0xFFFFFFFFn);
+  if (hi !== 0) return Math.clz32(hi);
+  const lo = Number(x & 0xFFFFFFFFn);
+  return 32 + Math.clz32(lo);
 }
 
 // ── Identity conversions for the AxonManager boundary ────────────────────────
