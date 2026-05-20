@@ -1185,8 +1185,9 @@ export class AxonaEngine extends DHT {
       const metrics = this.getMetrics(node);
       this._emit({ type: 'cycle-snapshot', timestamp: ts, peerId: node.id, metrics });
       if (reset) {
-        const s = this._nodeStats.get(node);
-        if (s) { s.attempted = 0; s.succeeded = 0; s.sumHops = 0; s.sumLatency = 0; }
+        // Phase 5b: stats live on the peer now.  Engine's _nodeStats
+        // map is vestigial.
+        this._peerFor(node)?._resetStats?.();
         node.msgsSent     = 0;
         node.msgsReceived = 0;
         node.msgsByType   = Object.create(null);
