@@ -114,7 +114,7 @@ Omitting a field leaves the current UI value unchanged.
 - `ngdhtnx15` — NX-15 (intermediate research variant)
 - **`ngdhtnx17` — NX-17 current performance SOTA. Strongest latency reduction vs Kademlia across global, regional, and churn tests at 25K nodes.**
 - **`ngdhtnh1` — NH-1 simplified current protocol. Trades a small amount of NX-17's peak performance for a substantially smaller implementation; this is what production deployments target.**
-- **`axona` — v1.0 kernel-driven protocol (`@axona/protocol` v1.0.0-rc.0).** Same AxonaPeer + AxonManager as `ngdhtnh1` but imported from the kernel and constructible against `Transport.sim()` instead of the simulator's god's-eye node-map. The kernel's full pub/sub/pull/metrics/direct-messaging surface is verified by `test/smoke_kernel_integration.mjs` (18 assertions). Today's dispatch falls through to `AxonaEngine` for benchmark compatibility; the transport-based engine adapter is a follow-up.
+- **`axona` — v1.0 kernel-driven protocol (`@axona/protocol` v1.0.0-rc.0).** Same per-node AxonaPeer as `ngdhtnh1`, but constructed by `TransportAxonaEngine` (in dht-sim) using the kernel's own `SimNetwork` + `simTransport` instead of dht-sim's god's-eye `SimulatedTransport`.  N peers share a single `AxonaDomain` for `simEpoch` + EMA stats + config.  Routing goes through `peer.lookup()` → `transport.send('lookup_step', …)` exactly like a real deployment.  Reaches NH-1 latency/hop parity at 5K nodes (v0.79.0).  Verified by: `test/smoke_kernel_integration.mjs` (18), `test/smoke_kernel_regression.mjs` (30+), `test/smoke_transport_axona_engine.mjs` (9), and the kernel's own `test/smoke_standalone_lookup.mjs` (17).
 
 ## Test Keys
 - `global` — random global lookups
@@ -156,12 +156,12 @@ synaptic locality, dramatically shortening the per-hop wire time.
 - **Success %** — must be 100% under steady-state and ≥99% under 5% churn
   for a protocol to be considered viable.
 
-### Transport-conformance status (v0.71.0)
+### Transport-conformance status (v0.79.0)
 
-All four protocols in the production-comparison set — **NH-1**, **NX-17**,
-**K-DHT**, **G-DHT** — are now Transport-conforming. Each consumes only
-the 12-method Transport contract and exposes the DHT contract upward
-with identical signatures.
+Five protocols in the production-comparison set — **NH-1**, **NX-17**,
+**K-DHT**, **G-DHT**, **Axona** — are Transport-conforming. Each consumes
+only the 12-method Transport contract and exposes the DHT contract
+upward with identical signatures.
 
 | Protocol | Transport-conforming? | Architecture |
 |---|---|---|
@@ -169,6 +169,7 @@ with identical signatures.
 | **NX-17**  | Yes  | Subclass of NH-1 (v0.71.0). Tuned for wider exploration: MAX_SYNAPTOME=60 vs 50, LOOKAHEAD_ALPHA=7 vs 5, slower ANNEAL_COOLING, larger ANNEAL_LOCAL_SAMPLE. Same API/Transport surface, different routing character. |
 | **K-DHT**  | Yes  | Cleaned in v0.3.51 (descriptor FIND_NODE, `_deadPeers` Set, inline latency). Lookup only — no pub/sub. |
 | **G-DHT**  | Yes  | Inherits K-DHT's lookup + transport handlers. Lookup only — no pub/sub. |
+| **Axona**  | Yes (and **kernel-driven**) | Wraps NH-1's per-node logic, imported from `@axona/protocol` v1.0.0-rc.0.  Constructed via `TransportAxonaEngine`: N kernel `AxonaPeer`s, one shared `AxonaDomain`, routing through kernel `SimNetwork` + `simTransport` instead of dht-sim's god's-eye `SimulatedTransport`.  No simulator-internal node-map access in the routing path — `peer.lookup()` walks the mesh via the same `transport.send('lookup_step', …)` recursion a deployed WebRTC peer would use. |
 
 Earlier neuromorphic variants (NS-1…NS-6, NX-1…NX-15) remain on the legacy
 god's-eye path and are kept for ablation / simulator-only study.
@@ -210,6 +211,30 @@ When updating these numbers in pitches, docs, or external materials,
 **rerun the benchmark** rather than trusting stale percentages.
 Hop counts and the resulting latency mix can shift across protocol
 revisions even when the architecture is unchanged.
+
+### Axona-vs-NH-1 parity snapshot (5,000 nodes · May 20 · v0.79.0)
+
+Confirms that `case 'axona'` running the kernel-driven path
+(`TransportAxonaEngine` → N kernel peers over `simTransport`) keeps
+up with the simulator-driven NH-1 even at 5× the milestone-smoke
+population.
+
+| Protocol | global ms | r500 ms | r2000 ms | r5000 ms | success% |
+|---|---|---|---|---|---|
+| Kademlia | 707.6 | 678.5 | 691.6 | 695.2 | 100% |
+| NH-1     | 230.6 |  73.1 | 102.1 | 146.3 | 100% |
+| **Axona**  | **218.5** | **70.4** | **90.3** | **128.6** | **100%** |
+
+Within RNG noise on a single run, Axona-via-Transport.sim is 4–12%
+faster than engine-driven NH-1 across all four tests with
+consistently fewer hops.  The point is parity, not the
+RNG-dominated margin: the kernel runs the same routing logic NH-1
+runs, just through `@axona/protocol`'s own SimNetwork + simTransport
+instead of the simulator's god's-eye SimulatedTransport, and it
+matches NH-1's quality.
+
+25K headline benchmark for Axona is queued — the NX-17/NH-1 numbers
+above are still the published reference until that run lands.
 
 ## Files
 - `results/benchmark_latest.csv` — latest benchmark result
