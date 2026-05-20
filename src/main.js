@@ -58,6 +58,7 @@ import { NeuromorphicDHTNX13 } from './dht/neuromorphic/NeuromorphicDHTNX13.js';
 import { NeuromorphicDHTNX15 } from './dht/neuromorphic/NeuromorphicDHTNX15.js';
 import { NeuromorphicDHTNX17 } from './dht/neuromorphic/NeuromorphicDHTNX17.js';
 import { AxonaEngine }         from './dht/neuromorphic/AxonaEngine.js';
+import { TransportAxonaEngine } from './dht/neuromorphic/TransportAxonaEngine.js';
 import { SimulationEngine }   from './simulation/Engine.js';
 import { Controls }           from './ui/Controls.js';
 import { Results }            from './ui/Results.js';
@@ -2029,27 +2030,33 @@ function createDHT(params) {
         membership: params.nh1Params ?? params.nx17Params ?? params.nx15Params,
       });
     case 'axona':
-      // ── v1.0 kernel-driven protocol (task I1 — kernel integration) ──
+      // ── v1.0 kernel-driven protocol — Transport.sim end-to-end ──
       //
-      // The 'axona' protocol key uses the @axona/protocol kernel
-      // (v1.0.0-rc.0) for its peer surface — same AxonaPeer that
-      // ngdhtnh1 wraps, but constructed against the kernel's
-      // Transport.sim() instead of the simulator's god's-eye node-map.
+      // `case 'axona'` constructs a TransportAxonaEngine: every node
+      // pairs with a kernel AxonaPeer (`@axona/protocol`), all sharing
+      // one AxonaDomain, talking peer-to-peer over kernel SimNetwork +
+      // simTransport.  No god's-eye nodeMap access in the routing
+      // path — `peer.lookup()` walks the mesh via the same
+      // `transport.send('lookup_step', …)` chain a real deployment
+      // would use.
       //
-      // Today 'axona' falls through to the AxonaEngine path so the
-      // benchmark loop continues to work; the transport-based engine
-      // adapter that fully replaces AxonaEngine's tick model with
-      // peer-driven send/notify is a follow-up. Until then the kernel
-      // is exercised in dht-sim via test/smoke_kernel_integration.mjs
-      // (18 assertions — kernel imports, identity, signed envelope,
-      // two-peer send via Transport.sim, standalone join/leave).
-      return new AxonaEngine({
-        k: params.k,
-        alpha: params.alpha,
-        bits: params.bits,
+      // v1 ships bootstrap-quality routing (buildXorRoutingTable XOR
+      // fill).  Engine-side advanced learning that NH-1/NX-17 use to
+      // drop latency (anneal, triadic closure, lateral spread, hop
+      // cache, EMA reinforcement) is queued for follow-up commits
+      // that lift those handlers into the peer.  Until those land,
+      // axona is closer to G-DHT-quality than NH-1-quality on this
+      // path — useful as a correctness signal, not a perf claim.
+      //
+      // The kernel itself is verified via:
+      //   · test/smoke_kernel_integration.mjs  (18 assertions)
+      //   · test/smoke_kernel_regression.mjs   (30 + N×3 at scale)
+      //   · axona-protocol/test/smoke_standalone_lookup.mjs (17)
+      return new TransportAxonaEngine({
+        k:       params.k,
+        alpha:   params.alpha,
+        bits:    params.bits,
         geoBits: params.geoBits,
-        rules: window.__sim?._nh1RulesOverride ?? params.nh1Rules,
-        membership: params.nh1Params ?? params.nx17Params ?? params.nx15Params,
       });
     case 'kademlia':
     default:
