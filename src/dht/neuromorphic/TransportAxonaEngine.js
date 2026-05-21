@@ -201,6 +201,233 @@ export class TransportAxonaEngine extends DHT {
     );
   }
 
+  // ─── DHT contract — removeNode (churn) ──────────────────────────
+  //
+  // The benchmark's churn round calls `await dht.removeNode(node.id)`
+  // for each killed peer.  Without an override the base class throws
+  // "not implemented" and the entire sweep wedges on the first
+  // round, so we wire one up that mirrors AxonaEngine.removeNode
+  // (tear down the per-node DHT-contract wrapper) plus the bits
+  // unique to this engine (stop the kernel SimTransport, drop our
+  // positionByHex entry).
+
+  async removeNode(nodeId) {
+    const node = this.nodeMap.get(nodeId);
+    if (!node) return;
+    node.alive = false;
+    const peer = this._peers.get(nodeId);
+    if (peer) {
+      try { await peer.stop(); } catch { /* not started; safe to drop */ }
+      this._peers.delete(nodeId);
+    }
+    if (node.transport) {
+      try { this._positionByHex.delete(node.transport.getLocalNodeId()); }
+      catch { /* transport already disposed */ }
+      try { await node.transport.stop(); }
+      catch { /* not started */ }
+    }
+    this.nodeMap.delete(nodeId);
+    this.domain._emit({
+      type: 'peer-left', timestamp: Date.now(),
+      peerId: nodeId, reason: 'remove',
+    });
+  }
+
+  // ─── DHT contract — bootstrapJoin (churn replacement) ───────────
+  //
+  // Called by the churn loop after addNode for each replacement
+  // peer.  Walks the synaptome of the sponsor outward (XOR-iterative
+  // closest-set discovery), opens SimTransport channels to every
+  // discovered peer, and admits them as synapses on the new node so
+  // it's reachable from the surviving mesh on the next lookup round.
+  //
+  // Returns the number of synapses installed (also stored as
+  // newNode._joinReach for benchmark introspection).
+
+  async bootstrapJoin(newNodeId, sponsorId) {
+    const newNode = this.nodeMap.get(newNodeId);
+    const sponsor = this.nodeMap.get(sponsorId);
+    if (!newNode || !sponsor) return 0;
+
+    const k = this._k;
+    const alpha = this._alpha;
+    if (newNode._maxSynaptome == null) {
+      const c = newNode.maxConnections ?? Infinity;
+      newNode._maxSynaptome = isFinite(c)
+        ? Math.min(c, this.domain.MAX_SYNAPTOME)
+        : 256;
+    }
+
+    const addPeer = async (peer) => {
+      if (peer.id === newNodeId || newNode.synaptome.has(peer.id)) return false;
+      if (newNode.synaptome.size >= newNode._maxSynaptome) return false;
+      if (!newNode.tryConnect(peer)) return false;
+      const latMs   = roundTripLatency(newNode, peer);
+      const stratum = clz64(newNode.id ^ peer.id);
+      const syn = new Synapse({ peerId: peer.id, latencyMs: latMs, stratum });
+      syn._addedBy = 'bootstrapJoin';
+      newNode.addSynapse(syn);
+      if (this.bidirectional !== false) {
+        peer.addIncomingSynapse(newNode.id, latMs, stratum);
+      }
+      // Open the kernel SimTransport channel so lookup_step.send can
+      // route between them.  Tolerate failures (peer transport may
+      // already be torn down by a concurrent removeNode in heavy
+      // churn — the next refresh round retries).
+      try { await newNode.transport.openConnection(peer.id); } catch {}
+      return true;
+    };
+
+    const findClosest = (node, targetId) => {
+      const peers = [], seen = new Set();
+      for (const s of node.synaptome.values()) {
+        const p = this.nodeMap.get(s.peerId);
+        if (p?.alive && !seen.has(p.id)) { seen.add(p.id); peers.push(p); }
+      }
+      for (const s of node.incomingSynapses.values()) {
+        const p = this.nodeMap.get(s.peerId);
+        if (p?.alive && !seen.has(p.id)) { seen.add(p.id); peers.push(p); }
+      }
+      peers.sort((a, b) => {
+        const da = a.id ^ targetId, db = b.id ^ targetId;
+        return da < db ? -1 : da > db ? 1 : 0;
+      });
+      return peers.slice(0, k);
+    };
+
+    const iterLookup = async (targetId, startNode, maxRounds) => {
+      const queried = new Set([newNodeId]);
+      let shortlist = findClosest(startNode, targetId);
+      for (const p of shortlist) await addPeer(p);
+      for (let round = 0; round < maxRounds; round++) {
+        const unq = shortlist.filter(n => !queried.has(n.id)).slice(0, alpha);
+        if (!unq.length) break;
+        let improved = false;
+        for (const peer of unq) {
+          queried.add(peer.id);
+          for (const c of findClosest(peer, targetId)) {
+            if (c.id !== newNodeId && !queried.has(c.id)) {
+              await addPeer(c);
+              if (!shortlist.some(n => n.id === c.id)) {
+                shortlist.push(c); improved = true;
+              }
+            }
+          }
+        }
+        shortlist.sort((a, b) => {
+          const da = a.id ^ targetId, db = b.id ^ targetId;
+          return da < db ? -1 : da > db ? 1 : 0;
+        });
+        shortlist = shortlist.slice(0, k);
+        if (!improved) break;
+      }
+    };
+
+    await addPeer(sponsor);
+    await iterLookup(newNodeId, sponsor, 10);
+
+    newNode._joinReach = newNode.synaptome.size;
+    return newNode._joinReach;
+  }
+
+  // ─── DHT contract — postChurnHeal ────────────────────────────────
+  //
+  // Called once at the end of each churn round.  Asks each surviving
+  // peer's AxonaPeer to evict synapses pointing at known-dead peers
+  // and replace them via the kernel's _evictAndReplace primitive.
+
+  async postChurnHeal() {
+    for (const [nodeId, peer] of this._peers.entries()) {
+      const node = this.nodeMap.get(nodeId);
+      if (!node?.alive) continue;
+      const deadSet = node._deadPeers || new Set();
+      const dead = [];
+      for (const syn of node.synaptome.values()) {
+        if (deadSet.has(syn.peerId) || !this.nodeMap.get(syn.peerId)?.alive) {
+          dead.push(syn);
+        }
+      }
+      for (const syn of dead) {
+        node.synaptome.delete(syn.peerId);
+        node.connections?.delete(syn.peerId);
+        try { await node.transport.closeConnection(syn.peerId); } catch {}
+
+        // Replacement: the kernel's _evictAndReplace path queries
+        // `_localCandidate` via `local_probe` RPCs — but
+        // _installRoutingHandlers doesn't wire that handler yet
+        // ("not yet wired" per the kernel comment), so the RPC
+        // never returns and no replacement is admitted.  Without
+        // a replacement, post-churn synaptomes shrink each round
+        // and the routing graph degrades (observed: 50% success
+        // at 500 nodes after 5 churn rounds).
+        //
+        // Use the simulator's god's-eye nodeMap to pick a
+        // replacement at the dead synapse's stratum group.  This
+        // matches what AxonaEngine.postChurnHeal does via
+        // `_evictAndReplace` on the engine-driven path; we just
+        // skip the routed-probe step and read directly from
+        // nodeMap.
+        await this._installReplacement(node, syn);
+      }
+      for (const peerId of [...node.incomingSynapses.keys()]) {
+        if (deadSet.has(peerId) || !this.nodeMap.get(peerId)?.alive) {
+          node.incomingSynapses.delete(peerId);
+        }
+      }
+      if (dead.length > 0) {
+        node.temperature = Math.max(node.temperature, this.domain.T_REHEAT ?? 1);
+        // Clear the dead-peers cache so the next lookup round can
+        // freely probe peers that were marked dead during this round.
+        deadSet.clear?.();
+      }
+    }
+  }
+
+  /**
+   * Pick a stratum-matched replacement for a recently-evicted dead
+   * synapse from the live nodeMap.  XOR-closest live peer in the
+   * dead synapse's stratum group that's NOT already in the
+   * synaptome.  Opens the SimTransport channel and admits the
+   * synapse so the lookup graph repairs immediately.
+   *
+   * @private
+   */
+  async _installReplacement(node, deadSyn) {
+    if (node.synaptome.size >= (node._maxSynaptome ?? this.domain.MAX_SYNAPTOME)) {
+      return null;
+    }
+    const targetStratum = deadSyn.stratum;
+    // Walk nodeMap, score by stratum-distance and XOR-distance.
+    let best = null;
+    let bestScore = Infinity;
+    for (const candidate of this.nodeMap.values()) {
+      if (!candidate.alive) continue;
+      if (candidate.id === node.id) continue;
+      if (node.synaptome.has(candidate.id)) continue;
+      const stratum = clz64(node.id ^ candidate.id);
+      const stratumDist = Math.abs(stratum - targetStratum);
+      // Tie-break stratum equality by XOR distance — smaller is closer.
+      const xor = node.id ^ candidate.id;
+      const score = stratumDist * 1_000_000 + Number(xor & 0xffffffffn);
+      if (score < bestScore) {
+        bestScore = score;
+        best = candidate;
+      }
+    }
+    if (!best) return null;
+    if (!node.tryConnect(best)) return null;
+    try { await node.transport.openConnection(best.id); } catch {}
+    const latMs   = roundTripLatency(node, best);
+    const stratum = clz64(node.id ^ best.id);
+    const syn = new Synapse({ peerId: best.id, latencyMs: latMs, stratum });
+    syn._addedBy = 'postChurnHeal';
+    node.addSynapse(syn);
+    if (this.bidirectional !== false) {
+      best.addIncomingSynapse(node.id, latMs, stratum);
+    }
+    return syn;
+  }
+
   // ─── DHT contract — lookup ───────────────────────────────────────
 
   /**
@@ -212,6 +439,92 @@ export class TransportAxonaEngine extends DHT {
     const peer = this._peers.get(sourceId);
     if (!peer) return { found: false, hops: 0, path: [sourceId], time: 0 };
     return peer.lookup(targetId);
+  }
+
+  // ─── DHT contract — dispose (release everything between protocols) ──
+  //
+  // dht-sim calls dht.dispose() synchronously before allocating the
+  // next protocol's engine (main.js:304).  Without this override the
+  // base class's dispose runs against `this.network` / `this.nodeMap`
+  // but never sees TransportAxonaEngine's own large object graphs —
+  // _peers (N AxonaPeers), _network (kernel SimNetwork holding N
+  // SimTransports), _positionByHex — and the next protocol's allocation
+  // happens on top of a still-live Axona graph.  At 25K × 5 protocols
+  // that's enough to OOM browser memory ~10 minutes into a sweep.
+  //
+  // The teardown has to be synchronous because dispose itself is
+  // synchronous (the base contract).  We can't await peer.stop() /
+  // transport.stop() here; instead we walk every Map/Set/timer that
+  // would root a SimTransport or AxonaPeer and clear it directly.
+  // Any in-flight async work resolves to no-ops because the maps are
+  // already empty.  GC reclaims the cycle on the next minor.
+
+  dispose() {
+    // Step 1 — neutralise every AxonaPeer: clear its handler tables
+    // and subscriptions so closures over `peer` don't keep nodes /
+    // transport alive through the synaptome cache.
+    if (this._peers instanceof Map) {
+      for (const peer of this._peers.values()) {
+        try {
+          if (peer._engineListenerUnsub) {
+            peer._engineListenerUnsub();
+            peer._engineListenerUnsub = null;
+          }
+          peer._directHandlers?.clear?.();
+          peer._routedHandlers?.clear?.();
+          peer._subscriptions?.clear?.();
+          peer._axonManager = null;
+          peer._started = false;
+          peer._transport = null;
+          peer._node = null;
+        } catch { /* defensive — never throw out of dispose */ }
+      }
+      this._peers.clear();
+      this._peers = null;
+    }
+
+    // Step 2 — tear down every SimTransport synchronously.  Critical
+    // bits: (a) clearInterval all heartbeats (timers root the transport
+    // from the runtime); (b) clear the SimNetwork's _transports registry
+    // entry (otherwise the network roots the transport).
+    if (this._network) {
+      const transports = this._network._transports;
+      if (transports instanceof Map) {
+        for (const t of transports.values()) {
+          try {
+            if (t._heartbeats instanceof Map) {
+              for (const h of t._heartbeats.values()) clearInterval(h);
+              t._heartbeats.clear();
+            }
+            t._latency?.clear?.();
+            t._openTo?.clear?.();
+            t._pendingRequests?.clear?.();
+            t._diedHandlers?.clear?.();
+            t._requestHandlers?.clear?.();
+            t._notificationHandlers?.clear?.();
+            t._network = null;
+            t._localId = null;
+            t._started = false;
+          } catch {}
+        }
+        transports.clear();
+      }
+      // Null out latencyFn closure — it captures positionByHex which
+      // captures every NeuronNode.
+      try { this._network._latencyFn = null; } catch {}
+      this._network = null;
+    }
+
+    if (this._positionByHex instanceof Map) {
+      this._positionByHex.clear();
+      this._positionByHex = null;
+    }
+
+    // Step 3 — base-class cleanup walks nodeMap (synaptomes, etc.)
+    // and the *dht-sim* SimulatedNetwork at this.network.  Calling it
+    // last so our Axona-specific clears run first while peers still
+    // resolve.
+    super.dispose();
   }
 
   // ─── DHT contract — health / introspection ──────────────────────
