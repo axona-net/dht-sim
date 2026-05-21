@@ -227,6 +227,21 @@ export class TransportAxonaEngine extends DHT {
       catch { /* not started */ }
     }
     this.nodeMap.delete(nodeId);
+
+    // Memory: same zombie-reference sweep as KademliaDHT.removeNode
+    // and AxonaEngine.removeNode.  Without this, every surviving
+    // node's synaptome + incomingSynapses Map keeps the dying
+    // node's Synapse object reachable, which keeps the dying node
+    // and its own back-references reachable.  Compounds per churn
+    // round and exhausts the heap at 25K within 2-3 rounds.
+    if (node.synaptome instanceof Map) node.synaptome.clear();
+    if (node.incomingSynapses instanceof Map) node.incomingSynapses.clear();
+    for (const other of this.nodeMap.values()) {
+      if (!other || other === node) continue;
+      other.synaptome?.delete?.(nodeId);
+      other.incomingSynapses?.delete?.(nodeId);
+    }
+
     this.domain._emit({
       type: 'peer-left', timestamp: Date.now(),
       peerId: nodeId, reason: 'remove',

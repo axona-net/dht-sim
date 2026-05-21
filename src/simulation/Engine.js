@@ -503,6 +503,42 @@ export class SimulationEngine {
     const totalProtos = protocolDefs.length;
     let deltaReported = false;  // δ baseline measurement — once per sweep
 
+    // ── Diagnostic instrumentation ──────────────────────────────────────
+    //
+    // Print one line per protocol start, per test cell start, per churn
+    // round, per test cell end, and per protocol end — with current heap
+    // usage in MB.  performance.memory is Chrome-only (V8 exposes it
+    // unconditionally when devtools is open; behind the
+    // --enable-precise-memory-info flag otherwise).  Other engines just
+    // log without the heap number.
+    //
+    // Format: `[bench] <event> protocol=… ...`  — grep-friendly.
+
+    const heapMB = () => {
+      const m = (typeof performance !== 'undefined' && performance.memory)
+        ? performance.memory
+        : null;
+      if (!m) return '?';
+      const used = (m.usedJSHeapSize / 1048576).toFixed(1);
+      const limit = (m.jsHeapSizeLimit / 1048576).toFixed(0);
+      return `${used}/${limit}MB`;
+    };
+
+    const logBench = (...parts) => {
+      const line = '[bench] ' + parts.join(' ') + ' heap=' + heapMB();
+      // Console — visible in DevTools, captured by Preview's log surface.
+      console.log(line);
+      // POST to the server so it lands in research.log too.  Async,
+      // fire-and-forget; an HTTP error here must never abort the sweep.
+      try {
+        fetch('/api/log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entry: line }),
+        }).catch(() => {});
+      } catch (_) { /* ignore */ }
+    };
+
     for (let defIdx = 0; defIdx < totalProtos; defIdx++) {
       const def = protocolDefs[defIdx];
       if (!this.running) break;
@@ -511,8 +547,12 @@ export class SimulationEngine {
       const tag = `${def.label} (${defIdx + 1}/${totalProtos})`;
 
       // Build phase reported by caller via def.buildFn
+      logBench('PROTOCOL-build-start', `protocol=${def.label}`,
+               `(${defIdx + 1}/${totalProtos})`);
       const dht = await def.buildFn();
       if (!dht) continue;
+      logBench('PROTOCOL-build-done', `protocol=${def.label}`,
+               `nodes=${dht.getNodes?.().length ?? '?'}`);
 
       // δ baseline: median pairwise one-way latency for this population.
       // Used as the Dabek 3δ theoretical floor for lookup latency.
@@ -685,6 +725,10 @@ export class SimulationEngine {
           for (let round = 0; round < CHURN_ROUNDS; round++) {
             if (!this.running) break;
             onStart(`${tag} · churn round ${round + 1}/${CHURN_ROUNDS} (${spec.rate}% turnover)…`);
+            logBench('CHURN-round',
+                     `protocol=${def.label}`,
+                     `round=${round + 1}/${CHURN_ROUNDS}`,
+                     `rate=${spec.rate}%`);
 
             const alive = dht.getNodes().filter(n => n.alive);
             const numToReplace = Math.max(1, Math.floor(alive.length * rate));
@@ -1715,6 +1759,9 @@ export class SimulationEngine {
 
         const cellLabel = `${tag} · ${specLabel(spec)}`;
         onStart(`${cellLabel}…`);
+        logBench('TEST-start',
+                 `protocol=${def.label}`, `test=${specKey(spec)}`,
+                 `n=${dht.getNodes?.().filter(n => n.alive).length ?? '?'}`);
 
         const result = await this.runLookupTest(dht, {
           numMessages,
@@ -1736,14 +1783,21 @@ export class SimulationEngine {
         };
 
         onStep(`${cellLabel} ✓`);
+        logBench('TEST-done',
+                 `protocol=${def.label}`, `test=${specKey(spec)}`,
+                 `hops=${result.hops?.toFixed?.(2) ?? '?'}`,
+                 `ms=${result.time?.toFixed?.(1) ?? '?'}`,
+                 `success=${((result.successRate ?? 0) * 100).toFixed(1)}%`);
       }
 
       // Explicitly release all node/synapse memory before building the next
       // protocol's DHT.  Without this, V8 may not GC the old DHT before the
       // new one is fully built, briefly doubling memory usage — fatal at 50k+
       // nodes where a single protocol's synaptome can approach the heap limit.
+      logBench('PROTOCOL-dispose-start', `protocol=${def.label}`);
       dht.dispose?.();
       await this._yield(); // give the GC a chance to collect before next build
+      logBench('PROTOCOL-dispose-done', `protocol=${def.label}`);
     }
 
     this.running = false;

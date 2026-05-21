@@ -554,6 +554,26 @@ export class AxonaEngine extends DHT {
       try { peer.stop(); } catch { /* peer wasn't started; safe to drop */ }
       this._peers.delete(node);
     }
+
+    // Memory: same retained-reference graph that hit K-DHT/G-DHT at
+    // 25K churn — every surviving peer's `synaptome` + `incomingSynapses`
+    // Map holds a JS reference to the dying node's Synapse object,
+    // which closes over the dying node's other state.  postChurnHeal
+    // only acts on _deadPeers (populated lazily by routing failures),
+    // so by churn round 2-3 thousands of zombie synaptomes are still
+    // reachable through other nodes' maps and the heap exhausts.
+    //
+    // Sweep all surviving peers' synaptome + incomingSynapses for
+    // entries pointing at this nodeId, plus the dying node's own
+    // back-references so its own state is collectible immediately.
+    if (node.synaptome instanceof Map) node.synaptome.clear();
+    if (node.incomingSynapses instanceof Map) node.incomingSynapses.clear();
+    for (const other of this.nodeMap.values()) {
+      if (!other || other === node) continue;
+      other.synaptome?.delete?.(nodeId);
+      other.incomingSynapses?.delete?.(nodeId);
+    }
+
     this._emit({
       type: 'peer-left', timestamp: Date.now(),
       peerId: nodeId, reason: 'remove',
