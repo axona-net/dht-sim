@@ -196,6 +196,13 @@ export class TransportAxonaEngine extends DHT {
       }
     }
 
+    // Diagnostic: emit the same shape of synaptome-size summary the
+    // AxonaEngine path emits so we can compare bootstrap fill quality
+    // directly across the two paths in research.log.
+    this._logSynaptomeStats('post-bootstrap', {
+      bidirectional, maxConnections, maxOutgoing, maxIncoming, highwayPct,
+    });
+
     // Open every transport channel between paired nodes so the
     // kernel's lookup_step send() finds open channels.  Bilateral
     // admission is automatic.
@@ -211,6 +218,62 @@ export class TransportAxonaEngine extends DHT {
         }
       }),
     );
+  }
+
+  /**
+   * Mirror of AxonaEngine._logSynaptomeStats for the transport-driven
+   * path.  Emits "[Axona SYN <label>]" lines to /api/log so the
+   * bootstrap-fill comparison between NH-1 and Axona can be done
+   * directly from research.log.
+   *
+   * Identical math to AxonaEngine — copy here rather than abstract
+   * upward so any future divergence in what each engine tracks
+   * shows up loudly.
+   */
+  _logSynaptomeStats(label, ctx = {}) {
+    if (!this.nodeMap || this.nodeMap.size === 0) return;
+    const acc = (bucket, size, atCap, outD, inD) => {
+      bucket.n++;
+      bucket.sum += size;
+      if (size > bucket.max) bucket.max = size;
+      if (size < bucket.min) bucket.min = size;
+      if (atCap) bucket.atCap++;
+      bucket.outSum += outD;
+      bucket.inSum  += inD;
+      if (outD > bucket.outMax) bucket.outMax = outD;
+      if (inD  > bucket.inMax)  bucket.inMax  = inD;
+    };
+    const newBucket = () => ({ n: 0, sum: 0, max: 0, min: Infinity, atCap: 0, outSum: 0, inSum: 0, outMax: 0, inMax: 0 });
+    const norm = newBucket();
+    const hwy  = newBucket();
+    for (const node of this.nodeMap.values()) {
+      const size = node.synaptome?.size ?? 0;
+      const cap  = node._maxSynaptome ?? this.domain.MAX_SYNAPTOME;
+      const at   = size >= cap;
+      const outD = node._outboundConns?.size ?? 0;
+      const inD  = (node.connections?.size ?? 0) - outD;
+      if (node.isHighway) acc(hwy, size, at, outD, inD);
+      else                acc(norm, size, at, outD, inD);
+    }
+    const fmt = (b, capLabel) => b.n === 0
+      ? `none`
+      : `n=${b.n} syn=${(b.sum/b.n).toFixed(1)} synMax=${b.max} atCap=${(100*b.atCap/b.n).toFixed(0)}% out=${(b.outSum/b.n).toFixed(1)}/${b.outMax} in=${(b.inSum/b.n).toFixed(1)}/${b.inMax} synCap=${capLabel}`;
+    const entry = `[Axona SYN ${label}] ` +
+      `hwPct=${ctx.highwayPct ?? 0} maxConn=${ctx.maxConnections} ` +
+      `maxOut=${ctx.maxOutgoing} maxIn=${ctx.maxIncoming} ` +
+      `MAX_SYNAPTOME=${this.domain.MAX_SYNAPTOME} | ` +
+      `normal{${fmt(norm, this.domain.MAX_SYNAPTOME)}} | ` +
+      `highway{${fmt(hwy, 256)}}`;
+    if (typeof fetch !== 'undefined') {
+      try {
+        fetch('/api/log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entry }),
+        }).catch(() => {});
+      } catch { /* non-browser environment */ }
+    }
+    if (typeof console !== 'undefined') console.log(entry);
   }
 
   // ─── DHT contract — removeNode (churn) ──────────────────────────
