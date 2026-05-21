@@ -150,6 +150,39 @@ export class DHT {
     // memory is freed on the next minor GC rather than waiting for a full cycle.
     if (this.nodeMap instanceof Map) {
       for (const node of this.nodeMap.values()) {
+        // v0.81.x — per-node SimulatedTransport cleanup.
+        //
+        // The Transport-conformance refactor (kdht/gdht/nh1/nx17 — see
+        // commits bb64842, 47e1811, a963f73) gave every node its own
+        // SimulatedTransport via `network.makeTransport(id)`.  Each
+        // transport carries _requestHandlers / _notificationHandlers
+        // Maps whose handler functions close over the node and the
+        // owning protocol instance, AND registers itself in
+        // `network._transports`.  Without explicit teardown here,
+        // SimulatedNetwork._transports keeps every transport alive
+        // across protocol switches → handler closures pin every
+        // protocol instance + node graph → memory grows ~linearly
+        // with #protocols × 25K nodes and crashes the tab on the
+        // 3rd-4th protocol of a 5-protocol sweep.
+        //
+        // Clear the handler maps and detach the transport from the
+        // network before clearing the node's own state.  Stop() is
+        // async so we can't await it from sync dispose — instead
+        // we replicate its effect: clear handlers, then drop the
+        // network's reference so GC can reclaim the transport.
+        const t = node.transport;
+        if (t) {
+          t._requestHandlers?.clear?.();
+          t._notificationHandlers?.clear?.();
+          if (Array.isArray(t._peerDiedHandlers)) t._peerDiedHandlers.length = 0;
+          else t._peerDiedHandlers?.clear?.();
+          t._simNet     = null;     // SimulatedTransport back-ref
+          t._network    = null;     // kernel simTransport back-ref
+          t._localNodeId = null;
+          t._localId    = null;
+          t._started    = false;
+          node.transport = null;
+        }
         node.synaptome?.clear();
         node.incomingSynapses?.clear();
         node.highway?.clear();
@@ -165,11 +198,23 @@ export class DHT {
       this.nodeMap.clear();
       this.nodeMap = null;
     }
-    // Clear the network node registry.
+    // Clear the network node + transport registries.  SimulatedNetwork
+    // also holds `_transports` (added during the Transport-conformance
+    // refactor) — left un-cleared this map roots every transport's
+    // handler closures across protocol switches.
     if (this.network) {
       this.network.nodes?.clear();
+      this.network._transports?.clear?.();
       this.network = null;
     }
+    // Per-protocol registries the base class doesn't know about by
+    // name but that pin large object graphs when un-cleared:
+    //   · KademliaDHT.incomingPeers — Map<id, Set<peerId>>
+    //   · GeographicDHT inherits buckets / incomingPeers from K-DHT
+    //   · NX-17 / NH-1 / AxonaEngine carry _peers / _axonsByNode etc.,
+    //     which their own dispose() overrides clear before super.
+    this.incomingPeers?.clear?.();
+    this.buckets = null;
   }
 
   /** Human-readable protocol name – used in UI. */
