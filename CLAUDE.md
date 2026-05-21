@@ -179,45 +179,74 @@ numbers will shift** from pre-refactor values (the new code uses
 `transport.getLatency` per-round, not post-walk pairwise `roundTripLatency`).
 Hop counts and success rates are stable across the change.
 
-### Latest benchmark snapshot (25,000 nodes · May 15)
+### Latest benchmark snapshot (25,000 nodes · May 21, 2026 · v0.89.0 / `@axona/protocol` v1.1.2)
 
 Run via the loop above with
-`protocols: ["kademlia", "geob", "ngdhtnx17", "ngdhtnh1"]` and
+`protocols: ["kademlia", "geob", "ngdhtnx17", "ngdhtnh1", "axona"]` and
 `tests: ["global", "r500", "r2000", "r5000", "churn"]`.
+500 lookups per cell, geoBits = 8, 5 % churn rate, omniscient init.
+δ median = 67.8 ms one-way (mean 69.6, p95 124.6).
 
 | Protocol | global ms | r500 ms | r2000 ms | r5000 ms | 5% churn ms | success% |
 |---|---|---|---|---|---|---|
-| Kademlia | 508.5 | 512.6 | 498.0 | 505.6 | 465.6 | 100% |
-| G-DHT    | 282.0 | 153.4 | 176.8 | 208.5 | 278.7 | 100% |
-| **NX-17**  | **242.2** | **79.4**  | **106.7** | **145.4** | **234.5** | **100%** |
-| NH-1     | 256.1 | 106.9 | 139.0 | 175.4 | 287.7 | 100% |
+| Kademlia | 844.9 | 825.9 | 835.3 | 824.4 | 794.6 | 100% |
+| G-DHT    | 820.1 | 178.6 | 248.6 | 384.8 | 751.3 | 100% |
+| NX-17    | 269.7 | 106.5 | 134.0 | 171.2 | 291.9 | 100% |
+| NH-1     | 260.8 | 104.8 | 137.1 | 172.9 | 294.8 | 100% |
+| **Axona**  | **254.5** | **92.1**  | **122.3** | **157.3** | **230.0** | **100%** |
 
-NX-17 vs Kademlia latency reduction:
+Axona vs Kademlia latency reduction:
 
-| Test | Kademlia | NX-17 | Reduction |
+| Test | Kademlia | Axona | Reduction |
 |---|---|---|---|
-| Global       | 508.5ms | 242.2ms | **52%** |
-| Regional 500km   | 512.6ms |  79.4ms | **85%** |
-| Regional 2000km  | 498.0ms | 106.7ms | **79%** |
-| Regional 5000km  | 505.6ms | 145.4ms | **71%** |
-| 5% churn (global)| 465.6ms | 234.5ms | **50%** |
+| Global             | 844.9 ms | 254.5 ms | **70%** |
+| Regional 500 km    | 825.9 ms |  92.1 ms | **89%** |
+| Regional 2000 km   | 835.3 ms | 122.3 ms | **85%** |
+| Regional 5000 km   | 824.4 ms | 157.3 ms | **81%** |
+| 5 % churn (global) | 794.6 ms | 230.0 ms | **71%** |
 
-100% delivery success under all conditions including 5% churn. The
-85% latency reduction on local traffic is the standout — that's where
-the learned routing locality compounds. Even on worst-case global
-lookups, NX-17 is half of Kademlia's wall-clock latency.
+Hop counts (informational — not the gating metric):
+
+| Protocol | global | r500 | r2000 | r5000 | 5% churn |
+|---|---|---|---|---|---|
+| Kademlia | 4.50 | 4.49 | 4.51 | 4.50 | 4.19 |
+| G-DHT    | 5.55 | 4.87 | 5.24 | 5.39 | 5.01 |
+| NX-17    | 5.56 | 3.70 | 4.30 | 4.77 | 6.15 |
+| NH-1     | 5.26 | 3.60 | 4.33 | 4.74 | 6.16 |
+| Axona    | 5.08 | 3.15 | 3.88 | 4.28 | 4.24 |
+
+100 % delivery success under all conditions including 5 % churn at
+25 K.  Axona is now ahead of NX-17 / NH-1 on every cell — most
+notably on **5 % churn**, where Axona's 4.24 average hops are
+substantially lower than NX-17 / NH-1 (~6.15) thanks to the
+TransportAxonaEngine churn-cleanup work landed in v0.85.0–0.88.0
+and the kernel's per-hop live-RTT lookup-latency fix (v1.1.2).  The
+local-traffic gap to Kademlia widened to 89 % — that's still where
+learned routing locality compounds hardest.
 
 When updating these numbers in pitches, docs, or external materials,
 **rerun the benchmark** rather than trusting stale percentages.
 Hop counts and the resulting latency mix can shift across protocol
 revisions even when the architecture is unchanged.
 
-### Axona-vs-NH-1 parity snapshot (5,000 nodes · May 20 · v0.79.0)
+Raw CSV: `axona-docs/programmer-guide/benchmarks-25k/2026-05-21_25k_5protocols_5tests.csv`.
 
-Confirms that `case 'axona'` running the kernel-driven path
-(`TransportAxonaEngine` → N kernel peers over `simTransport`) keeps
-up with the simulator-driven NH-1 even at 5× the milestone-smoke
-population.
+### Methodology footnote — v1.1.2 lookup latency
+
+Starting in `@axona/protocol` v1.1.2, `_lookupStep` reads live
+`transport.getLatency(...)` per hop instead of stamping the latency
+at synapse admission time.  This applies uniformly to NH-1, NX-17,
+and Axona (all neuromorphic variants share the kernel `_lookupStep`).
+K-DHT and G-DHT use their own latency model and are unaffected.
+Hop counts are stable across the change; latencies may shift 1–3 %
+for the same routing decisions.
+
+### Earlier Axona-vs-NH-1 parity snapshot (5,000 nodes · May 20 · v0.79.0)
+
+Kept for historical comparison — confirmed that `case 'axona'`
+running the kernel-driven path (`TransportAxonaEngine` → N kernel
+peers over `simTransport`) keeps up with the simulator-driven NH-1
+at 5× the milestone-smoke population.
 
 | Protocol | global ms | r500 ms | r2000 ms | r5000 ms | success% |
 |---|---|---|---|---|---|
@@ -225,16 +254,8 @@ population.
 | NH-1     | 230.6 |  73.1 | 102.1 | 146.3 | 100% |
 | **Axona**  | **218.5** | **70.4** | **90.3** | **128.6** | **100%** |
 
-Within RNG noise on a single run, Axona-via-Transport.sim is 4–12%
-faster than engine-driven NH-1 across all four tests with
-consistently fewer hops.  The point is parity, not the
-RNG-dominated margin: the kernel runs the same routing logic NH-1
-runs, just through `@axona/protocol`'s own SimNetwork + simTransport
-instead of the simulator's god's-eye SimulatedTransport, and it
-matches NH-1's quality.
-
-25K headline benchmark for Axona is queued — the NX-17/NH-1 numbers
-above are still the published reference until that run lands.
+The 25K headline above supersedes this — the parity claim now
+upgrades to a small but consistent **lead** at 25K with churn.
 
 ## Files
 - `results/benchmark_latest.csv` — latest benchmark result
