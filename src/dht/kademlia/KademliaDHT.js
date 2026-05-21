@@ -341,6 +341,32 @@ export class KademliaDHT extends DHT {
     // (alive check). No walking the dying node's state (unrealistic).
     this.network.removeNode(nodeId);
     this.nodeMap.delete(nodeId);
+
+    // Memory: under churn at 25K, leaving the dying node referenced
+    // from every surviving peer's bucket + incomingPeers Map creates
+    // a retained graph that doesn't get GC'd between churn rounds —
+    // dying node holds buckets + incomingPeers pointing back into
+    // the swarm, alive peers hold dying node, cycle survives.
+    // K-DHT's bucket-cap (k=20) bounds the bucket side, but
+    // incomingPeers is unbounded: every peer that ever added the
+    // dying node to its bucket left a reverse-reference behind.
+    //
+    // G-DHT's Phase-2 inter-cell discovery multiplies these
+    // references by ~geoBits (8×) per replacement, so the retained
+    // graph blows up specifically in G-DHT churn at 25K nodes.
+    //
+    // Sweep references to the dying node out of every surviving
+    // peer's incomingPeers + buckets so the GC can collect the
+    // zombie immediately.  The simulator's god's-eye nodeMap makes
+    // this a single pass; a real Kademlia client would discover
+    // dead links lazily, which is fine for live traffic but is
+    // exactly what makes the in-memory simulator accumulate state.
+    if (node.incomingPeers instanceof Map) node.incomingPeers.clear();
+    for (const peer of this.nodeMap.values()) {
+      if (!peer || peer === node) continue;
+      peer.incomingPeers?.delete?.(nodeId);
+      peer.removeFromBucket?.(nodeId);
+    }
   }
 
   /**
