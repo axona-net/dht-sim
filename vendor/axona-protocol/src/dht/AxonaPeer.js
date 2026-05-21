@@ -2018,13 +2018,13 @@ export class AxonaPeer extends DHT {
     for (let i = trace.length - 1; i >= 0; i--) {
       const { fromId, synapse } = trace[i];
       if (fromId === selfId) continue;
-      // LTP reinforcement is opportunistic — if the channel isn't
-      // open (common in dense in-process sims where lookup_step uses
-      // routed delivery rather than direct send) the notify throws
-      // and the reinforcement is silently skipped.  Without this
-      // silencing the console.error spam at 25K × 5000-lookup
-      // warmups becomes the wall-clock bottleneck (Engine churns on
-      // synchronous console writes instead of routing work).
+      // LTP reinforcement is opportunistic.  When the trace hop's
+      // channel isn't open (common when lookup_step used routed
+      // delivery rather than a direct send to that hop) the notify
+      // throws and we silently skip — the lookup itself succeeded.
+      // Without silencing, at scale (25K × 5000 warmup lookups) the
+      // synchronous console.error spam becomes the wall-clock
+      // bottleneck.
       this._node.transport.notify(fromId, 'reinforce', { synapsePeerId: synapse.peerId })
         .catch(() => { /* opportunistic — see comment */ });
     }

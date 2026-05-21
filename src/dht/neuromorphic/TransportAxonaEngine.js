@@ -84,6 +84,17 @@ export class TransportAxonaEngine extends DHT {
     // light propagation using NeuronNode lat/lng so XOR-distance and
     // wall-clock latency stay correlated (same shape AxonaEngine's
     // SimulatedTransport gave us via roundTripLatency).
+    //
+    // latencySimulation = 'instant': skip the wall-clock sleeps that
+    // SimTransport.send/notify pay in 'wall-clock' mode (the default
+    // for kernel smoke tests).  At 25K nodes the simulator runs
+    // tens of thousands of warmup lookups serially; serial sleeps
+    // for the haversine-derived latencies would dominate wall time
+    // (~700 ms/lookup × 7.5K lookups ≈ 90 min just in setTimeout
+    // queue waits).  Geometric latencies are still stored in each
+    // peer's _latency map by openConnection, so the protocol's
+    // reported "ms" numbers in benchmark results stay accurate; the
+    // simulator's own latency accounting drives the headline metric.
     const positionByHex = new Map();   // hex → NeuronNode
     this._positionByHex = positionByHex;
     this._network = new SimNetwork({
@@ -94,6 +105,7 @@ export class TransportAxonaEngine extends DHT {
         // roundTripLatency is RTT; this is one-way, so halve it.
         return roundTripLatency(a, b) / 2;
       },
+      latencySimulation: 'instant',
     });
   }
 
