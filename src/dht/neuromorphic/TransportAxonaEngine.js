@@ -166,6 +166,23 @@ export class TransportAxonaEngine extends DHT {
     highwayPct     = 0,             // (v1 ignores)
     initMode       = 'native',      // (v1 always native)
   } = {}) {
+    // v0.93.0 — forward to base DHT.buildRoutingTables so each
+    // NeuronNode gets its `maxConnections` / `maxOutgoing` /
+    // `maxIncoming` / `isHighway` fields set, exactly like
+    // AxonaEngine does on the engine-driven path.  Without this
+    // call every NeuronNode kept the DHTNode default of Infinity,
+    // making tryConnect's bilateral cap gate a no-op and letting
+    // buildXorRoutingTable seat every offered candidate.  At
+    // maxConnections=100 the resulting Axona synaptome ran ~50%
+    // larger than NH-1's (post-bootstrap syn≈100 vs 66) with a
+    // per-peer in-degree spike to ~650 — directly producing the
+    // 0.45-hop regional advantage we'd otherwise attribute to an
+    // architectural improvement.  Diagnosed in v0.92.0; fix here.
+    super.buildRoutingTables({
+      bidirectional, maxConnections, maxOutgoing, maxIncoming,
+      highwayPct, initMode,
+    });
+
     const k = this._k;
     // BigInt-sorted node list — buildXorRoutingTable needs ascending id.
     const sorted = [...this.nodeMap.values()].sort(
@@ -177,11 +194,14 @@ export class TransportAxonaEngine extends DHT {
     const order = [...sorted].sort(() => Math.random() - 0.5);
 
     for (const node of order) {
-      const cap = isFinite(maxConnections) ? maxConnections : Infinity;
-      node._maxSynaptome = isFinite(cap)
-        ? Math.min(cap, this.domain.MAX_SYNAPTOME)
+      // Per-node bootstrap cap (parity with AxonaEngine):
+      // honour the node's OWN maxConnections (set above by super),
+      // not the bare global value, so highwayPct mixes work later.
+      const nodeBootstrapCap = node.maxConnections ?? maxConnections;
+      node._maxSynaptome = isFinite(nodeBootstrapCap)
+        ? Math.min(nodeBootstrapCap, this.domain.MAX_SYNAPTOME)
         : 256;
-      const candidates = buildXorRoutingTable(node.id, sorted, k, cap);
+      const candidates = buildXorRoutingTable(node.id, sorted, k, nodeBootstrapCap);
       for (const peer of candidates) {
         if (!node.tryConnect(peer)) continue;
         const latMs   = roundTripLatency(node, peer);
