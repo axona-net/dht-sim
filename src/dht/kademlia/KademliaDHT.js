@@ -366,15 +366,32 @@ export class KademliaDHT extends DHT {
       if (!peer || peer === node) continue;
       peer.incomingPeers?.delete?.(nodeId);
       peer.removeFromBucket?.(nodeId);
-      // _deadPeers cleanup — SimulatedNetwork.removeNode above
-      // already broadcast onPeerDied to every surviving transport,
-      // which fires `node._deadPeers.add(nodeId)` on each.  If we
-      // don't sweep it back out, every alive node accumulates one
-      // _deadPeers entry per kill across all churn rounds, growing
-      // ~625 MB/round at 25K nodes × 5% churn (1250 kills × 25K
-      // survivors × ~20-50 bytes/BigInt-in-Set).  Sweep here since
-      // we've already walked nodeMap.
       peer._deadPeers?.delete?.(nodeId);
+    }
+
+    // Aggressive teardown of the dying node's heavy fields so GC
+    // collects them on the next minor cycle.  V8 has trouble
+    // reclaiming the dying node when it holds a self-referential
+    // cycle via transport (node.transport → transport._requestHandlers
+    // → closure → node), and that pinning chains through to the dying
+    // node's buckets and _deadPeers — leaking ~500KB per kill that
+    // compounds round-over-round (round 2 +265MB, round 3 +1083MB
+    // observed at 25K × 5% churn).  Explicit cleanup breaks every
+    // pinning chain at the dying side.
+    if (node.transport) {
+      node.transport._requestHandlers?.clear?.();
+      node.transport._notificationHandlers?.clear?.();
+      if (Array.isArray(node.transport._peerDiedHandlers)) {
+        node.transport._peerDiedHandlers.length = 0;
+      }
+      node.transport._simNet = null;
+      node.transport._localNodeId = null;
+      node.transport = null;
+    }
+    if (node._deadPeers instanceof Set)  node._deadPeers.clear();
+    if (node.connections instanceof Set) node.connections.clear();
+    if (Array.isArray(node.buckets)) {
+      for (const b of node.buckets) b?.nodes && (b.nodes.length = 0);
     }
   }
 

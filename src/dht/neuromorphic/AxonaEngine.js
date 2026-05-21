@@ -572,14 +572,26 @@ export class AxonaEngine extends DHT {
       if (!other || other === node) continue;
       other.synaptome?.delete?.(nodeId);
       other.incomingSynapses?.delete?.(nodeId);
-      // _deadPeers cleanup — see KademliaDHT.removeNode for the
-      // full rationale.  SimulatedNetwork.removeNode broadcasts
-      // onPeerDied to every transport, which fires
-      // `node._deadPeers.add(nodeId)` and grows the Set unboundedly
-      // across churn rounds.  Sweep here while we already have the
-      // nodeMap walk.
       other._deadPeers?.delete?.(nodeId);
     }
+
+    // Aggressive teardown — break dying node's self-cycles so V8
+    // collects it promptly.  See KademliaDHT.removeNode for the
+    // round-over-round leak signature this addresses.
+    if (node.transport) {
+      node.transport._requestHandlers?.clear?.();
+      node.transport._notificationHandlers?.clear?.();
+      if (Array.isArray(node.transport._peerDiedHandlers)) {
+        node.transport._peerDiedHandlers.length = 0;
+      }
+      node.transport._simNet = null;
+      node.transport._localNodeId = null;
+      node.transport = null;
+    }
+    if (node._deadPeers instanceof Set)        node._deadPeers.clear();
+    if (node.connections instanceof Set)       node.connections.clear();
+    if (node.regionalBaselines instanceof Map) node.regionalBaselines.clear();
+    if (node.transitCache instanceof Map)      node.transitCache.clear();
 
     this._emit({
       type: 'peer-left', timestamp: Date.now(),

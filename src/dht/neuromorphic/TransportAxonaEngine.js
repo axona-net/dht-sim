@@ -240,8 +240,16 @@ export class TransportAxonaEngine extends DHT {
       if (!other || other === node) continue;
       other.synaptome?.delete?.(nodeId);
       other.incomingSynapses?.delete?.(nodeId);
-      other._deadPeers?.delete?.(nodeId);   // see KademliaDHT.removeNode
+      other._deadPeers?.delete?.(nodeId);
     }
+
+    // Aggressive teardown — see KademliaDHT.removeNode.  node.transport
+    // was already stopped + nulled higher in this method; clear the
+    // remaining heavy maps so the GC collects on the next minor cycle.
+    if (node._deadPeers instanceof Set)        node._deadPeers.clear();
+    if (node.connections instanceof Set)       node.connections.clear();
+    if (node.regionalBaselines instanceof Map) node.regionalBaselines.clear();
+    if (node.transitCache instanceof Map)      node.transitCache.clear();
 
     this.domain._emit({
       type: 'peer-left', timestamp: Date.now(),
