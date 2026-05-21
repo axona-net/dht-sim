@@ -240,6 +240,7 @@ export class TransportAxonaEngine extends DHT {
       if (!other || other === node) continue;
       other.synaptome?.delete?.(nodeId);
       other.incomingSynapses?.delete?.(nodeId);
+      other._deadPeers?.delete?.(nodeId);   // see KademliaDHT.removeNode
     }
 
     this.domain._emit({

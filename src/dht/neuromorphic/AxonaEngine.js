@@ -572,6 +572,13 @@ export class AxonaEngine extends DHT {
       if (!other || other === node) continue;
       other.synaptome?.delete?.(nodeId);
       other.incomingSynapses?.delete?.(nodeId);
+      // _deadPeers cleanup — see KademliaDHT.removeNode for the
+      // full rationale.  SimulatedNetwork.removeNode broadcasts
+      // onPeerDied to every transport, which fires
+      // `node._deadPeers.add(nodeId)` and grows the Set unboundedly
+      // across churn rounds.  Sweep here while we already have the
+      // nodeMap walk.
+      other._deadPeers?.delete?.(nodeId);
     }
 
     this._emit({

@@ -366,6 +366,15 @@ export class KademliaDHT extends DHT {
       if (!peer || peer === node) continue;
       peer.incomingPeers?.delete?.(nodeId);
       peer.removeFromBucket?.(nodeId);
+      // _deadPeers cleanup — SimulatedNetwork.removeNode above
+      // already broadcast onPeerDied to every surviving transport,
+      // which fires `node._deadPeers.add(nodeId)` on each.  If we
+      // don't sweep it back out, every alive node accumulates one
+      // _deadPeers entry per kill across all churn rounds, growing
+      // ~625 MB/round at 25K nodes × 5% churn (1250 kills × 25K
+      // survivors × ~20-50 bytes/BigInt-in-Set).  Sweep here since
+      // we've already walked nodeMap.
+      peer._deadPeers?.delete?.(nodeId);
     }
   }
 
