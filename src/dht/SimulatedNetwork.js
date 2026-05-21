@@ -58,16 +58,33 @@ export class SimulatedNetwork {
       this.nodes.delete(nodeId);
     }
 
-    // v0.70.07 — broadcast onPeerDied to every other registered
-    // transport. In production this signal arrives via heartbeat
-    // timeout; in the simulator it's deterministic, fired the moment
-    // the node is removed.
     if (this._transports.has(nodeId)) {
       this._transports.delete(nodeId);
     }
-    for (const [otherId, transport] of this._transports) {
-      if (otherId !== nodeId) transport._firePeerDied(nodeId);
-    }
+
+    // v0.86.0 — the eager onPeerDied broadcast removed.
+    //
+    // Previously this was a simulator-only deterministic delivery of
+    // peer-died notifications to every surviving transport.  Each
+    // handler did `node._deadPeers.add(peerId)`, generating O(N) per
+    // kill = O(N²) per churn round.  At 25K × 5% churn that's 31M
+    // BigInt Set adds per round — V8 has to allocate, insert, then
+    // collect them all before the heap settles, and the reported
+    // usedJSHeapSize stays elevated even when my removeNode sweep
+    // later .delete()s the entries.  Net cost across 5 churn rounds:
+    // 1-3 GB of transient/retained pressure that OOMed Preview.
+    //
+    // Protocols already discover dead peers lazily during routing:
+    // SimulatedTransport.send throws when the receiver is dead, and
+    // the routing code (KademliaDHT, AxonaEngine, AxonaPeer all) has
+    // a `catch → mark dead → fall through to next candidate` path.
+    // The eager broadcast was a simulator convenience, not a
+    // correctness requirement.
+    //
+    // If a test ever needs the deterministic firing (it didn't, as
+    // of v0.81.0 — the only consumer was the _deadPeers accumulator),
+    // a separate explicit `network.kill(nodeId)` helper can fire the
+    // broadcast.  removeNode itself stays cheap.
   }
 
   /**
