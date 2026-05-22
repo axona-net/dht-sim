@@ -179,57 +179,78 @@ numbers will shift** from pre-refactor values (the new code uses
 `transport.getLatency` per-round, not post-walk pairwise `roundTripLatency`).
 Hop counts and success rates are stable across the change.
 
-### Latest benchmark snapshot (25,000 nodes · May 21, 2026 · v0.89.0 / `@axona/protocol` v1.1.2)
+### Latest benchmark snapshot (25,000 nodes · May 21, 2026 · v0.93.0 / `@axona/protocol` v1.1.2)
 
 Run via the loop above with
 `protocols: ["kademlia", "geob", "ngdhtnx17", "ngdhtnh1", "axona"]` and
 `tests: ["global", "r500", "r2000", "r5000", "churn"]`.
 500 lookups per cell, geoBits = 8, 5 % churn rate, omniscient init.
-δ median = 67.8 ms one-way (mean 69.6, p95 124.6).
+δ median = 67.8 ms one-way; 3δ floor ≈ 204 ms.
 
 | Protocol | global ms | r500 ms | r2000 ms | r5000 ms | 5% churn ms | success% |
 |---|---|---|---|---|---|---|
-| Kademlia | 844.9 | 825.9 | 835.3 | 824.4 | 794.6 | 100% |
-| G-DHT    | 820.1 | 178.6 | 248.6 | 384.8 | 751.3 | 100% |
-| NX-17    | 269.7 | 106.5 | 134.0 | 171.2 | 291.9 | 100% |
-| NH-1     | 260.8 | 104.8 | 137.1 | 172.9 | 294.8 | 100% |
-| **Axona**  | **254.5** | **92.1**  | **122.3** | **157.3** | **230.0** | **100%** |
+| Kademlia | 841.7 | 842.7 | 843.5 | 812.7 | 762.4 | 100% |
+| G-DHT    | 825.9 | 176.9 | 249.0 | 386.5 | 767.2 | 100% |
+| NX-17    | 265.0 | 105.1 | 131.4 | 169.6 | 290.7 | 100% |
+| NH-1     | 260.2 | 102.7 | 134.3 | 175.4 | 292.9 | 100% |
+| **Axona**  | 271.6 | 107.2 | 134.3 | 176.4 | **239.0** | 100% |
+
+Hop counts:
+
+| Protocol | global | r500 | r2000 | r5000 | 5% churn |
+|---|---|---|---|---|---|
+| Kademlia | 4.46 | 4.49 | 4.54 | 4.43 | 4.12 |
+| G-DHT    | 5.58 | 4.89 | 5.31 | 5.40 | 5.10 |
+| NX-17    | 5.49 | 3.66 | 4.21 | 4.71 | 6.19 |
+| NH-1     | 5.36 | 3.54 | 4.23 | 4.84 | 6.06 |
+| Axona    | 5.49 | 3.68 | 4.27 | 4.91 | **4.38** |
+
+100 % delivery success under all conditions including 5 % churn.
+On non-churn cells Axona / NX-17 / NH-1 are statistically tied
+(within ~3 % of each other — they share the same `AxonaPeer`
+kernel, so identical synaptome state produces identical routing
+decisions, as the architecture predicts).
+
+**Axona's real dividend is the churn cell** — 4.38 average hops /
+239 ms vs ~6.1 hops / ~292 ms for NX-17 and NH-1.  ~28 % latency
+reduction and ~1.7 fewer hops per lookup under 5 % churn.  This
+comes from `TransportAxonaEngine.removeNode`'s explicit sweep of
+the dying nodeId out of every surviving peer's `synaptome`,
+`incomingSynapses`, `buckets`, and `_deadPeers` plus the dying
+node's transport handlers being nulled — landed in
+v0.85.0–v0.89.0.  NH-1 / NX-17 take the engine's lazy dead-peer
+discovery path, which costs the extra hops on lookups that hit
+stale synapses before the local channel-closed error triggers
+fallback.
 
 Axona vs Kademlia latency reduction:
 
 | Test | Kademlia | Axona | Reduction |
 |---|---|---|---|
-| Global             | 844.9 ms | 254.5 ms | **70%** |
-| Regional 500 km    | 825.9 ms |  92.1 ms | **89%** |
-| Regional 2000 km   | 835.3 ms | 122.3 ms | **85%** |
-| Regional 5000 km   | 824.4 ms | 157.3 ms | **81%** |
-| 5 % churn (global) | 794.6 ms | 230.0 ms | **71%** |
-
-Hop counts (informational — not the gating metric):
-
-| Protocol | global | r500 | r2000 | r5000 | 5% churn |
-|---|---|---|---|---|---|
-| Kademlia | 4.50 | 4.49 | 4.51 | 4.50 | 4.19 |
-| G-DHT    | 5.55 | 4.87 | 5.24 | 5.39 | 5.01 |
-| NX-17    | 5.56 | 3.70 | 4.30 | 4.77 | 6.15 |
-| NH-1     | 5.26 | 3.60 | 4.33 | 4.74 | 6.16 |
-| Axona    | 5.08 | 3.15 | 3.88 | 4.28 | 4.24 |
-
-100 % delivery success under all conditions including 5 % churn at
-25 K.  Axona is now ahead of NX-17 / NH-1 on every cell — most
-notably on **5 % churn**, where Axona's 4.24 average hops are
-substantially lower than NX-17 / NH-1 (~6.15) thanks to the
-TransportAxonaEngine churn-cleanup work landed in v0.85.0–0.88.0
-and the kernel's per-hop live-RTT lookup-latency fix (v1.1.2).  The
-local-traffic gap to Kademlia widened to 89 % — that's still where
-learned routing locality compounds hardest.
+| Global             | 841.7 ms | 271.6 ms | **68%** |
+| Regional 500 km    | 842.7 ms | 107.2 ms | **87%** |
+| Regional 2000 km   | 843.5 ms | 134.3 ms | **84%** |
+| Regional 5000 km   | 812.7 ms | 176.4 ms | **78%** |
+| 5 % churn (global) | 762.4 ms | 239.0 ms | **69%** |
 
 When updating these numbers in pitches, docs, or external materials,
 **rerun the benchmark** rather than trusting stale percentages.
 Hop counts and the resulting latency mix can shift across protocol
 revisions even when the architecture is unchanged.
 
-Raw CSV: `axona-docs/programmer-guide/benchmarks-25k/2026-05-21_25k_5protocols_5tests.csv`.
+**v0.93.0 methodology correction.** The May 21 v0.91.0 numbers
+that briefly suggested Axona led on every cell were inflated by a
+missing `super.buildRoutingTables()` call in
+`TransportAxonaEngine` — per-NeuronNode `maxConnections` was
+never set, so the bilateral `tryConnect` cap gate became a no-op
+during bootstrap and Axona admitted every offered candidate.
+Resulting synaptome was ~50 % larger than NH-1's at the same
+nominal `maxConnections=100`, with some popular nodes absorbing
+~650 incoming synapses.  v0.93.0 calls super at the top, the cap
+bites uniformly, the regional gap disappears, the churn-cell gap
+remains.
+
+Raw CSV: `axona-docs/programmer-guide/benchmarks-25k/2026-05-21_25k_5protocols_5tests_v0.93.0.csv`.
 
 ### Methodology footnote — v1.1.2 lookup latency
 
