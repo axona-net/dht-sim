@@ -23,9 +23,22 @@ export class BenchmarkSweep {
     this._onInit   = null;   // resolve callback waiting for init
     this._onBench  = null;   // resolve callback waiting for benchmark
     this._statusEl = null;
+    this._pollTimer = null;
 
-    // Poll server for experiments queued by Claude via POST /api/experiment
-    setInterval(() => this._pollExperiment(), 3000);
+    // Poll server for experiments queued by Claude via POST /api/experiment.
+    // When served from a static host with no backend (e.g. GitHub Pages),
+    // the endpoint returns 404 — _pollExperiment detects that and disables
+    // the timer so we don't log a console error every 3 seconds forever.
+    this._pollTimer = setInterval(() => this._pollExperiment(), 3000);
+  }
+
+  /** Stop polling — used when the backend is confirmed absent. */
+  _stopPolling(reason) {
+    if (this._pollTimer != null) {
+      clearInterval(this._pollTimer);
+      this._pollTimer = null;
+      console.log(`[Sweep] Experiment polling disabled (${reason}).`);
+    }
   }
 
   async _pollExperiment() {
@@ -38,12 +51,21 @@ export class BenchmarkSweep {
       const v = (legend.match(/Version:\s*([\w.+-]+)/i)?.[1] || '').slice(0, 31);
       const qs = v ? `?v=${encodeURIComponent(v)}` : '';
       const r   = await fetch('/api/experiment' + qs);
+      // No experiment backend on this host — disable polling permanently.
+      // A 404 (or 405 — endpoint exists but doesn't accept GET) means the
+      // endpoint isn't going to appear; transient errors (network blips,
+      // server restart) still throw and hit the catch below, which retries.
+      if (r.status === 404 || r.status === 405) {
+        this._stopPolling(`/api/experiment returned ${r.status}`);
+        return;
+      }
+      if (!r.ok) return;  // other non-OK statuses — skip this tick, retry next
       const exp = await r.json();
       if (exp?.runs?.length) {
         console.log(`[Sweep] Picked up experiment from server: "${exp.label}"`);
         this.start(exp.runs);
       }
-    } catch { /* server may not be up yet */ }
+    } catch { /* server may not be up yet — keep retrying */ }
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
