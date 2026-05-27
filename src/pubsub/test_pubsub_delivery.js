@@ -21,7 +21,7 @@
 // =====================================================================
 
 import { MockDHTNetwork } from './MockDHTNode.js';
-import { AxonManager }    from './AxonManager.js';
+import { AxonaManager }    from './AxonaManager.js';
 import { AxonPubSub }     from './AxonPubSub.js';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -63,7 +63,7 @@ function buildNetwork() {
 
   const axons = {};
   for (const role of ['pub', 'sub', 'extra']) {
-    axons[role] = new AxonManager({
+    axons[role] = new AxonaManager({
       dht: nodes[role],
       refreshIntervalMs:    100_000,   // tests drive manually
       maxSubscriptionAgeMs: 60_000,

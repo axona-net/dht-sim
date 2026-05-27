@@ -1,5 +1,5 @@
 /**
- * AxonManager — distributed pub/sub membership protocol.
+ * AxonaManager — distributed pub/sub membership protocol.
  *
  * Implements the PubSubAdapter transport contract on top of a DHT that
  * provides the routed-messaging primitives (routeMessage, onRoutedMessage,
@@ -20,8 +20,9 @@
  *   DIRECT:
  *     pubsub:deliver     — payload: { topicId, json }
  *
- * See documents/Phase3-Membership-Protocol-Plan.md for the full design
- * rationale, state model, and parameter defaults.
+ * See axona-docs Phase3-Membership-Protocol-Plan.md
+ * (https://github.com/axona-net/axona-docs/blob/main/Phase3-Membership-Protocol-Plan.md)
+ * for the full design rationale, state model, and parameter defaults.
  */
 
 // ── Defaults (simulator-tuned; production would use much longer values) ────
@@ -34,9 +35,9 @@ const DEFAULT_ROOT_GRACE_MS          = 60_000;       // §5.7 — 6× refresh
 const DEFAULT_ROOT_SET_SIZE          = 5;            // K in K-closest replication
 const DEFAULT_REPLAY_CACHE_SIZE      = 100;          // per-role bounded ring (§7.8 replay)
 
-// ── AxonManager ────────────────────────────────────────────────────────────
+// ── AxonaManager ────────────────────────────────────────────────────────────
 
-export class AxonManager {
+export class AxonaManager {
   /**
    * @param {Object} opts
    * @param {MockDHTNode} opts.dht     — the DHT primitive (routeMessage etc.)
@@ -62,7 +63,7 @@ export class AxonManager {
     shouldRecruitSubAxon = null,   // protocol-specific override
     now                  = () => Date.now(),
   } = {}) {
-    if (!dht) throw Error('AxonManager: dht is required');
+    if (!dht) throw Error('AxonaManager: dht is required');
 
     this.dht                   = dht;
     this.nodeId                = dht.getSelfId();
@@ -105,8 +106,8 @@ export class AxonManager {
     this._seenPublishCap = 4096;         // bounded size (LRU-ish)
     this._seenPublishTtlMs = 60_000;     // entries expire after 60 s
 
-    // ── Per-AxonManager findKClosest cache ──────────────────────────────
-    // Each call to dht.findKClosest from this AxonManager (publish,
+    // ── Per-AxonaManager findKClosest cache ──────────────────────────────
+    // Each call to dht.findKClosest from this AxonaManager (publish,
     // subscribe, refreshTick) is expensive at scale (~5-15ms at 25K).
     // The result for a given (topicId, K) depends on this node's local
     // routing table and the network topology; both are stable between
@@ -205,13 +206,13 @@ export class AxonManager {
   }
 
   /**
-   * Per-node findKClosest with epoch-keyed local cache. All AxonManager
+   * Per-node findKClosest with epoch-keyed local cache. All AxonaManager
    * call sites that need K-closest peers should use this helper instead
    * of calling `this.dht.findKClosest` directly — the cache amortises
    * cost across the pub/sub primitives (publish, subscribe, refreshTick)
    * within a single network-stability interval.
    *
-   * Locality preserved: the cache is per-AxonManager (per-node). Each
+   * Locality preserved: the cache is per-AxonaManager (per-node). Each
    * node still computes its own answer on first miss using only its
    * local routing table; no inter-node sharing of results.
    */
@@ -242,7 +243,7 @@ export class AxonManager {
   }
 
   /**
-   * Clear all pub/sub runtime state so this AxonManager appears fresh
+   * Clear all pub/sub runtime state so this AxonaManager appears fresh
    * to the next test or test phase, while preserving:
    *   - DHT handler registrations (onRoutedMessage/onDirectMessage)
    *   - Configuration (maxDirectSubs, refreshIntervalMs, …)
@@ -291,7 +292,7 @@ export class AxonManager {
    * run in the background as a fire-and-forget Promise chain — this
    * matches v0.70.15 behavior (the underlying network transport
    * — SimulatedNetwork — was already async via setTimeout, but the
-   * AxonManager wrapper presented a sync API).
+   * AxonaManager wrapper presented a sync API).
    */
   /**
    * Publish to a topic.
@@ -314,7 +315,7 @@ export class AxonManager {
     const publishId = `${this.nodeId}:${++this._publishCounter}`;
     const publishTs = this._now();
     this._asyncPublish(topicId, json, publishId, publishTs, meta)
-      .catch(err => console.error('AxonManager: publish failed:', err));
+      .catch(err => console.error('AxonaManager: publish failed:', err));
     return publishId;
   }
 
@@ -398,7 +399,7 @@ export class AxonManager {
     this.mySubscriptions.set(topicId, { subscribedAt: this._now() });
     const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
     this._asyncSubscribe(topicId, lastSeenTs)
-      .catch(err => console.error('AxonManager: subscribe failed:', err));
+      .catch(err => console.error('AxonaManager: subscribe failed:', err));
   }
 
   /** @private — burst-send pattern; see _asyncPublish doc. */
@@ -434,7 +435,7 @@ export class AxonManager {
   pubsubUnsubscribe(topicId) {
     this.mySubscriptions.delete(topicId);
     this._asyncUnsubscribe(topicId)
-      .catch(err => console.error('AxonManager: unsubscribe failed:', err));
+      .catch(err => console.error('AxonaManager: unsubscribe failed:', err));
   }
 
   /** @private — burst-send pattern. */
@@ -1133,46 +1134,9 @@ export class AxonManager {
    * between 1 and 100 sendDirect calls per re-subscribe.
    */
   async _maybeSendReplay(topicId, role, subscriberId, lastSeenTs) {
-    if (!subscriberId) return;
+    if (!subscriberId || subscriberId === this.nodeId) return;
     const cache = role.replayCache;
     if (!cache || cache.length === 0) return;
-
-    // axona-net patch (peer 0.17.0):
-    // Self-replay.  Two compounding issues had to be fixed for a node
-    // that publishes (or receives publish-k) and ONLY THEN subscribes
-    // to its own topic:
-    //
-    //   1. Upstream returned early on subscriberId === this.nodeId,
-    //      assuming "you already have the messages."  But with lazy-
-    //      axon promotion, a node may hold a role + cache without
-    //      ever having delivered those messages to a local handler —
-    //      they arrived as publish-k frames when no subscription was
-    //      registered.
-    //   2. _onPublishDirect calls _recordReceived(topicId, publishId,
-    //      publishTs) which advances _lastSeenTsByTopic to the latest
-    //      cached message.  When the node later self-subscribes,
-    //      pubsubSubscribe reads that lastSeenTs and passes it in,
-    //      and the `cache.filter(m => m.publishTs > lastSeenTs)`
-    //      below excludes every cached message (they're not newer
-    //      than what "I already saw" on the network).
-    //
-    // For self-target, ignore lastSeenTs and replay the full cache
-    // straight into the delivery callback.  This makes the
-    // application's view ("messages delivered to my handler") match
-    // its semantic ("messages received since I started caring about
-    // this topic").
-    if (subscriberId === this.nodeId) {
-      if (!this._deliveryCallback) return;
-      for (const m of cache) {
-        try {
-          this._deliveryCallback(topicId, m.json, m.publishId, m.publishTs);
-        } catch (err) {
-          console.error('AxonManager self-replay deliveryCallback threw:', err);
-        }
-      }
-      return;
-    }
-
     const missed = (lastSeenTs != null && lastSeenTs > 0)
       ? cache.filter(m => m.publishTs > lastSeenTs)
       : cache.slice();
@@ -1218,32 +1182,23 @@ export class AxonManager {
   async _onPublishDirect(payload, meta) {
     const { topicId, json, publishId, publishTs, postHash, publisher } = payload;
     if (this._alreadySeenPublish(publishId)) return;
-    let role = this.axonRoles.get(topicId);
+    const role = this.axonRoles.get(topicId);
     if (!role) {
-      // axona-net patch (peer 0.15.0):
-      // Lazy-axon promotion.  We're one of the K-closest to this topic
-      // (the publisher's findKClosest landed here) but no subscriber
-      // has registered with us yet — under the upstream protocol we'd
-      // drop the message via a routed-walk that would land on another
-      // empty-role node and give up.  Instead, promote ourselves to a
-      // (childless) root role and add the message to the replay cache.
-      // When a subscriber arrives later, _maybeSendReplay serves the
-      // cache.  Empty-role rootGraceMs sweep GCs us if no children
-      // ever arrive (60s default) so this stays bounded.
-      const now = this._now();
-      role = {
-        parentId:       null,
-        isRoot:         true,
-        isInRootSet:    true,
-        peerRoots:      new Set(),
-        children:       new Map(),
-        parentLastSent: 0,
-        roleCreatedAt:  now,
-        emptiedAt:      now,    // immediately "empty" — rootGraceMs sweep applies
-        lowWaterSince:  0,
-        replayCache:    [],
-      };
-      this.axonRoles.set(topicId, role);
+      // The publisher's findKClosest picked us but we don't hold this
+      // topic. Fall back to a routed publish so the greedy walk toward
+      // hash(topic) reaches a node that does. Dedup prevents loops.
+      //
+      // Known limitation: under heavy churn (25%+ in this sim's
+      // sparsely-connected 50-edge routing), the publisher's and
+      // subscribers' K-closest sets can diverge so much that even a
+      // routed walk lands on role-holders that cover only a fraction
+      // of the subscriber set. Full Kademlia-style iterative lookup
+      // would converge more reliably; we have the primitives for that
+      // in NX-6 but haven't wired them in as the K-closest fallback
+      // path. Flagged as follow-up work in Phase 3 notes.
+      await this.dht.routeMessage(topicId, 'pubsub:publish',
+        { topicId, json, publishId, publishTs, postHash, publisher });
+      return;
     }
 
     this._addToReplayCache(role, { json, publishId, publishTs, postHash, publisher });
@@ -1389,7 +1344,7 @@ export class AxonManager {
         }
         if (role) role.parentLastSent = now;
       } catch (err) {
-        console.error('AxonManager refresh: subscribe issue failed:', err);
+        console.error('AxonaManager refresh: subscribe issue failed:', err);
       }
     };
 
@@ -1657,7 +1612,7 @@ export class AxonManager {
 
   /**
    * ROUTED handler — a separate notification routed by the resharer's
-   * AxonManager toward the referenced post's topic_id. The first
+   * AxonaManager toward the referenced post's topic_id. The first
    * role-bearing node consumes it and bumps reshare_count. Forwarders
    * don't bump (single-count invariant); leaves can't bump because
    * they don't hold counter state for the topic.

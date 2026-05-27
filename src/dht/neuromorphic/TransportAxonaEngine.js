@@ -592,7 +592,7 @@ export class TransportAxonaEngine extends DHT {
           peer._directHandlers?.clear?.();
           peer._routedHandlers?.clear?.();
           peer._subscriptions?.clear?.();
-          peer._axonManager = null;
+          peer._axonaManager = null;
           peer._started = false;
           peer._transport = null;
           peer._node = null;

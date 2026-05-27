@@ -9,7 +9,7 @@
 // unsubscribe / getNodeId / getSynaptome / getMetrics / onEvent), the
 // simulator-side multi-node surface (addNode / removeNode /
 // buildRoutingTables / bootstrapJoin / dispose), and the pub/sub
-// primitives AxonManager consumes (routeMessage / sendDirect /
+// primitives AxonaManager consumes (routeMessage / sendDirect /
 // findKClosest / _pickRecruitPeer / _pickRelayPeer) --- is inherited
 // verbatim.  NX-17 makes no changes to the Transport contract surface
 // either: it uses exactly the same 12 methods on the underlying

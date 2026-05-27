@@ -40,9 +40,10 @@
 import { DHT }            from '../contracts/DHT.js';
 import { Synapse }        from './Synapse.js';
 import { Subscription }   from './Subscription.js';
-import { clz264, toHex, isHexId } from '../utils/hexid.js';
-import { deriveTopicId }  from '../pubsub/post.js';
+import { clz264, toHex, fromHex, isHexId } from '../utils/hexid.js';
+import { deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 import { buildEnvelope }  from '../pubsub/envelope.js';
+import { AxonaManager }    from '../pubsub/AxonaManager.js';
 import { PublishError, SubscribeError, PullError, MetricsError, ErrorCodes } from '../errors.js';
 
 export class AxonaPeer extends DHT {
@@ -52,17 +53,17 @@ export class AxonaPeer extends DHT {
    *        The legacy multi-node engine (Phase 1: delegate target).
    * @param {import('./NeuronNode.js').NeuronNode} opts.node
    *        The NeuronNode this peer wraps.
-   * @param {object} [opts.axonManager]
-   *        Optional explicit AxonManager instance to use for the
+   * @param {object} [opts.axonaManager]
+   *        Optional explicit AxonaManager instance to use for the
    *        unified pub()/sub() API.  When omitted, pub/sub fall back
-   *        to the engine's per-node AxonManager (engine.axonManagerFor
+   *        to the engine's per-node AxonaManager (engine.axonaManagerFor
    *        if present, else throws).
    * @param {object} [opts.identity]
    *        Identity envelope from `deriveIdentity()` — required for
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonManager = null, identity = null, transport = null, persist = null }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, identity = null, transport = null, persist = null }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
 
@@ -102,7 +103,7 @@ export class AxonaPeer extends DHT {
     this._engine = engine;
     this._domain = domain ?? engine;
     this._node   = node;
-    this._axonManager = axonManager;
+    this._axonaManager = axonaManager;
     this._identity = identity;
     this._transport = transport;
     this._persist  = persist;
@@ -118,9 +119,9 @@ export class AxonaPeer extends DHT {
     this._engineListenerUnsub = null;
 
     // ─── Unified pub/sub state ────────────────────────────────────
-    /** @type {Map<string, Set<Subscription>>} topicId(hex) → handles */
+    /** @type {Map<bigint, Set<Subscription>>} topicId(BigInt) → handles */
     this._subscriptions = new Map();
-    /** True once we've installed the AxonManager-side delivery hook. */
+    /** True once we've installed the AxonaManager-side delivery hook. */
     this._deliveryHookInstalled = false;
 
     // ─── Direct messaging state ───────────────────────────────────
@@ -224,6 +225,50 @@ export class AxonaPeer extends DHT {
       this._installRoutingHandlers();
     }
 
+    // Auto-admit any peers the transport has already bound for us
+    // (e.g., the bridge from webTransport's autoHandshake).  Sub-
+    // transports that don't expose boundPeers() (SimTransport,
+    // dht-sim's engine-driven path) contribute nothing here — the
+    // existing synaptome-seeding flow stays intact for them.
+    //
+    // boundPeers() is contractually BigInt[] now — the web transport
+    // (composite + bridge + webrtc) speaks BigInt throughout.
+    const transport = this._node?.transport;
+    if (transport && typeof transport.boundPeers === 'function') {
+      try {
+        for (const peerBig of transport.boundPeers()) {
+          this._seedSynaptomeWithSponsor(peerBig);
+        }
+      } catch (err) {
+        if (typeof console !== 'undefined') {
+          console.warn('AxonaPeer.start: auto-admit failed', err);
+        }
+      }
+    }
+    // Subscribe to ongoing bind events so peers admitted to the
+    // transport AFTER start() — typically other browser peers that
+    // join the mesh — are also auto-admitted to the synaptome.
+    // This mirrors axona-peer/src/axona_node.js's _completeHandshake:
+    // admit-to-synaptome only.  Pub/sub state (K-closest cache,
+    // subscription targets) is left alone — applications subscribe
+    // after the mesh has stabilised, so the K-closest computed at
+    // sub time is already wide.  Subscribing before mesh
+    // stabilisation is an application-level mistake (the demo waits
+    // for synaptome convergence via a "ready" gate before calling
+    // peer.sub), not a kernel bug to paper over here.
+    //
+    // onPeerBound handler receives BigInt (contract).
+    if (transport && typeof transport.onPeerBound === 'function') {
+      this._onPeerBoundUnsub = transport.onPeerBound((peerBig) => {
+        try { this._seedSynaptomeWithSponsor(peerBig); }
+        catch (err) {
+          if (typeof console !== 'undefined') {
+            console.warn('AxonaPeer.onPeerBound: admission failed', err);
+          }
+        }
+      });
+    }
+
     this._started = true;
   }
 
@@ -249,7 +294,7 @@ export class AxonaPeer extends DHT {
    *   · local_probe       — needed by _tryAnneal (anneal not run
    *                          in the kernel-driven loop yet)
    *   · route_msg         — needed by peer.routeMessage()
-   *   · find_closest_set  — needed by AxonManager K-closest queries
+   *   · find_closest_set  — needed by AxonaManager K-closest queries
    *
    * Bodies are 1:1 mirrors of dht-sim/.../AxonaEngine.js's
    * _registerNH1Handlers — the engine version uses
@@ -363,7 +408,7 @@ export class AxonaPeer extends DHT {
     });
 
     // ── find_closest_set — top-K closest peers from local synaptome
-    // Used by AxonManager's findKClosest (pub/sub) and by iterative
+    // Used by AxonaManager's findKClosest (pub/sub) and by iterative
     // discovery.  Insertion-sorted scan; cheap because synaptome is
     // bounded by MAX_SYNAPTOME.  Caller merges results across rounds.
     transport.onRequest('find_closest_set', async (_fromId, payload) => {
@@ -445,8 +490,9 @@ export class AxonaPeer extends DHT {
       }
 
       try {
+        // Wire payload targetId is hex (v1.5 contract).
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
-          type, payload, targetId: targetBig, hops: hops + 1, originId,
+          type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
         });
         return downstream;
       } catch {
@@ -475,6 +521,10 @@ export class AxonaPeer extends DHT {
     if (this._engineListenerUnsub) {
       this._engineListenerUnsub();
       this._engineListenerUnsub = null;
+    }
+    if (this._onPeerBoundUnsub) {
+      this._onPeerBoundUnsub();
+      this._onPeerBoundUnsub = null;
     }
     this._started = false;
   }
@@ -553,7 +603,9 @@ export class AxonaPeer extends DHT {
     // viable bootstrap: one channel open, one synapse known.  Future
     // enhancement: walk K-closest via transport.send + the
     // find_closest_set RPC and stratified-fill from results.
-    this._seedSynaptomeWithSponsor(sponsor);
+    // join(sponsor) takes hex (user-facing API); _seedSynaptomeWithSponsor
+    // is BigInt-only (kernel-internal).
+    this._seedSynaptomeWithSponsor(fromHex(sponsor));
   }
 
   /**
@@ -579,13 +631,15 @@ export class AxonaPeer extends DHT {
 
     // (1) notify peers (fire-and-forget, bounded by drain window)
     if (notify && this._transport && typeof this._transport.notify === 'function') {
+      // peers() returns hex (display); convert to BigInt for the
+      // transport contract.  The wire `from` field stays hex.
       const peers = this.peers();
-      for (const peerId of peers) {
+      for (const peerHex of peers) {
         // Use the transport's notify directly (not peer.notify) so we
         // don't tunnel through 'axona:direct'; this is a transport-
         // level signal, not an application message.
         try {
-          await this._transport.notify(peerId, 'peer-leaving', { from: selfId });
+          await this._transport.notify(fromHex(peerHex), 'peer-leaving', { from: selfId });
         } catch { /* swallow — best-effort */ }
       }
     }
@@ -634,8 +688,8 @@ export class AxonaPeer extends DHT {
   // On sub() / sub.stop() / synapse-add: namespace marked dirty,
   // debounced flush scheduled (~5s).  On leave(): force flush.
   //
-  // Axon-role state is owned by AxonManager and persisted at that
-  // layer (deferred to AxonManager P4-followup).
+  // Axon-role state is owned by AxonaManager and persisted at that
+  // layer (deferred to AxonaManager P4-followup).
 
   async _loadFromPersist() {
     const p = this._persist;
@@ -844,11 +898,11 @@ export class AxonaPeer extends DHT {
    * @param {object} opts           AxonaPeer constructor args
    * @param {object} opts.engine
    * @param {object} opts.node
-   * @param {object} [opts.axonManager]
+   * @param {object} [opts.axonaManager]
    * @param {object} [opts.transport]
    * @returns {Promise<AxonaPeer>}
    */
-  static async fromSnapshot(state, { engine, node, axonManager, transport } = {}) {
+  static async fromSnapshot(state, { engine, node, axonaManager, transport } = {}) {
     if (!state || typeof state !== 'object') {
       throw new TypeError('AxonaPeer.fromSnapshot: state must be a snapshot object');
     }
@@ -888,7 +942,7 @@ export class AxonaPeer extends DHT {
     const peer = new AxonaPeer({
       engine: engine ?? { onEvent: () => () => {} },
       node:   finalNode,
-      axonManager,
+      axonaManager,
       identity,
       transport,
     });
@@ -899,30 +953,45 @@ export class AxonaPeer extends DHT {
   }
 
   _seedSynaptomeWithSponsor(sponsor) {
+    if (typeof sponsor !== 'bigint') {
+      throw new TypeError(
+        `AxonaPeer._seedSynaptomeWithSponsor: sponsor must be bigint, got ${typeof sponsor}`,
+      );
+    }
     const syn = this._node?.synaptome;
     if (!syn) return;
-    if (syn.has?.(sponsor) || syn.has?.(BigInt('0x' + sponsor))) return;
+    if (syn.has?.(sponsor)) return;
+    // Belt-and-braces: dedupe against any pre-existing hex-string key
+    // from an older session before we standardise on BigInt.
+    const sponsorHex = toHex(sponsor);
+    if (syn.has?.(sponsorHex)) return;
 
     // Engine-managed path: if the engine exposes addSynapse, use it
     // so its bookkeeping (stratum, decay, anneal pool) stays consistent.
     const engine = this._engine;
-    const domain = this._domain;
     if (engine && typeof engine.addSynapse === 'function') {
       try { engine.addSynapse(this._node, sponsor, { addedBy: 'bootstrap' }); return; }
       catch { /* fall through to direct insert */ }
     }
 
-    // Direct insert: the simulator-facing path uses BigInt synaptome
-    // keys; the kernel-only path uses hex strings.  Detect by checking
-    // an existing entry's key shape, defaulting to hex.
-    let firstKey = null;
-    for (const k of syn.keys()) { firstKey = k; break; }
-    const useBigInt = (typeof firstKey === 'bigint');
-    const key = useBigInt ? BigInt('0x' + sponsor) : sponsor;
-    syn.set(key, {
-      peerId: key, weight: 0.5, latency: 50, stratum: 0,
-      addedBy: 'bootstrap',
-    });
+    // Direct insert: real Synapse instance with the BigInt peerId.
+    // Stratum = number of leading zero bits in (self ^ peer), matching
+    // axona-peer/src/axona_node.js's _completeHandshake.
+    const selfId = this._node.id;
+    const stratum = (typeof selfId === 'bigint')
+      ? this._clz(selfId ^ sponsor)
+      : 0;
+    syn.set(sponsor, new Synapse({
+      peerId:    sponsor,
+      latencyMs: 50,
+      stratum,
+    }));
+    const inserted = syn.get(sponsor);
+    if (inserted) {
+      inserted.weight   = 0.5;
+      inserted.inertia  = 0;
+      inserted._addedBy = 'bootstrap';
+    }
   }
 
   // ─── DHT operations ────────────────────────────────────────────────
@@ -985,7 +1054,7 @@ export class AxonaPeer extends DHT {
   }
 
   async subscribe(topicName, handler) {
-    // Phase 1: subscribe through the engine-owned AxonManager for
+    // Phase 1: subscribe through the engine-owned AxonaManager for
     // this node.  Future phases move this into the peer itself.
     const axon = this._engine.axonFor(this._node);
     return axon.subscribe(this._node.id, topicName, handler);
@@ -1004,8 +1073,8 @@ export class AxonaPeer extends DHT {
 
   // ─── Unified pub/sub (v1.0 API) ────────────────────────────────────
   //
-  // Replaces the legacy AxonManager.pubsubPublish(bigintTopicKey, json)
-  // and AxonManager.pubsubSubscribe(bigintTopicKey) entrypoints with a
+  // Replaces the legacy AxonaManager.pubsubPublish(bigintTopicKey, json)
+  // and AxonaManager.pubsubSubscribe(bigintTopicKey) entrypoints with a
   // string-topic API:
   //
   //   const msgId = await peer.pub(topic, message);
@@ -1014,7 +1083,7 @@ export class AxonaPeer extends DHT {
   //
   // topic is a string at the API boundary; we hash it via
   // deriveTopicId(peer.nodeIdHex, topic) → 66-char hex topic ID, which
-  // is what flows through AxonManager.  Apps don't see the topic ID
+  // is what flows through AxonaManager.  Apps don't see the topic ID
   // unless they introspect it on the subscription handle.
   //
   // The envelope shape (delivered to subscribers) is:
@@ -1025,7 +1094,7 @@ export class AxonaPeer extends DHT {
   /**
    * Publish a message on `topic`.  Resolves with the content-derived
    * msgId once the publish has been handed to the K-closest replica
-   * set (today's AxonManager semantics).
+   * set (today's AxonaManager semantics).
    *
    * Signed by default with the peer's identity; opt-out via
    * `{ sign: false }` for anonymous broadcast.
@@ -1043,15 +1112,20 @@ export class AxonaPeer extends DHT {
         `peer.pub: topic must be a non-empty string, got ${typeof topic}`,
         { context: { topic } });
     }
-    const am          = this._requireAxonManager('pub');
+    const am          = this._requireAxonaManager('pub');
     // opts.publisher selects the topic-id derivation mode:
     //   undefined (default)  → publisher-keyed, this peer's nodeId
     //   null                 → public mode (anyone-can-publish, simple hash)
     //   '66-char hex'        → publisher-keyed under a specified id
     //                          (rare for pub — typically used for tests
     //                          or for relaying as a known principal)
+    //
+    // publisherId stays hex at this layer — it's the user-facing form
+    // and is what flows into the envelope's `publisher` field.  Kernel
+    // internals (AxonaManager) use BigInt; we derive both.
     const publisherId = 'publisher' in opts ? opts.publisher : this._nodeIdHex();
-    const topicId     = await deriveTopicId(publisherId, topic);
+    const publisherBig = publisherId === null ? null : fromHex(publisherId);
+    const topicIdBig  = await deriveTopicIdBig(publisherBig, topic);
 
     if (sign && !this._identity) {
       throw new PublishError(ErrorCodes.PUBLISH_SIGN_FAILED,
@@ -1081,11 +1155,11 @@ export class AxonaPeer extends DHT {
         { cause, context: { topic } });
     }
 
-    // AxonManager generates its own publishId for network routing/
+    // AxonaManager generates its own publishId for network routing/
     // cache keying.  We pass postHash = envelope.msgId so the relay's
     // replay cache becomes searchable by content-hash for peer.pull()
     // (A3).  publisher is recorded for the metrics counters.
-    am.pubsubPublish(topicId, json, {
+    am.pubsubPublish(topicIdBig, json, {
       publisher: publisherId,
       postHash:  envelope.msgId,
     });
@@ -1118,7 +1192,7 @@ export class AxonaPeer extends DHT {
         { context: { topic } });
     }
 
-    const am          = this._requireAxonManager('sub');
+    const am          = this._requireAxonaManager('sub');
     // opts.publisher selects the topic-id derivation mode (same
     // semantics as peer.pub):
     //   undefined (default)  → publisher-keyed, this peer's nodeId
@@ -1128,38 +1202,43 @@ export class AxonaPeer extends DHT {
     //   '66-char hex'        → publisher-keyed under that publisher
     //                          (subscribe to someone else's feed)
     const publisherId = 'publisher' in opts ? opts.publisher : this._nodeIdHex();
-    const topicId     = await deriveTopicId(publisherId, topic);
+    const publisherBig = publisherId === null ? null : fromHex(publisherId);
+    const topicIdBig  = await deriveTopicIdBig(publisherBig, topic);
 
-    // Apply `since` mode by seeding AxonManager's per-topic lastSeenTs
-    // BEFORE the subscribe call.  AxonManager passes lastSeenTs in the
+    // Apply `since` mode by seeding AxonaManager's per-topic lastSeenTs
+    // BEFORE the subscribe call.  AxonaManager passes lastSeenTs in the
     // subscribe envelope; the receiving axon's replay cache filters
     // strictly above it.
-    this._applySince(am, topicId, opts.since);
+    this._applySince(am, topicIdBig, opts.since);
 
     // Register the handler and the dispatch hook before the network
     // call so deliveries that arrive between submit and resolve are
-    // routed correctly.
+    // routed correctly.  Subscription's internal `_topicId` is BigInt
+    // (kernel form); the public `sub.topicId` getter returns hex.
     const sub = new Subscription({
-      peer: this, topicId, topicName: topic, handler, opts,
+      peer: this, topicId: topicIdBig, topicName: topic, handler, opts,
     });
-    if (!this._subscriptions.has(topicId)) this._subscriptions.set(topicId, new Set());
-    this._subscriptions.get(topicId).add(sub);
+    if (!this._subscriptions.has(topicIdBig)) this._subscriptions.set(topicIdBig, new Set());
+    this._subscriptions.get(topicIdBig).add(sub);
     this._installDeliveryHook(am);
 
-    am.pubsubSubscribe(topicId);
+    am.pubsubSubscribe(topicIdBig);
     this._markPersistDirty('subscriptions');
     return sub;
   }
 
   /** @internal — called by Subscription.stop() */
   async _unsubscribeInternal(sub) {
-    const set = this._subscriptions.get(sub.topicId);
+    // sub._topicId is the BigInt key (kernel form); sub.topicId getter
+    // returns hex (display form).  Use BigInt for Map lookup.
+    const key = sub._topicId;
+    const set = this._subscriptions.get(key);
     if (set) {
       set.delete(sub);
       if (set.size === 0) {
-        this._subscriptions.delete(sub.topicId);
+        this._subscriptions.delete(key);
         try {
-          this._requireAxonManager('unsubscribe').pubsubUnsubscribe(sub.topicId);
+          this._requireAxonaManager('unsubscribe').pubsubUnsubscribe(key);
         } catch { /* unsubscribe is best-effort */ }
       }
       this._markPersistDirty('subscriptions');
@@ -1205,18 +1284,19 @@ export class AxonaPeer extends DHT {
         'peer.pull: { publisher } must be a 66-char hex node ID or null',
         { context: { msgId, publisher } });
     }
-    const am = this._requireAxonManager('pull');
+    const am = this._requireAxonaManager('pull');
     if (typeof am.requestPull !== 'function') {
       throw new PullError(ErrorCodes.PULL_AXONS_UNREACHABLE,
-        'peer.pull: AxonManager does not support requestPull',
+        'peer.pull: AxonaManager does not support requestPull',
         { context: {} });
     }
-    const topicId = await deriveTopicId(publisher, topic);
-    const result = await am.requestPull(topicId, msgId, { timeoutMs });
+    const publisherBig = publisher === null ? null : fromHex(publisher);
+    const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
+    const result = await am.requestPull(topicIdBig, msgId, { timeoutMs });
     if (!result) return null;
 
     // requestPull returns the parsed payload — which is the JSON we
-    // wrote in pub(): the envelope itself.  Some legacy AxonManagers
+    // wrote in pub(): the envelope itself.  Some legacy AxonaManagers
     // return a SignedPost shape; we surface either, leaving
     // verification to the caller via verifyEnvelope().
     if (result && typeof result === 'object' &&
@@ -1236,7 +1316,7 @@ export class AxonaPeer extends DHT {
    * that respond; `relayCount` is the number of distinct responding
    * relays so callers can sanity-check coverage.
    *
-   * Note: today's AxonManager enforces a publisher-only ownership
+   * Note: today's AxonaManager enforces a publisher-only ownership
    * check on metrics requests — only the topic's publisher gets a
    * non-empty result.  Removing that check (so any peer can audit)
    * is queued as a kernel-side cleanup.
@@ -1261,12 +1341,13 @@ export class AxonaPeer extends DHT {
         'peer.metrics: { publisher } must be a 66-char hex node ID or null',
         { context: { topic, publisher } });
     }
-    const am = this._requireAxonManager('metrics');
+    const am = this._requireAxonaManager('metrics');
     if (typeof am.requestMetrics !== 'function') {
       return { publishes: 0, subscribers: 0, deliveries: 0, pulls: 0, reshares: 0, relayCount: 0 };
     }
-    const topicId = await deriveTopicId(publisher, topic);
-    const responses = await am.requestMetrics(topicId, null, { timeoutMs });
+    const publisherBig = publisher === null ? null : fromHex(publisher);
+    const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
+    const responses = await am.requestMetrics(topicIdBig, null, { timeoutMs });
 
     let deliveries = 0, pulls = 0, reshares = 0, publishes = 0;
     let subscribers = 0;
@@ -1326,7 +1407,8 @@ export class AxonaPeer extends DHT {
       throw new TypeError(`peer.send: targetId must be 66-char hex, got ${typeof targetId}`);
     }
     const t = this._requireTransport('send');
-    return t.send(targetId, 'axona:direct', { from: this._nodeIdHex(), message });
+    // Public API: hex.  Transport contract: BigInt.  Convert at boundary.
+    return t.send(fromHex(targetId), 'axona:direct', { from: this._nodeIdHex(), message });
   }
 
   /**
@@ -1342,7 +1424,8 @@ export class AxonaPeer extends DHT {
       throw new TypeError(`peer.notify: targetId must be 66-char hex, got ${typeof targetId}`);
     }
     const t = this._requireTransport('notify');
-    return t.notify(targetId, 'axona:direct', { from: this._nodeIdHex(), message });
+    // Public API: hex.  Transport contract: BigInt.  Convert at boundary.
+    return t.notify(fromHex(targetId), 'axona:direct', { from: this._nodeIdHex(), message });
   }
 
   /**
@@ -1372,19 +1455,26 @@ export class AxonaPeer extends DHT {
     t.onRequest('axona:direct', async (fromId, payload) => {
       const h = this._directMessageHandler;
       if (!h) return undefined;
-      // The wire fromId is the transport's notion (typically the hex
-      // nodeId once bindPeer has happened).  payload.from is the
-      // sender's self-reported hex id — we prefer the transport's
+      // The wire fromId is the transport's notion:
+      //   - web transport (bound): BigInt nodeId
+      //   - web transport (pre-bind): meshId string
+      //   - sim transport: hex string
+      // The user-facing senderId surface is always hex.  payload.from
+      // is the sender's self-reported hex id — we prefer the transport's
       // since it's bound at handshake time.
-      const senderId = (typeof fromId === 'string' && isHexId(fromId))
-        ? fromId : (payload?.from ?? null);
+      const senderId =
+        (typeof fromId === 'bigint')                  ? toHex(fromId) :
+        (typeof fromId === 'string' && isHexId(fromId)) ? fromId :
+        (payload?.from ?? null);
       return await h(senderId, payload?.message);
     });
     t.onNotification('axona:direct', (fromId, payload) => {
       const h = this._directMessageHandler;
       if (!h) return;
-      const senderId = (typeof fromId === 'string' && isHexId(fromId))
-        ? fromId : (payload?.from ?? null);
+      const senderId =
+        (typeof fromId === 'bigint')                  ? toHex(fromId) :
+        (typeof fromId === 'string' && isHexId(fromId)) ? fromId :
+        (payload?.from ?? null);
       try { h(senderId, payload?.message); }
       catch { /* notification handler errors swallow */ }
     });
@@ -1426,9 +1516,9 @@ export class AxonaPeer extends DHT {
    * @returns {object}
    */
   health() {
-    const am = this._axonManager
-            ?? (this._engine?.axonManagerFor?.(this._node))
-            ?? this._engine?._axonManagers?.get?.(this._node.id)
+    const am = this._axonaManager
+            ?? (this._engine?.axonaManagerFor?.(this._node))
+            ?? this._engine?._axonaManagers?.get?.(this._node.id)
             ?? null;
     const axonRoles = [];
     if (am && typeof am.inspectRoles === 'function') {
@@ -1556,29 +1646,184 @@ export class AxonaPeer extends DHT {
     return t;
   }
 
-  // ── AxonManager glue ────────────────────────────────────────────
+  // ── AxonaManager glue ────────────────────────────────────────────
 
-  _requireAxonManager(callerName) {
-    if (this._axonManager) return this._axonManager;
-    // Fallback: ask the engine for this node's AxonManager.  Different
+  _requireAxonaManager(callerName) {
+    if (this._axonaManager) return this._axonaManager;
+    // Fallback 1: ask the engine for this node's AxonaManager.  Different
     // engine builds expose this differently; we probe in priority
     // order and cache the result.
     const engine = this._engine;
-    const domain = this._domain;
     let am = null;
-    if (typeof engine?.axonManagerFor === 'function') {
-      am = engine.axonManagerFor(this._node);
-    } else if (engine?._axonManagers instanceof Map) {
-      am = engine._axonManagers.get(this._node.id);
+    if (typeof engine?.axonaManagerFor === 'function') {
+      am = engine.axonaManagerFor(this._node);
+    } else if (engine?._axonaManagers instanceof Map) {
+      am = engine._axonaManagers.get(this._node.id);
+    }
+    // Fallback 2: build one ourselves.  Standalone consumers (the
+    // browser pub/sub demo, kernel smoke tests, anyone constructing
+    // an AxonaPeer with just { domain, node, identity, transport })
+    // shouldn't have to hand-wire a dht adapter — peer.pub / peer.sub
+    // should just work after peer.start().  The adapter we build here
+    // mirrors browser_engine.axonFor in axona-peer (the proven
+    // production wiring): reachable-only findKClosest to dodge
+    // ghost-peer drops, and sendDirect with a routed __tunneled_direct__
+    // fallback for K-closest axons we don't have a direct channel to.
+    if (!am) {
+      am = this._buildDefaultAxonaManager();
     }
     if (!am) {
       throw new PublishError(ErrorCodes.PUBLISH_INVALID_TOPIC,
-        `peer.${callerName}: no AxonManager available; ` +
-        'pass {axonManager} to the AxonaPeer constructor or wire engine.axonManagerFor()',
+        `peer.${callerName}: no AxonaManager available; ` +
+        'pass {axonaManager} to the AxonaPeer constructor or wire engine.axonaManagerFor()',
       );
     }
-    this._axonManager = am;
+    this._axonaManager = am;
     return am;
+  }
+
+  /**
+   * Construct an AxonaManager wired to a dht adapter that uses this
+   * peer's reachable peer set (self + bound transport peers + learned
+   * synaptome).  Used as the default when no explicit AxonaManager and
+   * no engine.axonaManagerFor are available — typically browser apps
+   * that talk to bridge.axona.net directly via webTransport.
+   *
+   * The two production hardenings this adapter ships with:
+   *
+   *   findKClosest — local-only, never probes the network.  Network
+   *     probes return ghost IDs from prior tab sessions still cached
+   *     in remote synaptomes; pub/sub messages routed at a ghost
+   *     terminate at a live peer with no role for the topic, so
+   *     deliveries silently drop.  Using only locally-known peers
+   *     guarantees publisher + subscriber land on the same axon set.
+   *
+   *   sendDirect — directly-bound peers go through peer.sendDirect
+   *     (one transport.notify hop).  Anyone else falls back to a
+   *     routed `__tunneled_direct__` envelope that the receiver
+   *     unwraps into its own direct-handler table.  Makes K-closest
+   *     axons reachable even when the local transport only has a
+   *     channel to the bridge.
+   *
+   * @returns {AxonaManager}
+   */
+  _buildDefaultAxonaManager() {
+    const peer = this;
+    const node = this._node;
+    if (!node) return null;
+    // Only auto-build when there's a transport to route over.  Smoke
+    // tests that construct an AxonaPeer with a mock node (no transport,
+    // no synaptome) keep getting the explicit "no AxonaManager" error
+    // — they're exercising the validation surface, not the runtime.
+    if (!node.transport) return null;
+    const selfId = peer.getNodeId();
+
+    const dht = {
+      getSelfId:    () => peer.getNodeId(),
+      findKClosest: async (targetIdBig, K = 5) => {
+        // AxonaManager now passes BigInt targetId; the adapter is
+        // BigInt-throughout.  No hex conversion needed.
+        if (typeof targetIdBig !== 'bigint') {
+          throw new TypeError(
+            `default-dht.findKClosest: targetId must be bigint, got ${typeof targetIdBig}`,
+          );
+        }
+        const dist = new Map();
+        if (typeof selfId === 'bigint') {
+          dist.set(selfId, selfId ^ targetIdBig);
+        }
+        for (const syn of node.synaptome?.values?.() ?? []) {
+          const pid = syn.peerId;
+          if (typeof pid === 'bigint' && !dist.has(pid)) {
+            dist.set(pid, pid ^ targetIdBig);
+          }
+        }
+        for (const syn of node.incomingSynapses?.values?.() ?? []) {
+          const pid = syn.peerId;
+          if (typeof pid === 'bigint' && !dist.has(pid)) {
+            dist.set(pid, pid ^ targetIdBig);
+          }
+        }
+        return [...dist.entries()]
+          .sort((a, b) => a[1] < b[1] ? -1 : 1)
+          .slice(0, K)
+          .map(([pid]) => pid);
+      },
+      routeMessage: (...args) => peer.routeMessage(...args),
+      sendDirect: async (peerIdBig, type, payload) => {
+        // AxonaManager calls with BigInt peerId.
+        if (peerIdBig === selfId) {
+          const h = peer._directHandlers?.get(type);
+          if (!h) return false;
+          try {
+            await h(payload, {
+              // Routed-handler meta carries hex fromId (display surface).
+              fromId: toHex(selfId),
+              type,
+            });
+            return true;
+          } catch (err) {
+            if (typeof console !== 'undefined') {
+              console.error('AxonaPeer default-dht self-sendDirect threw:', err);
+            }
+            return false;
+          }
+        }
+        if (node.transport?.isConnected?.(peerIdBig)) {
+          return peer.sendDirect(peerIdBig, type, payload);
+        }
+        // Tunnel via routed delivery — fire-and-forget; report
+        // success so AxonaManager's child-dead detection doesn't
+        // false-positive while the walk is in flight.  The
+        // `targetId` wire field is hex (wire form).
+        peer.routeMessage(peerIdBig, '__tunneled_direct__', {
+          targetId:     toHex(peerIdBig),
+          innerType:    type,
+          innerPayload: payload,
+        }).catch(err => {
+          if (typeof console !== 'undefined') {
+            console.error('AxonaPeer default-dht routed sendDirect failed:', err);
+          }
+        });
+        return true;
+      },
+      onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
+      onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
+    };
+
+    // Receiver end of the routed fallback.  Mirrors browser_engine.
+    // meta.targetId arrives over the wire as hex; convert to BigInt
+    // before comparing to selfId.
+    peer.onRoutedMessage('__tunneled_direct__', async (payload, meta) => {
+      const targetBig =
+        (typeof meta?.targetId === 'bigint')   ? meta.targetId :
+        (typeof meta?.targetId === 'string' && isHexId(meta.targetId))
+                                               ? fromHex(meta.targetId) :
+        null;
+      if (targetBig == null) return 'forward';
+      if (targetBig !== selfId) return 'forward';
+      const handler = peer._directHandlers?.get(payload.innerType);
+      if (!handler) return 'consumed';
+      try {
+        await handler(payload.innerPayload, {
+          fromId: meta?.fromId,
+          type:   payload.innerType,
+        });
+      } catch (err) {
+        if (typeof console !== 'undefined') {
+          console.error('AxonaPeer default-dht tunneled-direct dispatch threw:', err);
+        }
+      }
+      return 'consumed';
+    });
+
+    // Match axona-peer's wiring: do NOT call am.start() here.
+    // axona-peer constructs AxonaManager via engine.axonFor(node)
+    // and never arms the 10s refreshTick interval.  Applications
+    // call peer.sub after the mesh has stabilised, so the
+    // initial K-closest is already wide and refresh isn't needed
+    // to recover from a stale boot-time target set.
+    return new AxonaManager({ dht });
   }
 
   _installDeliveryHook(am) {
@@ -1607,7 +1852,7 @@ export class AxonaPeer extends DHT {
       }
     } catch {
       // Fall back to a synthetic envelope carrying the raw json as
-      // message and the AxonManager's publishId as msgId — at least
+      // message and the AxonaManager's publishId as msgId — at least
       // the handler still fires with something it can inspect.
       envelope = {
         msgId:    publishId,
@@ -1616,15 +1861,21 @@ export class AxonaPeer extends DHT {
         message:  json,
       };
     }
+    // Kernel keeps loopback semantics — a publisher's own publishes
+    // do bounce back through the K-closest tree and deliver to its
+    // own subscriptions.  Tests rely on this for single-peer e2e
+    // verification, and applications that want to hide self-
+    // publishes in the UI can filter on envelope.signerPubkey ===
+    // identity.pubkeyHex in their own handler.
     for (const sub of set) sub._deliver(envelope);
   }
 
   _applySince(am, topicId, since) {
-    // The AxonManager tracks lastSeenTs per topic in _lastSeenTsByTopic.
+    // The AxonaManager tracks lastSeenTs per topic in _lastSeenTsByTopic.
     // The subscribe call reads this and includes it in the outbound
     // subscribe envelope; the axon's replay filter applies it strictly.
     // We seed it here based on the `since` mode.
-    if (!am._lastSeenTsByTopic) return;     // unknown AxonManager build
+    if (!am._lastSeenTsByTopic) return;     // unknown AxonaManager build
     if (since === undefined) {
       // Live tail: only future messages.  Seed with a sentinel just
       // below the current time so cached messages are filtered out.
@@ -2180,7 +2431,7 @@ export class AxonaPeer extends DHT {
 
   // ─── Routed messaging + pub/sub primitives (Phase 3d–f) ────────────
   //
-  // These deliver AxonManager's pub/sub on top of NH-1's transport
+  // These deliver AxonaManager's pub/sub on top of NH-1's transport
   // contract.  Bodies are copied from the engine verbatim; `node` →
   // `this._node`; the per-peer handler tables continue to live on
   // `this._engine._routedHandlers` / `_directHandlers` until Phase 4
@@ -2195,7 +2446,10 @@ export class AxonaPeer extends DHT {
   async findKClosest(targetId, K = 5, { alpha = 3, maxRounds = 40 } = {}) {
     const src = this._node;
     if (!src) return [];
-    const targetBig = topicToBigInt(targetId);
+    // Accept BigInt (canonical kernel form).  No hex conversion needed.
+    const targetBig = (typeof targetId === 'bigint')
+      ? targetId
+      : (() => { throw new TypeError(`findKClosest: targetId must be bigint, got ${typeof targetId}`); })();
 
     const distances = new Map();
     const addCandidate = (peerId) => {
@@ -2262,14 +2516,16 @@ export class AxonaPeer extends DHT {
    * consumed AND not terminal, forwards via route_msg request chain.
    */
   async routeMessage(targetId, type, payload, opts = {}) {
+    if (typeof targetId !== 'bigint') {
+      throw new TypeError(`peer.routeMessage: targetId must be bigint, got ${typeof targetId}`);
+    }
     const originNode = this._node;
     const originId   = opts.fromId ?? nodeIdToHex(originNode.id);
-    const targetBig  = topicToBigInt(targetId);
 
-    let nextHopId = this._greedyNextHopToward(targetBig);
+    let nextHopId = this._greedyNextHopToward(targetId);
     let isTerminal = nextHopId === null;
     if (isTerminal) {
-      const closer = await this._findCloserInTwoHops(targetBig);
+      const closer = await this._findCloserInTwoHops(targetId);
       if (closer !== null && closer !== originNode.id) {
         nextHopId  = closer;
         isTerminal = false;
@@ -2278,7 +2534,7 @@ export class AxonaPeer extends DHT {
 
     const result = await this._deliverRouted(type, payload, {
       fromId:   originId,
-      targetId: targetBig,
+      targetId,
       hopCount: 0,
       isTerminal,
       node:     originNode,
@@ -2292,8 +2548,11 @@ export class AxonaPeer extends DHT {
     }
 
     try {
+      // Wire payload `targetId` is hex (per the v1.5 contract; the
+      // receiver handles either form, but hex is the canonical wire
+      // shape so this also works over JSON-serialising transports).
       const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
-        type, payload, targetId: targetBig, hops: 1, originId,
+        type, payload, targetId: toHex(targetId), hops: 1, originId,
       });
       return downstream;
     } catch {
@@ -2324,11 +2583,13 @@ export class AxonaPeer extends DHT {
    * application name; the wire type is `direct_${type}`.
    */
   async sendDirect(peerId, type, payload) {
+    if (typeof peerId !== 'bigint') {
+      throw new TypeError(`peer.sendDirect: peerId must be bigint, got ${typeof peerId}`);
+    }
     const fromNode = this._node;
     if (!fromNode?.alive || !fromNode.transport) return false;
-    const peerBig = topicToBigInt(peerId);
     try {
-      const ok = await fromNode.transport.notify(peerBig, `direct_${type}`, payload);
+      const ok = await fromNode.transport.notify(peerId, `direct_${type}`, payload);
       return ok !== false;
     } catch {
       return false;
@@ -2340,16 +2601,21 @@ export class AxonaPeer extends DHT {
    * synaptome children; fall back to XOR-closest existing child.
    */
   _pickRecruitPeer(role, meta, subscriberId) {
+    // role.children keys are BigInt (kernel form).  subscriberId is
+    // BigInt.  This hook is consumed by external orchestrators that
+    // override AxonaManager.pickRecruitPeer; the signature mirrors the
+    // AxonaManager-internal _pickExistingChildForRecruit but with the
+    // additional synapse-weight scoring.
     const node = this._node;
     if (role.children.size === 0) return null;
-    const selfHex   = nodeIdToHex(node.id);
-    const forwarder = meta.fromId;
+    const selfBig   = (typeof node.id === 'bigint') ? node.id : fromHex(node.id);
+    const forwarder = meta.fromId;     // BigInt (kernel form)
     const dead      = node._deadPeers || new Set();
 
     const synapseWeights = new Map();
     for (const syn of node.synaptome.values()) {
       if (dead.has(syn.peerId)) continue;
-      synapseWeights.set(nodeIdToHex(syn.peerId), {
+      synapseWeights.set(syn.peerId, {
         weight:  syn.weight,
         latency: syn.latency ?? syn.latencyMs ?? 0,
       });
@@ -2358,7 +2624,7 @@ export class AxonaPeer extends DHT {
     let bestChildId = null;
     let bestScore = -Infinity;
     for (const childId of role.children.keys()) {
-      if (childId === selfHex)   continue;
+      if (childId === selfBig)   continue;
       if (childId === forwarder) continue;
       const s = synapseWeights.get(childId);
       if (!s) continue;
@@ -2367,13 +2633,12 @@ export class AxonaPeer extends DHT {
     }
     if (bestChildId) return bestChildId;
 
-    const subBig = topicToBigInt(subscriberId);
     let best = null;
     let bestDist = null;
     for (const childId of role.children.keys()) {
-      if (childId === selfHex)   continue;
+      if (childId === selfBig)   continue;
       if (childId === forwarder) continue;
-      const d = BigInt('0x' + childId) ^ subBig;
+      const d = childId ^ subscriberId;
       if (bestDist === null || d < bestDist) { bestDist = d; best = childId; }
     }
     return best;
@@ -2381,37 +2646,35 @@ export class AxonaPeer extends DHT {
 
   /**
    * Pick an external synaptome peer (not yet a child) to become a new
-   * sub-axon — XOR-closest to the new subscriber's id.
+   * sub-axon — XOR-closest to the new subscriber's id.  All IDs BigInt.
    */
   _pickRelayPeer(role, subscriberId, forwarderId) {
     const node = this._node;
     if (!node?.alive) return null;
-    const selfHex = nodeIdToHex(node.id);
-    const subBig  = topicToBigInt(subscriberId);
+    const selfBig = (typeof node.id === 'bigint') ? node.id : fromHex(node.id);
     const dead    = node._deadPeers || new Set();
 
     const considered = new Map();
     for (const syn of node.synaptome.values()) {
       const peerId = syn.peerId;
       if (dead.has(peerId)) continue;
-      const hex = nodeIdToHex(peerId);
-      if (hex === selfHex)       continue;
-      if (hex === forwarderId)   continue;
-      if (hex === subscriberId)  continue;
-      if (role.children.has(hex)) continue;
-      if (considered.has(hex))    continue;
-      considered.set(hex, { peerId, distToSub: peerId ^ subBig });
+      if (peerId === selfBig)       continue;
+      if (peerId === forwarderId)   continue;
+      if (peerId === subscriberId)  continue;
+      if (role.children.has(peerId)) continue;
+      if (considered.has(peerId))    continue;
+      considered.set(peerId, { peerId, distToSub: peerId ^ subscriberId });
     }
     if (considered.size === 0) return null;
 
-    let bestHex = null, bestDist = null;
-    for (const [hex, rec] of considered) {
+    let bestId = null, bestDist = null;
+    for (const [id, rec] of considered) {
       if (bestDist === null || rec.distToSub < bestDist) {
         bestDist = rec.distToSub;
-        bestHex  = hex;
+        bestId   = id;
       }
     }
-    return bestHex;
+    return bestId;
   }
 
   /**
@@ -2637,14 +2900,21 @@ export class AxonaPeer extends DHT {
   }
 }
 
-// ─── Module-local helpers (mirror AxonaEngine) ────────────────
-
-function topicToBigInt(v) {
-  if (typeof v === 'bigint') return v;
-  return BigInt('0x' + v);
-}
+// ─── Module-local helpers ─────────────────────────────────────
+//
+// Post-v1.5: nodeIds are 264-bit BigInts canonically; the public
+// hex form is 66 chars.  The engine-driven sim path may still pass
+// legacy short ids; nodeIdToHex pads accordingly.
 
 function nodeIdToHex(id) {
   if (typeof id === 'string') return id;
-  return id.toString(16).padStart(16, '0');
+  if (typeof id === 'bigint') {
+    const hex = id.toString(16);
+    // Legacy 64-bit sim ids pad to 16 chars; full 264-bit kernel
+    // ids pad to 66.  The split mirrors the engine's
+    // `padStart(16, '0')` for sim-compat with the 264-bit production
+    // path.
+    return hex.padStart(hex.length > 16 ? 66 : 16, '0');
+  }
+  return String(id);
 }

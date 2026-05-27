@@ -26,7 +26,7 @@ synchronous in-process state on remote peers.
    │     └──────────────────────────────────────────────────┘   │
    │                                                            │
    │                       Protocol                             │
-   │   AxonaEngine   NeuronNode   AxonManager   ...      │
+   │   AxonaEngine   NeuronNode   AxonaManager   ...      │
    │                                                            │
    │     ┌──────────────────────────────────────────────────┐   │
    │     │       Transport  (src/contracts/Transport.js)    │   │

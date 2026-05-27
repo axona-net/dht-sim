@@ -1,6 +1,6 @@
 /**
  * MockDHTNode / MockDHTNetwork — minimal DHT simulator that provides the
- * routing primitives the AxonManager needs:
+ * routing primitives the AxonaManager needs:
  *
  *   routeMessage(targetId, type, payload)     — walk a message toward targetId
  *                                               letting each hop intercept
@@ -273,7 +273,7 @@ export class MockDHTNode {
       const isTerminal = nextHop === null;
 
       // Invoke this node's handler (if any).  Handlers may be async
-      // (AxonManager became async-aware in v0.70.16), so we await the
+      // (AxonaManager became async-aware in v0.70.16), so we await the
       // result before deciding whether the message was consumed.
       const result = await currentNode._deliverRouted(type, payload, {
         fromId:    previousId,
@@ -363,7 +363,7 @@ export class MockDHTNode {
     return true;
   }
 
-  /** v0.70.16 — `async` so that async handlers (AxonManager became
+  /** v0.70.16 — `async` so that async handlers (AxonaManager became
    *  async-aware) drain to completion before the setTimeout callback
    *  resolves.  Without the await, fan-out chains lag behind the
    *  test's `await sleep(...)` window, causing flaky timing-dependent

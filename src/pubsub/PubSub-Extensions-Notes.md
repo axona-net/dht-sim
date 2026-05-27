@@ -1,7 +1,7 @@
 # Axona Pub/Sub Extensions — Implementation Notes
 
 These notes track the design and current state of the **post-level**
-pub/sub layer that sits on top of `AxonManager`. The protocol shape
+pub/sub layer that sits on top of `AxonaManager`. The protocol shape
 follows `documents/Axona_Protocol_Extensions.docx`, locked decisions
 from the conversation, and the end-to-end argument: the protocol moves
 opaque payloads; encryption and ordering live above.
@@ -12,13 +12,13 @@ opaque payloads; encryption and ordering live above.
        application                        — your social-media UI
        ── AxonPubSub ──                    feed-style API (publish, subscribe, metrics, …)
        ── post.js ──                       hashing, canonical encoding, topic_id derivation
-       ── AxonManager ──                   axonal/dendritic relay tree (root + sub-axons)
+       ── AxonaManager ──                   axonal/dendritic relay tree (root + sub-axons)
        ── MockDHTNode / MockDHTNetwork ──  DHT routing primitives
 ```
 
 `PubSubAdapter` / `PubSubDomain` (Croquet-style event bus) coexist
 alongside but are a different model. `AxonPubSub` is the feed-style
-path; both target the same `AxonManager` transport.
+path; both target the same `AxonaManager` transport.
 
 ## What ships in PR 1
 
@@ -28,11 +28,11 @@ path; both target the same `AxonManager` transport.
 | Content-addressed post_hash over canonical(post fields) | `post.js: makePost` |
 | Receiver-side post_hash + topic-ownership verification | `post.js: verifyPostHash, verifyTopicOwnership` |
 | Application API: publish, subscribe, metrics | `AxonPubSub.js` |
-| Per-relay `delivery_count` counter bumped on fan-out | `AxonManager._onPublish, _onDeliver, _onPublishDirect` |
-| Routed metricsReq + direct metricsResp wire path | `AxonManager._onMetricsReq, _onMetricsResp` |
-| Publisher-side promise-based metrics collection | `AxonManager.requestMetrics` |
+| Per-relay `delivery_count` counter bumped on fan-out | `AxonaManager._onPublish, _onDeliver, _onPublishDirect` |
+| Routed metricsReq + direct metricsResp wire path | `AxonaManager._onMetricsReq, _onMetricsResp` |
+| Publisher-side promise-based metrics collection | `AxonaManager.requestMetrics` |
 | Aggregation across relays into `AggregateMetrics` | `AxonPubSub.metrics` |
-| In-process counter inspection oracle | `AxonManager.getLocalCounters` |
+| In-process counter inspection oracle | `AxonaManager.getLocalCounters` |
 | Single-subscriber end-to-end test (Test 1) | `test_pubsub_delivery.js` |
 
 ## Counter increment rules (current)
@@ -76,7 +76,7 @@ unrelated to the new code and reproduce on a stash-revert).**
 |---|---|
 | `pull(ref) → SignedPost \| null` with local cache | `AxonPubSub.pull`, `_pullCache` |
 | `reshare(topicName, postRef, commentary?)` convenience | `AxonPubSub.reshare` |
-| Routed `pubsub:pullReq` → direct `pubsub:pullResp` | `AxonManager._onPullReq, _onPullResp` |
+| Routed `pubsub:pullReq` → direct `pubsub:pullResp` | `AxonaManager._onPullReq, _onPullResp` |
 | `pull_count++` ONLY on the relay that returns FOUND | `_onPullReq` (single-count invariant) |
 | Routed `pubsub:reshareNotify` to referenced topics | Emitted in `_asyncPublish` when `references[]` non-empty |
 | `reshare_count++` at the first role-bearing node hit by the notification | `_onReshareNotify` |
@@ -122,7 +122,7 @@ behaves correctly across two orders of magnitude.
   deterministic counters. K-closest mode introduces a different
   aggregation question (deduplicating across K parallel roots) which
   is its own follow-up — counters under K-redundancy are sketched
-  in `AxonManager._useKClosestMode` but not yet exercised by tests.
+  in `AxonaManager._useKClosestMode` but not yet exercised by tests.
 - **Full-mesh routing table (n-1) in Test 2.** Real deployments use
   much smaller tables; correctness under sparse routing is the same
   problem the N-DHT protocols (NH-1, NX-11) solve, and is covered by

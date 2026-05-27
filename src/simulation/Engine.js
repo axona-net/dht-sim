@@ -116,7 +116,7 @@ export class SimulationEngine {
       return `@${pfxByte.toString(16).padStart(2, '0')}/prime`;
     };
 
-    // Eager-register AxonManagers across the whole live set so routed
+    // Eager-register AxonaManagers across the whole live set so routed
     // subscribes terminate at a handler-installed node.
     for (const n of alive) dht.axonFor(n);
 
@@ -851,7 +851,7 @@ export class SimulationEngine {
         }
 
         // ── Pub/Sub Membership measurement (NX-15+) ─────────────────────────
-        // Drives the AxonManager-based membership protocol rather than the
+        // Drives the AxonaManager-based membership protocol rather than the
         // inherited one-shot pubsubBroadcast. Each participant in every
         // group subscribes via a PubSubAdapter; each tick, the relay
         // publishes via its own adapter; we count deliveries per-group and
@@ -872,7 +872,7 @@ export class SimulationEngine {
           }
 
           // Prime synaptomes once (first pub/sub test on this DHT) and
-          // reset AxonManager state so the tree we're about to measure
+          // reset AxonaManager state so the tree we're about to measure
           // is not contaminated by any previous pub/sub test.
           onStart(`${tag} · ${label} · priming pub/sub routing…`);
           await this._ensurePubsubPrimed(dht);
@@ -939,7 +939,7 @@ export class SimulationEngine {
             }
           }
 
-          // Pre-register an AxonManager on every live node. The membership
+          // Pre-register an AxonaManager on every live node. The membership
           // protocol needs a handler on whichever node happens to be the
           // terminal (closest to hash(topic)) for each group's topic —
           // otherwise the routed subscribe walks all the way to terminal
@@ -1170,7 +1170,7 @@ export class SimulationEngine {
           }
 
           // Prime synaptomes once (first pub/sub test on this DHT) and
-          // reset AxonManager state so baseline/immediate/recovered
+          // reset AxonaManager state so baseline/immediate/recovered
           // measurements reflect this test only.
           onStart(`${tag} · Pub/Sub+Churn · priming pub/sub routing…`);
           await this._ensurePubsubPrimed(dht);
@@ -1421,7 +1421,7 @@ export class SimulationEngine {
           const numKilled = Math.min(killTarget, killable.length);
           for (let i = 0; i < numKilled; i++) killable[i].alive = false;
           // Network topology just changed (nodes died). Invalidate every
-          // AxonManager's local findKClosest cache so the post-churn
+          // AxonaManager's local findKClosest cache so the post-churn
           // refresh rounds compute against the new state. In a real
           // deployment, churn-detection (e.g., heartbeat timeout) would
           // bump each node's cache epoch independently; we do it
@@ -1452,9 +1452,9 @@ export class SimulationEngine {
           // 25 K nodes × 10 rounds = 250 K iterations without yielding
           // this block could freeze the tab for tens of seconds.
           //
-          // Optimisation: only iterate nodes that have an AxonManager
+          // Optimisation: only iterate nodes that have an AxonaManager
           // instance with non-empty subscriptions OR axon roles. The base
-          // benchmark pre-creates AxonManager on every alive node (line
+          // benchmark pre-creates AxonaManager on every alive node (line
           // ~1007) but most of those have nothing to refresh — they're
           // not subscribers and not axons for any topic. Skipping them
           // turns a 25K-iteration loop per round into a ~3-4K-iteration
@@ -1532,7 +1532,7 @@ export class SimulationEngine {
           //   - attached-but-not-receiving (fan-out path broken)
           // from the aggregate `recovered%` number.
           //
-          // Only iterates LIVE axon nodes — dead-node AxonManagers stay in
+          // Only iterates LIVE axon nodes — dead-node AxonaManagers stay in
           // _axonsByNode but their roles can't deliver, so they don't count
           // as "attached" for this measurement.
           const attachedDiag = (() => {
@@ -2112,7 +2112,7 @@ export class SimulationEngine {
   // runMembershipPubSubTick()        — one measurement tick
 
   /**
-   * Build groups, pre-register AxonManagers, subscribe every participant.
+   * Build groups, pre-register AxonaManagers, subscribe every participant.
    * Publisher-prefix ('@XX/bench') topic naming is used when the DHT
    * advertises dht.usesPublisherPrefix === true (NX-17+).
    *
@@ -2365,7 +2365,7 @@ export class SimulationEngine {
 
     // Cumulative delivery metric — for each alive subscriber, count how
     // many of the group's total published publishIds this subscriber's
-    // AxonManager has in its _receivedPublishIds set for the topic.
+    // AxonaManager has in its _receivedPublishIds set for the topic.
     // This counts deliveries made via ordinary fan-out AND via replay
     // on re-subscribe. Subs who miss a live tick but pick the message
     // up via the next refresh's replay-batch are scored as "received."

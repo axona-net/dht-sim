@@ -13,7 +13,7 @@ An interactive 3-D globe simulator for studying and comparing distributed hash t
 - **100% lookup success** including under 5% churn turnover
 - **0 cap violations, 0 orphans, 0 dead-children** with the bilateral-cap guard rail enforced
 
-**NH-1** — A consolidation of NX-17's ~36 organically-grown rules into five fundamental operations (NAVIGATE, LEARN, FORGET, EXPLORE, STRUCTURE) expressed through a unified vitality model `vitality(syn) = weight × recency`. ~12 parameters replace NX-17's 44. Includes the full NX-17-style AxonManager pub/sub layer. At 25K capped: **routing within 14–21% of NX-17**, **pub/sub delivery within 1–2 percentage points** (98–99% recovered vs NX-17's 100%), **uncapped: essentially tied with NX-17**.
+**NH-1** — A consolidation of NX-17's ~36 organically-grown rules into five fundamental operations (NAVIGATE, LEARN, FORGET, EXPLORE, STRUCTURE) expressed through a unified vitality model `vitality(syn) = weight × recency`. ~12 parameters replace NX-17's 44. Includes the full NX-17-style AxonaManager pub/sub layer. At 25K capped: **routing within 14–21% of NX-17**, **pub/sub delivery within 1–2 percentage points** (98–99% recovered vs NX-17's 100%), **uncapped: essentially tied with NX-17**.
 
 ## Simulator integrity
 

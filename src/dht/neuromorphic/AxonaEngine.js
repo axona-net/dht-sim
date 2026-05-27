@@ -24,7 +24,7 @@ import { DHT }          from '../DHT.js';   // simulator multi-node base
 // v0.71.6 (Phase 5) — production kernel comes from the published
 // `@axona/protocol` package.  The local copy of `AxonaPeer.js` was
 // deleted in this commit (the package is the canonical source).
-// Other production pieces (Synapse, NeuronNode, AxonManager, utils)
+// Other production pieces (Synapse, NeuronNode, AxonaManager, utils)
 // also resolve through the package for identity consistency with
 // AxonaPeer.  The simulator-only `src/dht/DHT.js` (above) and the
 // rest of the simulator harness stay local.
@@ -32,7 +32,7 @@ import {
   AxonaPeer,
   Synapse,
   NeuronNode,
-  AxonManager,
+  AxonaManager,
   randomU32,
   roundTripLatency,
   geoCellId,
@@ -69,8 +69,8 @@ function clz64(x) {
   return 32 + Math.clz32(lo);
 }
 
-// ── Identity conversions for the AxonManager boundary ────────────────────────
-// AxonManager works in 16-char hex strings; NeuronNode uses BigInt. NH-1
+// ── Identity conversions for the AxonaManager boundary ────────────────────────
+// AxonaManager works in 16-char hex strings; NeuronNode uses BigInt. NH-1
 // converts at the boundary so the rest of the protocol stays untouched.
 function topicToBigInt(v) {
   if (typeof v === 'bigint') return v;
@@ -156,15 +156,15 @@ export class AxonaEngine extends DHT {
     // siblings; both are now configurable via rules.
     this.RECENCY_HALF_LIFE   = r.recencyHalfLife ?? 50;
 
-    // ── Membership pub/sub layer (AxonManager) ───────────────────────────
-    // Per-node handler registries (lazy: empty until AxonManager registers).
+    // ── Membership pub/sub layer (AxonaManager) ───────────────────────────
+    // Per-node handler registries (lazy: empty until AxonaManager registers).
     this._routedHandlers = new Map();   // NeuronNode → Map<type, handler>
     this._directHandlers = new Map();   // NeuronNode → Map<type, handler>
-    // Per-node AxonManager instances. Lazy-created on first axonFor().
-    this._axonsByNode    = new Map();   // NeuronNode → AxonManager
+    // Per-node AxonaManager instances. Lazy-created on first axonFor().
+    this._axonsByNode    = new Map();   // NeuronNode → AxonaManager
 
     // Membership params from UI / experiment config; passed through to each
-    // AxonManager. rootSetSize=0 forces routed mode (NX-17 design — single
+    // AxonaManager. rootSetSize=0 forces routed mode (NX-17 design — single
     // root per topic, grown by routing, healed by re-subscription).
     this._membershipOpts = {
       ...(config.membership || {}),
@@ -1262,11 +1262,11 @@ export class AxonaEngine extends DHT {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Membership Pub/Sub Layer (AxonManager-driven)
+  // Membership Pub/Sub Layer (AxonaManager-driven)
   //
   // Ported from NX-15's pub/sub mechanics, adapted for NH-1's two-tier-free
   // synaptome (no `node.highway` map; everything lives in `node.synaptome`
-  // and `node.incomingSynapses`). The four primitives AxonManager needs are:
+  // and `node.incomingSynapses`). The four primitives AxonaManager needs are:
   //
   //   routeMessage(targetId, type, payload, opts)
   //   sendDirect(peerId, type, payload)
@@ -1277,7 +1277,7 @@ export class AxonaEngine extends DHT {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
-   * Get (or lazily create) the AxonManager attached to `node`.
+   * Get (or lazily create) the AxonaManager attached to `node`.
    */
   axonFor(nodeOrId) {
     const node = this._resolveNode(nodeOrId);
@@ -1286,7 +1286,7 @@ export class AxonaEngine extends DHT {
     if (axon) return axon;
 
     const m = this._membershipOpts;
-    axon = new AxonManager({
+    axon = new AxonaManager({
       dht: this._nodeShim(node),
       maxDirectSubs:        m.maxDirectSubs,
       minDirectSubs:        m.minDirectSubs,
@@ -1309,7 +1309,7 @@ export class AxonaEngine extends DHT {
     return axon;
   }
 
-  /** Clear pub/sub state on every AxonManager. Synaptomes / weights / LTP
+  /** Clear pub/sub state on every AxonaManager. Synaptomes / weights / LTP
    *  are preserved — only axon trees, subscriptions, replay caches, dedup
    *  sets are zeroed. Used by the benchmark runner to start clean per test. */
   resetAllAxons() {
@@ -1318,12 +1318,12 @@ export class AxonaEngine extends DHT {
     }
   }
 
-  /** Build the thin shim that exposes NH-1 primitives in the shape AxonManager
+  /** Build the thin shim that exposes NH-1 primitives in the shape AxonaManager
    *  expects, with `node` captured in closure. */
   /**
    * v0.70.16 (refactor commit 10) — three of the four primitives below
    * are now async (routeMessage, sendDirect, findKClosest).  The shim
-   * methods just await/return; AxonManager is updated in the same
+   * methods just await/return; AxonaManager is updated in the same
    * commit to add `await` at every call site.
    */
   _nodeShim(node) {
@@ -1332,8 +1332,8 @@ export class AxonaEngine extends DHT {
       get nodeId()   { return nodeIdToHex(node.id); },
       getSelfId()    { return nodeIdToHex(node.id); },
       // v0.70.20 (refactor commit 14) — `getAlivePeer` retired.
-      // AxonManager never consumed it (verified via grep across the
-      // codebase).  The shim now exposes only what AxonManager
+      // AxonaManager never consumed it (verified via grep across the
+      // codebase).  The shim now exposes only what AxonaManager
       // actually depends on.  NX-15 still publishes the method for
       // its own legacy contract — that's NX-15's choice.
       routeMessage(targetId, type, payload, opts) {
@@ -1387,7 +1387,7 @@ export class AxonaEngine extends DHT {
    * notification handler.  Each `direct_${type}` notification arriving
    * at this node's transport dispatches into the per-node table.  We
    * register the bridge once per (node, type) — duplicate calls
-   * (AxonManager re-registering on resetState) just overwrite the
+   * (AxonaManager re-registering on resetState) just overwrite the
    * stored handler, since the notification handler reads the current
    * entry from the table at delivery time.
    */
@@ -1398,7 +1398,7 @@ export class AxonaEngine extends DHT {
   }
 
   // ── K-closest iterative lookup (used for terminal-globality verification
-  // during routed messaging, and as a primitive AxonManager can call directly). ──
+  // during routed messaging, and as a primitive AxonaManager can call directly). ──
 
   /**
    * v0.70.16 (refactor commit 10) — async iterative K-closest search
@@ -1498,7 +1498,7 @@ export class AxonaEngine extends DHT {
   }
 
   /**
-   * v0.70.16 (refactor commit 10) — handlers can be async (AxonManager
+   * v0.70.16 (refactor commit 10) — handlers can be async (AxonaManager
    * is now async-aware end-to-end).  We await the handler's return so
    * the 'consumed'/'forward' decision reflects the post-await state.
    * Sync handlers still work — `await` over a non-Promise is a no-op.
@@ -1553,7 +1553,7 @@ export class AxonaEngine extends DHT {
 
   /**
    * Pick an EXTERNAL synaptome peer (not yet a child) to become a new
-   * sub-axon when this role overflows past maxDirectSubs. AxonManager
+   * sub-axon when this role overflows past maxDirectSubs. AxonaManager
    * partitions existing children by XOR direction toward this new relay
    * and hands off the in-direction subset in a single batch-adopt message.
    *

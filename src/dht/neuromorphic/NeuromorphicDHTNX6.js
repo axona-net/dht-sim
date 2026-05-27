@@ -14,7 +14,7 @@
  * v0.66.x and earlier benchmark numbers reproduce byte-for-byte.
  *
  * Why kept on legacy paths: same rationale as commit 12 (see NX-15's
- * header).  AxonManager's async-aware refactor (commit 10) is
+ * header).  AxonaManager's async-aware refactor (commit 10) is
  * backward-compatible with NX-6's sync routing primitives, so the
  * lineage continues to work in the simulator without any code
  * changes.  Production deployment uses NH-1 exclusively.

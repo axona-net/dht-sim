@@ -37,7 +37,7 @@
 // =====================================================================
 
 import { MockDHTNetwork } from './MockDHTNode.js';
-import { AxonManager }    from './AxonManager.js';
+import { AxonaManager }    from './AxonaManager.js';
 import { AxonPubSub }     from './AxonPubSub.js';
 
 // ── CLI ─────────────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ function buildNetwork(totalNodes, latencyMs = 1) {
 }
 
 function attachPubSub(node, opts = {}) {
-  const axon = new AxonManager({
+  const axon = new AxonaManager({
     dht: node,
     maxDirectSubs:        opts.maxDirectSubs        ?? 20,
     minDirectSubs:        opts.minDirectSubs        ?? 5,

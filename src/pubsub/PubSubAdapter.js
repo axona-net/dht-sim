@@ -330,7 +330,7 @@ export class PubSubAdapter {
    * PubSubDomain. The outbound path adds (senderId, seq) and routes via
    * transport.pubsubPublish.
    *
-   * v0.70.16 (refactor commit 10) — stays SYNC.  AxonManager's
+   * v0.70.16 (refactor commit 10) — stays SYNC.  AxonaManager's
    * pubsubPublish allocates publishId synchronously and fires the
    * underlying DHT primitives in the background, so we keep the
    * old sync API even though the underlying transport is async.

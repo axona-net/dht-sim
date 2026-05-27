@@ -1157,7 +1157,7 @@ async function onPubSub() {
   }
 
   // Route to the live Membership simulation when the active protocol has
-  // the AxonManager-based membership transport (NX-15 and descendants).
+  // the AxonaManager-based membership transport (NX-15 and descendants).
   // Older neuromorphic protocols (NX-6/9/10/13) still run the original
   // one-shot inherited pubsubBroadcast below.
   if (typeof dht.axonFor === 'function') {
@@ -2023,7 +2023,7 @@ function createDHT(params) {
         // window.__sim._nh1RulesOverride so ablation experiments can drive
         // single-parameter changes without recompiling.
         rules: window.__sim?._nh1RulesOverride ?? params.nh1Rules,
-        // Reuse the same membership params as NX-17 — NH-1's AxonManager
+        // Reuse the same membership params as NX-17 — NH-1's AxonaManager
         // is configured identically (rootSetSize forced to 0, NX-17-style
         // single-root-per-topic routed mode) so a head-to-head pubsubm
         // benchmark is apples-to-apples.

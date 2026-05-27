@@ -1,9 +1,9 @@
 /**
- * test_nx15_integration.js — PubSubAdapter + AxonManager running on real
+ * test_nx15_integration.js — PubSubAdapter + AxonaManager running on real
  * NeuromorphicDHTNX15 (not the mock).
  *
  * Uses a small NX-15 sim (~30 nodes) with omniscient init so the routing
- * tables are well-formed, then wires an AxonManager + PubSubAdapter to
+ * tables are well-formed, then wires an AxonaManager + PubSubAdapter to
  * each node via dht.axonFor(nodeId). Tests exercise the same end-to-end
  * scenarios as test_integration.js but through the real NX-15 routing
  * pipeline — which proves that the four primitives NX-15 implements

@@ -1,5 +1,5 @@
 /**
- * test_axon.js — AxonManager (Phase 3a) membership protocol tests.
+ * test_axon.js — AxonaManager (Phase 3a) membership protocol tests.
  *
  *   1. First subscribe → terminal node becomes root for the topic
  *   2. Non-root nodes forward subscribe (no role created)
@@ -17,7 +17,7 @@
  */
 
 import { MockDHTNetwork } from './MockDHTNode.js';
-import { AxonManager } from './AxonManager.js';
+import { AxonaManager } from './AxonaManager.js';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -29,7 +29,7 @@ function assert(name, cond, detail = '') {
 }
 
 /**
- * Build a network of nodes, each with an AxonManager attached.
+ * Build a network of nodes, each with an AxonaManager attached.
  * Returns { net, nodes, axons } where axons[i] drives nodes[i].
  */
 function buildAxonNetwork(n, opts = {}) {
@@ -52,7 +52,7 @@ function buildAxonNetwork(n, opts = {}) {
   // Attach an axon manager to each node AFTER the routing tables are built
   // so the handler registration lands on the finished topology.
   for (const node of nodes) {
-    const axon = new AxonManager({
+    const axon = new AxonaManager({
       dht: node,
       maxDirectSubs:        opts.maxDirectSubs        ?? 20,
       minDirectSubs:        opts.minDirectSubs        ?? 5,

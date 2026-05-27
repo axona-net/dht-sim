@@ -1,7 +1,7 @@
 /**
  * test_integration.js — end-to-end verification of the full stack:
  *
- *   App → PubSubAdapter → AxonManager → MockDHTNode
+ *   App → PubSubAdapter → AxonaManager → MockDHTNode
  *
  * This proves that v0.51.00's adapter (sequencing, reorder, gap detection)
  * works unchanged against v0.51.02's membership protocol (routed subscribe,
@@ -19,7 +19,7 @@
 
 import { PubSubAdapter, topicIdFor } from './PubSubAdapter.js';
 import { MockDHTNetwork, xorDistance } from './MockDHTNode.js';
-import { AxonManager } from './AxonManager.js';
+import { AxonaManager } from './AxonaManager.js';
 
 /** Pick the adapter whose node ID is *farthest* from `topic` so it is never
  *  elected root (its subscribe and the publish will always route over the
@@ -42,7 +42,7 @@ function assert(name, cond, detail = '') {
   else      { failed++; results.push(`  ✗ ${name}${detail ? ' — ' + detail : ''}`); }
 }
 
-/** Build a network with an AxonManager + PubSubAdapter on every node. */
+/** Build a network with an AxonaManager + PubSubAdapter on every node. */
 function buildStack(n, opts = {}) {
   const net = new MockDHTNetwork({
     routingTableSize: n - 1,         // full-mesh for deterministic routing
@@ -52,7 +52,7 @@ function buildStack(n, opts = {}) {
   for (let i = 0; i < n; i++) nodes.push(net.createNode());
   net.rebuildRoutingTables();
   for (const node of nodes) {
-    const axon = new AxonManager({
+    const axon = new AxonaManager({
       dht: node,
       refreshIntervalMs:    opts.refreshIntervalMs    ?? 100000,
       maxSubscriptionAgeMs: opts.maxSubscriptionAgeMs ?? 30000,

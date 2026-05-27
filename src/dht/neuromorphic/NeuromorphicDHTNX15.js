@@ -18,8 +18,8 @@
  *     them would mean re-validating those numbers under the new
  *     transport model, which is out of scope for the production
  *     deployment effort.
- *   - The AxonManager refactor (commit 10) is intentionally
- *     backward-compatible: AxonManager's `await this.dht.findKClosest`
+ *   - The AxonaManager refactor (commit 10) is intentionally
+ *     backward-compatible: AxonaManager's `await this.dht.findKClosest`
  *     / `await this.dht.sendDirect` work fine with a sync return value
  *     (await of a non-Promise is a microtask no-op), so NX-15's
  *     existing sync primitives plug in cleanly.  Tests confirm parity:
@@ -51,9 +51,9 @@
  *     synaptome peers with highest synapse weight — axon membership is
  *     long-lived, so LTP-trusted synapses are the right backbone.
  *
- * The membership protocol is implemented by AxonManager (in
- * src/pubsub/AxonManager.js), which is protocol-agnostic. NX-15's job
- * is to provide the four routing primitives AxonManager needs:
+ * The membership protocol is implemented by AxonaManager (in
+ * src/pubsub/AxonaManager.js), which is protocol-agnostic. NX-15's job
+ * is to provide the four routing primitives AxonaManager needs:
  *
  *     routeMessage(targetId, type, payload, opts)
  *     sendDirect(peerId, type, payload)
@@ -68,11 +68,11 @@
  * The inherited pubsubBroadcast(relayId, targetIds) one-shot API is
  * preserved unchanged (so NX-10's benchmark numbers are reproduced by
  * NX-15). A future integration phase can add a new benchmark that uses
- * the membership protocol end-to-end via PubSubAdapter → AxonManager.
+ * the membership protocol end-to-end via PubSubAdapter → AxonaManager.
  */
 
 import { NeuromorphicDHTNX10 } from './NeuromorphicDHTNX10.js';
-import { AxonManager } from '../../pubsub/AxonManager.js';
+import { AxonaManager } from '../../pubsub/AxonaManager.js';
 
 // ── Identity conversions ────────────────────────────────────────────────────
 //
@@ -98,19 +98,19 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
   constructor(opts = {}) {
     super(opts);
 
-    // Per-node handler maps. Handlers are installed lazily when AxonManager
+    // Per-node handler maps. Handlers are installed lazily when AxonaManager
     // registers them for a given node.
     this._routedHandlers = new Map();  // NeuronNode → Map<type, handler>
     this._directHandlers = new Map();  // NeuronNode → Map<type, handler>
 
-    // Per-node AxonManagers. Lazy-created on first pub/sub access so that
+    // Per-node AxonaManagers. Lazy-created on first pub/sub access so that
     // the cost is zero for nodes that never participate in a topic.
-    this._axonsByNode = new Map();     // NeuronNode → AxonManager
+    this._axonsByNode = new Map();     // NeuronNode → AxonaManager
 
-    // Membership protocol parameters — inherited by every AxonManager we
+    // Membership protocol parameters — inherited by every AxonaManager we
     // create via axonFor(). The UI panel in index.html (id="nx15-panel")
     // controls these via Controls.getNX15Params() → main.js createDHT.
-    // Any field left undefined uses AxonManager's default.
+    // Any field left undefined uses AxonaManager's default.
     this._membershipOpts = opts.membership || {};
 
     // sendDirect drain-loop state (see sendDirect docstring for rationale).
@@ -118,12 +118,12 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
     this._sendDraining = false;
   }
 
-  // ── AxonManager lifecycle ───────────────────────────────────────────
+  // ── AxonaManager lifecycle ───────────────────────────────────────────
 
   /**
-   * Get (or lazily create) the AxonManager attached to `node`. `node` may
+   * Get (or lazily create) the AxonaManager attached to `node`. `node` may
    * be the NeuronNode directly or its id (BigInt or hex string); the
-   * returned AxonManager satisfies the PubSubAdapter transport contract.
+   * returned AxonaManager satisfies the PubSubAdapter transport contract.
    */
   axonFor(nodeOrId) {
     const node = this._resolveNode(nodeOrId);
@@ -132,9 +132,9 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
     if (axon) return axon;
 
     // Apply UI-tunable membership parameters; any field left undefined
-    // falls through to AxonManager's compiled-in defaults.
+    // falls through to AxonaManager's compiled-in defaults.
     const m = this._membershipOpts;
-    axon = new AxonManager({
+    axon = new AxonaManager({
       dht: this._nodeShim(node),
       maxDirectSubs:        m.maxDirectSubs,
       minDirectSubs:        m.minDirectSubs,
@@ -149,9 +149,9 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
       pickRecruitPeer: (role, meta, subscriberId) =>
         this._pickRecruitPeer(node, role, meta, subscriberId),
       // Subclass hook: if the subclass implements _pickRelayPeer, pass it
-      // as AxonManager's pickRelayPeer (activates the batch-adoption
+      // as AxonaManager's pickRelayPeer (activates the batch-adoption
       // path). NX-17 implements this to return an external synaptome
-      // peer; plain NX-15 leaves it undefined so AxonManager falls
+      // peer; plain NX-15 leaves it undefined so AxonaManager falls
       // through to the legacy single-recruit path.
       pickRelayPeer: (typeof this._pickRelayPeer === 'function')
         ? (role, subscriberId, forwarderId) =>
@@ -163,8 +163,8 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
   }
 
   /**
-   * Clear per-topic pub/sub state on every AxonManager attached to this
-   * DHT. Leaves synaptic weights, routing tables, and the AxonManager
+   * Clear per-topic pub/sub state on every AxonaManager attached to this
+   * DHT. Leaves synaptic weights, routing tables, and the AxonaManager
    * instances themselves untouched — only the axon trees, subscriptions,
    * replay caches, and dedup sets are zeroed.
    *
@@ -180,7 +180,7 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
 
   /**
    * Build the thin wrapper that exposes the four DHT primitives in the shape
-   * AxonManager expects, with the node captured in closure.
+   * AxonaManager expects, with the node captured in closure.
    */
   _nodeShim(node) {
     const self = this;
@@ -203,7 +203,7 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
       onDirectMessage(type, handler) {
         self.onDirectMessage(node, type, handler);
       },
-      /** K-closest lookup — AxonManager uses this in K-closest mode. */
+      /** K-closest lookup — AxonaManager uses this in K-closest mode. */
       findKClosest(targetId, K, opts) {
         return self.findKClosest(node, targetId, K, opts)
                    .map(peer => nodeIdToHex(peer.id));
@@ -240,7 +240,7 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
    * highway. Reuses the same algorithmic pattern as NX-6's addNode
    * iterative-lookup helper; returns bare NeuronNodes. K defaults to 5.
    *
-   * This is the primitive the membership protocol (AxonManager K-closest
+   * This is the primitive the membership protocol (AxonaManager K-closest
    * mode) uses to find the replicated root set for a topic: subscribe
    * STOREs at every node in the returned list, and publishers route to
    * any-of-K rather than one-true-closest. Making this function pre-
@@ -648,7 +648,7 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
    *
    * Contract: the return value MUST already be present in role.children —
    * recruitment never grows the axon beyond maxDirectSubs. If no child
-   * has a synaptome match, falls back to AxonManager's default (XOR-
+   * has a synaptome match, falls back to AxonaManager's default (XOR-
    * closest existing child to the new subscriber).
    */
   _pickRecruitPeer(node, role, meta, subscriberId) {
@@ -656,7 +656,7 @@ export class NeuromorphicDHTNX15 extends NeuromorphicDHTNX10 {
     const selfHex    = nodeIdToHex(node.id);
     const forwarder  = meta.fromId;   // never recruit the peer that just
                                       // forwarded this to us (see loop
-                                      // explanation in AxonManager).
+                                      // explanation in AxonaManager).
 
     // Build an index of our synaptome+highway weights keyed by hex-string peerId,
     // so we can look them up quickly while walking role.children.
