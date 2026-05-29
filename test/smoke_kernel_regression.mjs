@@ -80,7 +80,7 @@ async function spawnPeer(network) {
   const peer = new AxonaPeer({
     engine:    { onEvent: () => () => {} },
     node, identity, transport,
-    axonManager: new MockAxonManager(identity.id),
+    axonaManager: new MockAxonManager(identity.id),
   });
   return { peer, identity, transport };
 }
@@ -211,7 +211,7 @@ async function runSubscriptionRefcount(N) {
     engine:    { onEvent: () => () => {} },
     node:      { id: id.id, alive: true, synaptome: new Map() },
     identity:  id,
-    axonManager: am,
+    axonaManager: am,
   });
 
   const t0 = Date.now();

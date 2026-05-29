@@ -38,6 +38,9 @@ import { CompositeTransport } from './composite.js';
 import { isHexId, toHex, fromHex } from '../../utils/hexid.js';
 import { TransportError, ErrorCodes, UpgradeRequiredError } from '../../errors.js';
 import { KERNEL_VERSION }    from '../handshake.js';
+import {
+  buildAuthHello, verifyAuthHello, makeNonce, cbvFromNonces, AUTH_PROTO,
+} from '../handshake-auth.js';
 
 export { MeshManager, WebRTCTransport, BridgeTransport, CompositeTransport };
 
@@ -92,6 +95,15 @@ export { MeshManager, WebRTCTransport, BridgeTransport, CompositeTransport };
  */
 /** Bridge ping cadence — matches axona-peer's BRIDGE_PING_INTERVAL_MS. */
 const BRIDGE_PING_INTERVAL_MS = 1000;
+/** No pong within this window ⇒ bridge state goes 'stale'. */
+const BRIDGE_STALE_PONG_MS    = 3000;
+/** Reconnect backoff bounds (exponential, doubling per attempt). */
+const RECONNECT_BACKOFF_INITIAL_MS = 1000;
+const RECONNECT_BACKOFF_MAX_MS     = 16000;
+/** WebSocket close code the bridge uses for version-gate rejection. */
+const UPGRADE_CLOSE_CODE = 4426;
+/** Window of recent RTT samples kept for the average. */
+const RTT_WINDOW = 10;
 
 export function webTransport({
   bridgeUrl,
@@ -102,6 +114,15 @@ export function webTransport({
   peerVersion,
   handshakeTimeoutMs = 15000,
   pingIntervalMs = BRIDGE_PING_INTERVAL_MS,
+  // v2.1 — auto-reconnect with exponential backoff.  Only active when
+  // autoHandshake is true (reconnect re-runs the version-gate +
+  // hello/hello-ack the factory owns; an autoHandshake:false consumer
+  // drives its own socket lifecycle).  Triggers on socket *close*
+  // other than a 4426 version-gate rejection, so the first-attempt
+  // handshake-timeout contract (start() rejects) is unchanged.
+  reconnect = true,
+  reconnectInitialMs = RECONNECT_BACKOFF_INITIAL_MS,
+  reconnectMaxMs     = RECONNECT_BACKOFF_MAX_MS,
 } = {}) {
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
@@ -112,6 +133,19 @@ export function webTransport({
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
       'webTransport: identity must have a 66-char hex id',
       { context: { hasId: !!identity?.id } });
+  }
+  // axona/4 — the authenticated handshake signs with the identity's
+  // key, so when autoHandshake is on we need a usable signer + pubkey.
+  // Fail fast and clearly rather than silently producing unauthenticable
+  // hellos that the network will reject.
+  if (autoHandshake) {
+    if (typeof identity.sign !== 'function' || typeof identity.pubkeyHex !== 'string'
+        || identity.pubkeyHex.length !== 64) {
+      throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
+        'webTransport: identity must expose sign() + pubkeyHex (64-hex) for the ' +
+        'authenticated handshake (axona/4); pass the full deriveIdentity() result',
+        { context: { hasSign: typeof identity?.sign, pubkeyLen: identity?.pubkeyHex?.length } });
+    }
   }
   const WSImpl = WebSocketImpl ?? globalThis.WebSocket;
   if (typeof WSImpl !== 'function') {
@@ -151,13 +185,52 @@ export function webTransport({
     socket.addEventListener('open', () => {
       socketOpen = true;
       log('bridge-socket-open', { bridgeUrl });
+      setBridgeState('connecting');
+      if (autoHandshake) {
+        // (a) WebSocket-level version gate: the bridge requires
+        // {type:'client-hello', version} as the FIRST raw frame, before
+        // any axona payloads.  Sent here on every (re)open so reconnect
+        // re-clears the gate without bespoke caller logic.
+        try {
+          socket.send(JSON.stringify({
+            type:    'client-hello',
+            version: peerVersion || KERNEL_VERSION,
+          }));
+        } catch (err) {
+          log('auto-handshake-client-hello-failed', { err: err.message });
+        }
+        // (c) Bridge ping/pong heartbeat + stale detection.
+        startBridgePingLoop();
+        startStaleChecker();
+      }
       for (const h of socketEvents.open) try { h(); } catch (e) { log('open-handler-threw', { err: e.message }); }
     });
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', (ev) => {
       socketOpen = false;
-      log('bridge-socket-close');
+      stopBridgePingLoop();
+      const code = ev && typeof ev.code === 'number' ? ev.code : null;
+      log('bridge-socket-close', { code });
       bridge.handleConnClosed();
-      for (const h of socketEvents.close) try { h(); } catch (e) { log('close-handler-threw', { err: e.message }); }
+      // Allow the persistent hello handler to re-bind on the next open.
+      bridgeNodeIdBig   = null;
+      bridgeServerNonce = null;   // fresh nonce per (re)connection
+      if (code === UPGRADE_CLOSE_CODE) {
+        // Version-gate rejection — reconnecting would just fail again.
+        stopped = true;
+        stopStaleChecker();
+        setBridgeState('upgrade-required', (ev && ev.reason) || 'client out of date');
+      } else if (!stopped && reconnect && autoHandshake) {
+        setBridgeState('disconnected');
+        scheduleReconnect();
+      } else {
+        stopStaleChecker();
+        setBridgeState('disconnected');
+      }
+      // Drop the dead socket reference so openSocket() (called by the
+      // reconnect path) can create a fresh one — its `if (socket) return`
+      // guard would otherwise block reconnection.
+      socket = null;
+      for (const h of socketEvents.close) try { h(ev); } catch (e) { log('close-handler-threw', { err: e.message }); }
     });
     socket.addEventListener('message', (ev) => {
       let frame;
@@ -232,6 +305,23 @@ export function webTransport({
             try { mesh.setTurnConfig(frame.turn ?? null); }
             catch (err) { log('turn-config-failed', { err: err.message }); }
           }
+          // Capture welcome for observability (consumers read it via
+          // transport.bridgeInfo + onWelcome) — connId, the bridge's
+          // package version, and its kernel version for the UI's
+          // version row.
+          bridgeInfo = {
+            connId:        frame.connId ?? null,
+            version:       frame.version ?? null,
+            kernelVersion: frame.kernelVersion ?? null,
+            turn:          !!frame.turn,
+          };
+          // axona/4 — the bridge mints a fresh per-connection nonce in
+          // welcome; it (with the connId) is the bridge-link channel
+          // binding value both sides fold into their signed hello.
+          bridgeServerNonce = (typeof frame.serverNonce === 'string') ? frame.serverNonce : null;
+          for (const h of welcomeHandlers) {
+            try { h(bridgeInfo); } catch (e) { log('welcome-handler-threw', { err: e.message }); }
+          }
           log('bridge-welcome', {
             connId:  frame.connId,
             version: frame.version,
@@ -260,6 +350,8 @@ export function webTransport({
           break;
         case 'pong':
           bridge._emitPingTraffic('recv');
+          // RTT + liveness: the bridge echoes the ping's `t` timestamp.
+          recordPong(frame.t);
           return;
         case 'version-gate':
           // Version-gate announcement — no action needed.
@@ -322,54 +414,170 @@ export function webTransport({
   // (autoHandshake === false → we resolve immediately below).
   bridgeReady.catch(() => {});
 
+  // ── Connection state machine (v2.1 — reconnect + observability) ──
+  //
+  // bridgeState transitions, surfaced via onBridgeState(cb):
+  //   'connecting'       socket opening / handshake in flight
+  //   'open'             handshake complete + pongs flowing
+  //   'stale'            open but no pong within BRIDGE_STALE_PONG_MS
+  //   'disconnected'     socket closed, reconnect pending
+  //   'upgrade-required' bridge rejected us with 4426 (no reconnect)
+  let bridgeState      = 'disconnected';
+  let bridgeInfo       = null;   // last welcome: { connId, version, kernelVersion, turn }
+  let bridgeServerNonce = null;  // axona/4 — per-connection nonce from welcome
+  let upgradeReason    = null;   // set when state === 'upgrade-required'
+  let lastPongAt       = 0;
+  let lastRtt          = null;
+  const rttBuffer      = [];
+  let staleTimer       = null;
+  let reconnectTimer   = null;
+  let reconnectAttempt = 0;
+  let stopped          = false;  // composite.stop() sets this — suppresses reconnect
+  const stateHandlers   = new Set();
+  const welcomeHandlers = new Set();
+
+  function setBridgeState(next, detail) {
+    if (next === 'upgrade-required') {
+      upgradeReason = detail ?? upgradeReason;
+      logUpgradeRequired(upgradeReason);
+    }
+    if (bridgeState === next) return;
+    bridgeState = next;
+    for (const h of stateHandlers) {
+      try { h(next, detail); } catch (e) { log('bridge-state-handler-threw', { err: e.message }); }
+    }
+  }
+
+  // axona/4 — surface "you must upgrade" loudly to the DEVELOPER CONSOLE
+  // by default, not only through an app-wired onBridgeState handler.
+  // The whole point of the gate is to help developers of apps we don't
+  // control: when their build speaks an older protocol than the network
+  // requires, the kernel itself prints an actionable, branded line so
+  // it's obvious in DevTools without any app cooperation.  Fires once
+  // per distinct reason.
+  let _lastUpgradeLogged = null;
+  function logUpgradeRequired(reason) {
+    if (reason && reason === _lastUpgradeLogged) return;
+    _lastUpgradeLogged = reason;
+    const msg =
+      `[axona] UPGRADE REQUIRED — this client could not join the network. ` +
+      `It speaks protocol ${AUTH_PROTO} / kernel ${KERNEL_VERSION}, but the ` +
+      `bridge rejected it${reason ? ` (${reason})` : ''}. ` +
+      `Update @axona/protocol to the current release and reload.`;
+    try {
+      if (typeof console !== 'undefined' && console.error) console.error(msg);
+    } catch { /* no console — ignore */ }
+  }
+
+  function recordPong(t) {
+    lastPongAt = Date.now();
+    if (typeof t === 'number') {
+      lastRtt = Math.max(0, Date.now() - t);
+      rttBuffer.push(lastRtt);
+      if (rttBuffer.length > RTT_WINDOW) rttBuffer.shift();
+    }
+    if (bridgeState === 'stale') setBridgeState('open');
+  }
+
+  function startStaleChecker() {
+    if (staleTimer != null) return;
+    staleTimer = setInterval(() => {
+      if (bridgeState !== 'open' && bridgeState !== 'stale') return;
+      if (lastPongAt === 0) return;
+      const since = Date.now() - lastPongAt;
+      if (since > BRIDGE_STALE_PONG_MS && bridgeState === 'open') {
+        setBridgeState('stale');
+      }
+    }, 500);
+    if (typeof staleTimer?.unref === 'function') staleTimer.unref();
+  }
+  function stopStaleChecker() {
+    if (staleTimer != null) { clearInterval(staleTimer); staleTimer = null; }
+  }
+
+  function scheduleReconnect() {
+    if (stopped || !reconnect || !autoHandshake) return;
+    if (reconnectTimer != null) return;
+    const delay = Math.min(
+      reconnectInitialMs * (2 ** reconnectAttempt),
+      reconnectMaxMs,
+    );
+    reconnectAttempt++;
+    log('bridge-reconnect-scheduled', { delay, attempt: reconnectAttempt });
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (stopped) return;
+      setBridgeState('connecting');
+      openSocket();          // re-open; the 'open' handler re-runs client-hello,
+                             // the persistent hello handler re-binds the bridge.
+    }, delay);
+    if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
+  }
+
   if (!autoHandshake) {
     bridgeReadyResolve(null);
   } else {
-    // ── Bridge hello / hello-ack ─────────────────────────────────
-    // Register BEFORE the socket opens so we don't miss the bridge's
-    // first hello (which arrives on the same tick as version-gate /
-    // welcome).
+    // ════════════════════════════════════════════════════════════════
+    // axona/4 AUTHENTICATED HANDSHAKE
     //
-    // Wire form: body.nodeId is hex (66-char).  Convert to BigInt at
-    // the boundary; the rest of the kernel sees BigInt.
-    bridge.onNotification('hello', (fromConnId, body) => {
-      // Pre-bind state: fromConnId === BRIDGE_CONN_ID sentinel string.
+    // Every bind is now gated on proof: the peer must present its
+    // pubkey, that pubkey must hash to the 256-bit suffix of the nodeId
+    // it claims, and it must sign a per-connection channel-binding value
+    // (CBV).  An unproven nodeId is never bound — closing the root
+    // impersonation / eclipse gap.  See transport/handshake-auth.js.
+    // ════════════════════════════════════════════════════════════════
+
+    // ── Bridge link ───────────────────────────────────────────────
+    // CBV = the bridge's per-connection serverNonce (from welcome) +
+    // the connId.  Both are unpredictable per connection, so a hello
+    // captured on one connection can't be replayed onto another.  Two
+    // messages suffice because welcome pre-seeds the nonce before either
+    // side signs.
+    function bridgeCbv() {
+      if (!bridgeServerNonce) return null;
+      return cbvFromNonces(bridgeServerNonce, bridgeInfo?.connId ?? '', 'bridge');
+    }
+
+    const onBridgeAuthHello = async (fromConnId, body, label) => {
       if (typeof fromConnId !== 'string') return;     // already bound
-      if (!body || !isHexId(body.nodeId)) return;
-      const nodeIdBig = fromHex(body.nodeId);
-      try {
-        bridge.bindPeer(nodeIdBig, BRIDGE_CONN_ID);
-      } catch (err) {
-        log('auto-handshake-bind-failed', { err: err.message });
-        bridgeReadyReject(err);
+      if (label === 'hello-ack' && bridgeNodeIdBig !== null) return;
+      const cbv = bridgeCbv();
+      if (!cbv) { log('auth-bridge-no-cbv', { label }); return; }
+      const res = await verifyAuthHello(body, { cbv });
+      if (!res.ok) {
+        log('auth-bridge-rejected', { label, reason: res.reason });
+        // A proto mismatch means the bridge speaks a version this
+        // client doesn't — surface the upgrade prompt to the console.
+        if (res.reason === 'proto_mismatch') setBridgeState('upgrade-required', 'bridge_proto_newer');
         return;
       }
-      // Reply with hello-ack so the bridge knows our nodeId.
-      // Outbound wire: hex.
-      bridge.notify(BRIDGE_CONN_ID, 'hello-ack', {
-        proto:  'axona/3',
-        nodeId: localNodeIdHex,
-      }).catch(err => log('auto-handshake-ack-failed', { err: err.message }));
-      bridgeNodeIdBig = nodeIdBig;
-      log('auto-handshake-complete', { bridgeNodeId: body.nodeId });
-      bridgeReadyResolve(nodeIdBig);
-    });
-    bridge.onNotification('hello-ack', (fromConnId, body) => {
-      if (typeof fromConnId !== 'string') return;
-      if (!body || !isHexId(body.nodeId)) return;
-      if (bridgeNodeIdBig !== null) return;           // already done
-      const nodeIdBig = fromHex(body.nodeId);
-      try {
-        bridge.bindPeer(nodeIdBig, BRIDGE_CONN_ID);
-      } catch (err) {
-        log('auto-handshake-bind-failed', { err: err.message });
-        bridgeReadyReject(err);
-        return;
+      const nodeIdBig = fromHex(res.nodeId);
+      try { bridge.bindPeer(nodeIdBig, BRIDGE_CONN_ID); }
+      catch (err) { log('auth-bridge-bind-failed', { err: err.message }); bridgeReadyReject(err); return; }
+
+      // Reply with OUR authenticated hello-ack over the same CBV (only
+      // on the inbound 'hello' — the bridge's reply to our ack would
+      // loop).
+      if (label === 'hello') {
+        try {
+          const ack = await buildAuthHello({ identity, cbv });
+          bridge.notify(BRIDGE_CONN_ID, 'hello-ack', ack)
+            .catch(err => log('auth-bridge-ack-send-failed', { err: err.message }));
+        } catch (err) {
+          log('auth-bridge-ack-build-failed', { err: err.message });
+        }
       }
-      bridgeNodeIdBig = nodeIdBig;
-      log('auto-handshake-complete', { bridgeNodeId: body.nodeId });
+
+      bridgeNodeIdBig  = nodeIdBig;
+      reconnectAttempt = 0;
+      lastPongAt       = Date.now();
+      log('auth-bridge-complete', { bridgeNodeId: res.nodeId });
+      setBridgeState('open');
       bridgeReadyResolve(nodeIdBig);
-    });
+    };
+    bridge.onNotification('hello',     (c, b) => onBridgeAuthHello(c, b, 'hello'));
+    bridge.onNotification('hello-ack', (c, b) => onBridgeAuthHello(c, b, 'hello-ack'));
+
     socketEvents.close.add(() => {
       if (bridgeNodeIdBig === null) {
         bridgeReadyReject(new UpgradeRequiredError(
@@ -378,15 +586,60 @@ export function webTransport({
       }
     });
 
-    // ── Mesh hello / hello-ack ────────────────────────────────────
-    // When a WebRTC DataChannel reaches 'open' state, send hello to
-    // the remote.  When their hello (or hello-ack) arrives, bindPeer
-    // in WebRTCTransport so subsequent transport.send / notify by
-    // BigInt nodeId routes via the mesh.  AxonaPeer's onPeerBound
-    // subscriber then admits the new peer into the synaptome — the
-    // kernel now handles the full multi-peer mesh admission
-    // automatically.
-    const helloSentToMeshId = new Set();
+    // ── Mesh (peer ↔ peer over WebRTC) ────────────────────────────
+    // Symmetric 3-message mutual-nonce handshake (each side: hello with
+    // a nonce, then hello-sig with the proof over CBV(both nonces)).
+    // A nonce pair is the portable channel-binding value; binding to the
+    // DTLS fingerprint (full MITM detection) is the tracked follow-up.
+    //
+    // Per-meshId auth state: our nonce, the peer's hello fields, and any
+    // hello-sig that arrived before we had the peer's nonce.
+    /** @type {Map<string, {myNonce:string, peerNonce?:string, peerNodeId?:string, peerPubkey?:string, pendingSig?:object, bound:boolean}>} */
+    const meshAuth = new Map();
+
+    function meshCbvFor(st, meshId) {
+      if (!st?.myNonce || !st?.peerNonce) return null;
+      return cbvFromNonces(st.myNonce, st.peerNonce, meshId);
+    }
+
+    async function sendMeshHello(meshId, st) {
+      try {
+        mesh.send(meshId, { k: 'ntf', type: 'hello', body: { proto: AUTH_PROTO, nonce: st.myNonce } });
+      } catch (err) { log('mesh-hello-send-failed', { meshId, err: err.message }); }
+    }
+
+    // Try to (a) send our proof once we know the peer's nonce, and
+    // (b) verify+bind once we have the peer's proof.  Idempotent.
+    async function meshMaybeProgress(meshId) {
+      const st = meshAuth.get(meshId);
+      if (!st || st.bound) return;
+      const cbv = meshCbvFor(st, meshId);
+      if (!cbv) return;                       // still missing a nonce
+
+      // (a) send our signed proof (once).
+      if (!st.sigSent) {
+        st.sigSent = true;
+        try {
+          const proof = await buildAuthHello({ identity, cbv });
+          mesh.send(meshId, { k: 'ntf', type: 'hello-sig', body: proof });
+        } catch (err) { log('mesh-sig-send-failed', { meshId, err: err.message }); }
+      }
+
+      // (b) if the peer's proof is in hand, verify + bind.
+      if (st.pendingSig) {
+        const res = await verifyAuthHello(st.pendingSig, { cbv });
+        if (!res.ok) { log('auth-mesh-rejected', { meshId, reason: res.reason }); return; }
+        if (st.peerNodeId && res.nodeId !== st.peerNodeId) {
+          log('auth-mesh-id-mismatch', { meshId }); return;
+        }
+        try {
+          webrtc.bindPeer(fromHex(res.nodeId), meshId);
+          st.bound = true;
+          log('auth-mesh-complete', { meshId, peer: res.nodeId });
+        } catch (err) { log('mesh-bind-failed', { meshId, err: err.message }); }
+      }
+    }
+
     if (typeof mesh.onChange === 'function') {
       mesh.onChange((peers) => {
         const list = Array.isArray(peers) ? peers : [];
@@ -394,63 +647,41 @@ export function webTransport({
           if (!p || p.state !== 'open') continue;
           const meshId = p.peerId ?? p.id;
           if (typeof meshId !== 'string') continue;
-          if (helloSentToMeshId.has(meshId)) continue;
-          helloSentToMeshId.add(meshId);
-          try {
-            mesh.send(meshId, {
-              k: 'ntf', type: 'hello',
-              body: { proto: 'axona/3', nodeId: localNodeIdHex },
-            });
-            log('mesh-hello-sent', { meshId });
-          } catch (err) {
-            log('mesh-hello-send-failed', { meshId, err: err.message });
-          }
+          if (meshAuth.has(meshId)) continue;
+          const st = { myNonce: makeNonce(), bound: false, sigSent: false };
+          meshAuth.set(meshId, st);
+          sendMeshHello(meshId, st);
         }
       });
     }
     if (typeof mesh.onPeerLost === 'function') {
-      mesh.onPeerLost((meshId) => helloSentToMeshId.delete(meshId));
+      mesh.onPeerLost((meshId) => meshAuth.delete(meshId));
     }
-    webrtc.onNotification('hello', (fromConnId, body) => {
-      // Pre-bind: fromConnId is the meshId string.  Once bound it
-      // would be a BigInt — but the hello path is the binding event,
-      // so we're always in the pre-bind branch here.
+
+    // Peer's hello: carries their nonce (no proof yet).  Record it; if
+    // we haven't announced our own nonce (their hello beat our onChange)
+    // do so now, then progress.
+    webrtc.onNotification('hello', async (fromConnId, body) => {
       if (typeof fromConnId !== 'string') return;
-      if (!body || !isHexId(body.nodeId)) return;
-      const meshId  = fromConnId;
-      const peerBig = fromHex(body.nodeId);
-      try {
-        webrtc.bindPeer(peerBig, meshId);
-      } catch (err) {
-        log('mesh-bind-failed', { meshId, err: err.message });
-        return;
+      const meshId = fromConnId;
+      if (!body || typeof body.nonce !== 'string') {
+        log('auth-mesh-bad-hello', { meshId }); return;
       }
-      // Reply with hello-ack on the SAME data channel (mesh.send,
-      // not webrtc.notify — the latter requires bindPeer to have run
-      // on the SENDING side too, which is the case here, but mesh.send
-      // is the direct path that mirrors what axona-peer uses).
-      try {
-        mesh.send(meshId, {
-          k: 'ntf', type: 'hello-ack',
-          body: { proto: 'axona/3', nodeId: localNodeIdHex },
-        });
-      } catch (err) {
-        log('mesh-hello-ack-failed', { meshId, err: err.message });
-      }
-      log('mesh-handshake-complete', { meshId, peer: body.nodeId });
+      let st = meshAuth.get(meshId);
+      if (!st) { st = { myNonce: makeNonce(), bound: false, sigSent: false }; meshAuth.set(meshId, st); await sendMeshHello(meshId, st); }
+      st.peerNonce = body.nonce;
+      await meshMaybeProgress(meshId);
     });
-    webrtc.onNotification('hello-ack', (fromConnId, body) => {
+
+    // Peer's proof: the authenticated hello {proto,nodeId,pubkey,sig}.
+    webrtc.onNotification('hello-sig', async (fromConnId, body) => {
       if (typeof fromConnId !== 'string') return;
-      if (!body || !isHexId(body.nodeId)) return;
-      const meshId  = fromConnId;
-      const peerBig = fromHex(body.nodeId);
-      try {
-        webrtc.bindPeer(peerBig, meshId);
-      } catch (err) {
-        log('mesh-bind-failed', { meshId, err: err.message });
-        return;
-      }
-      log('mesh-handshake-complete', { meshId, peer: body.nodeId });
+      const meshId = fromConnId;
+      let st = meshAuth.get(meshId);
+      if (!st) { st = { myNonce: makeNonce(), bound: false, sigSent: false }; meshAuth.set(meshId, st); await sendMeshHello(meshId, st); }
+      st.pendingSig  = body;
+      st.peerNodeId  = (body && typeof body.nodeId === 'string') ? body.nodeId : st.peerNodeId;
+      await meshMaybeProgress(meshId);
     });
   }
 
@@ -478,18 +709,11 @@ export function webTransport({
     if (typeof mesh.setMyId === 'function') mesh.setMyId(localNodeIdHex);
     await origStart(localNodeIdBig);
 
+    // The socket 'open' handler already sent the client-hello version
+    // gate and armed the ping/pong + stale heartbeat (so reconnect
+    // re-runs them on every re-open).  start() just awaits the FIRST
+    // application-level hello / hello-ack to land.
     if (autoHandshake) {
-      // (a) WebSocket-level version gate: send the raw client-hello
-      // frame the bridge waits for.  Must precede any axona payloads.
-      try {
-        sendToBridge({
-          type:    'client-hello',
-          version: peerVersion || KERNEL_VERSION,
-        });
-      } catch (err) {
-        log('auto-handshake-client-hello-failed', { err: err.message });
-      }
-      // (b) Wait for the application-level hello / hello-ack to land.
       const timer = setTimeout(() => {
         if (bridgeNodeIdBig === null) {
           bridgeReadyReject(new UpgradeRequiredError(
@@ -502,15 +726,13 @@ export function webTransport({
       } finally {
         clearTimeout(timer);
       }
-
-      // (c) Start the bridge ping/pong heartbeat.  The live bridge
-      // closes idle sockets after ~15s without a ping; axona-peer
-      // sends one every 1s.  We do the same so apps stay connected.
-      startBridgePingLoop();
     }
   };
   const origStop = composite.stop.bind(composite);
   composite.stop = async () => {
+    stopped = true;                     // suppress any pending reconnect
+    if (reconnectTimer != null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    stopStaleChecker();
     stopBridgePingLoop();
     await origStop();
     if (socket) {
@@ -518,6 +740,7 @@ export function webTransport({
       socket = null;
       socketOpen = false;
     }
+    setBridgeState('disconnected');
     if (typeof mesh.dispose === 'function') mesh.dispose();
   };
 
@@ -539,6 +762,7 @@ export function webTransport({
         log('bridge-ping-send-failed', { err: err.message });
       }
     }, pingIntervalMs);
+    if (typeof pingTimer?.unref === 'function') pingTimer.unref();
   }
   function stopBridgePingLoop() {
     if (pingTimer != null) {
@@ -566,6 +790,52 @@ export function webTransport({
   Object.defineProperty(composite, 'bridgeNodeIdBig', {
     get() { return bridgeNodeIdBig; },
   });
+
+  // ── v2.1 observability surface ───────────────────────────────────
+  // Current bridge connection state (see setBridgeState transitions).
+  Object.defineProperty(composite, 'bridgeState', { get() { return bridgeState; } });
+  // Last `welcome` frame: { connId, version, kernelVersion, turn } or null.
+  Object.defineProperty(composite, 'bridgeInfo',  { get() { return bridgeInfo; } });
+  // Reason string when state === 'upgrade-required'.
+  Object.defineProperty(composite, 'upgradeReason', { get() { return upgradeReason; } });
+  // Most recent bridge ping→pong RTT in ms (null until first pong).
+  Object.defineProperty(composite, 'bridgeRtt',   { get() { return lastRtt; } });
+  // Mean of the recent RTT window, or null.
+  Object.defineProperty(composite, 'bridgeRttAvg', {
+    get() {
+      return rttBuffer.length
+        ? rttBuffer.reduce((a, b) => a + b, 0) / rttBuffer.length
+        : null;
+    },
+  });
+  /** Subscribe to bridge-state transitions.  cb(state, detail). Returns unsub. */
+  composite.onBridgeState = (cb) => {
+    if (typeof cb !== 'function') throw new TypeError('onBridgeState: cb must be a function');
+    stateHandlers.add(cb);
+    return () => stateHandlers.delete(cb);
+  };
+  /** Subscribe to bridge welcome frames.  cb({connId,version,kernelVersion,turn}). Returns unsub. */
+  composite.onWelcome = (cb) => {
+    if (typeof cb !== 'function') throw new TypeError('onWelcome: cb must be a function');
+    welcomeHandlers.add(cb);
+    // Replay the last welcome so late subscribers aren't left blank.
+    if (bridgeInfo) { try { cb(bridgeInfo); } catch { /* ignore */ } }
+    return () => welcomeHandlers.delete(cb);
+  };
+  /** Force an immediate reconnect now (e.g. on tab resume / network online).
+   *  No-op if stopped or reconnect disabled.  Closes the live socket so the
+   *  close handler's reconnect path runs with a reset backoff. */
+  composite.reconnectNow = () => {
+    if (stopped || !reconnect || !autoHandshake) return;
+    reconnectAttempt = 0;
+    if (reconnectTimer != null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (socket && socketOpen) {
+      try { socket.close(); } catch { /* close handler schedules reconnect */ }
+    } else if (!socket) {
+      setBridgeState('connecting');
+      openSocket();
+    }
+  };
 
   return composite;
 }
