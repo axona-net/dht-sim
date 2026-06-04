@@ -44,9 +44,10 @@ import { clz264, toHex, fromHex, isHexId } from '../utils/hexid.js';
 import { deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 import { buildEnvelope }  from '../pubsub/envelope.js';
 import { buildKill }      from '../pubsub/kill.js';
+import { buildTouch }     from '../pubsub/touch.js';
 import { buildUnpub }     from '../pubsub/unpub.js';
 import { AxonaManager, MAX_PUBLISH_BYTES } from '../pubsub/AxonaManager.js';
-import { PublishError, SubscribeError, KillError, UnpubError, PullError, MetricsError, ErrorCodes } from '../errors.js';
+import { PublishError, SubscribeError, KillError, UnpubError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -409,6 +410,53 @@ export class AxonaPeer extends DHT {
     transport.onNotification('hop_cache',      hopCacheHandler);
     transport.onNotification('lateral_spread', hopCacheHandler);
 
+    // ── peer-leaving — graceful-departure fast path ─────────────────
+    // A peer (e.g. the bridge on a `systemctl restart`) announces that
+    // it is shutting down cleanly.  Today recovery from any departure is
+    // purely *reactive*: the transport close is detected, the synapse is
+    // evicted, the K-closest cache is invalidated — but existing
+    // subscriptions only re-anchor on the next refreshTick (≤10 s).  For
+    // a super-central node like the bridge (in every synaptome, root for
+    // every us-east/* topic) that 10 s window is when pub/sub visibly
+    // stalls across the mesh.
+    //
+    // Acting on the announcement turns that into a *proactive* sub-second
+    // handoff: drop the departing peer now and immediately re-anchor our
+    // subscriptions/roles onto the converged set that excludes it, a beat
+    // before its socket actually closes.
+    //
+    // Security: the subject of the eviction is `fromId` — the
+    // transport-AUTHENTICATED origin of the notification (the bridge
+    // transport delivers its bound nodeId; mesh delivers the bound peer
+    // id).  A peer can therefore only announce *its own* departure; it
+    // cannot spoof `peer-leaving` for a third party to force-evict it
+    // (payload.from is advisory and deliberately ignored).  The handler
+    // is also idempotent — once the subject is gone the repeat path
+    // early-returns before re-anchoring, so it can't be used as a
+    // refreshTick-amplification lever.  Additive + backward-compatible:
+    // peers that never receive this behave exactly as before.
+    transport.onNotification('peer-leaving', (fromId, _payload) => {
+      try {
+        let leaving =
+          (typeof fromId === 'bigint')                  ? fromId :
+          (typeof fromId === 'string' && isHexId(fromId)) ? fromHex(fromId) : null;
+        if (leaving === null && typeof transport.nodeIdFor === 'function') {
+          try { const r = transport.nodeIdFor(fromId); if (typeof r === 'bigint') leaving = r; }
+          catch { /* unresolved channel → ignore */ }
+        }
+        if (leaving === null) return;                 // can't authenticate subject
+        const node = this._node;
+        if (!node?.synaptome?.has(leaving)) return;   // not (or no longer) our peer
+        node.synaptome.delete(leaving);
+        node.connections?.delete(leaving);
+        try { node.transport?.closeConnection?.(leaving); } catch { /* dying channel */ }
+        this._emitLog?.('info', 'peer-leaving', { from: toHex(leaving) });
+        // Re-anchor now rather than waiting for the 10 s refreshTick.
+        this._axonaManager?.invalidateKClosestCache?.();
+        Promise.resolve(this._axonaManager?.refreshTick?.()).catch(() => {});
+      } catch { /* best-effort resilience path */ }
+    });
+
     // ── Phase 7 handlers ────────────────────────────────────────────
 
     // ── local_probe — 2-hop neighbourhood for anneal / dead-replace ─
@@ -661,8 +709,15 @@ export class AxonaPeer extends DHT {
     if (!this._started) return;
     const selfId = this._nodeIdHex();
 
-    // (1) notify peers (fire-and-forget, bounded by drain window)
-    if (notify && this._transport && typeof this._transport.notify === 'function') {
+    // (1) notify peers (fire-and-forget, bounded by drain window).
+    // Resolve the transport the same way the routing path does: prefer
+    // the constructor-supplied transport, else node.transport.  Hosts
+    // like the bridge wire their transport onto node.transport (not the
+    // constructor opt), so without this fallback leave() would silently
+    // skip the announcement and the graceful-departure handoff would
+    // never fire on a bridge restart.
+    const announceVia = this._transport ?? this._node?.transport;
+    if (notify && announceVia && typeof announceVia.notify === 'function') {
       // peers() returns hex (display); convert to BigInt for the
       // transport contract.  The wire `from` field stays hex.
       const peers = this.peers();
@@ -671,7 +726,7 @@ export class AxonaPeer extends DHT {
         // don't tunnel through 'axona:direct'; this is a transport-
         // level signal, not an application message.
         try {
-          await this._transport.notify(fromHex(peerHex), 'peer-leaving', { from: selfId });
+          await announceVia.notify(fromHex(peerHex), 'peer-leaving', { from: selfId });
         } catch { /* swallow — best-effort */ }
       }
     }
@@ -1290,6 +1345,66 @@ export class AxonaPeer extends DHT {
     }
 
     am.pubsubKill(topicIdBig, kill);
+    return { ok: true };
+  }
+
+  /**
+   * Touch a message (Phase A #7) — a creator-only keep-alive.  Signed by the
+   * same identity that published the message; routed to the topic's K-closest
+   * roots, each of which (if it holds the message) resets the message's
+   * hold-time expiry to `now + hold` (bounded by its absolute 48h ceiling),
+   * moves it to the head of the replay queue, and makes it the last entry to
+   * be evicted.  Use it to keep a still-relevant message (a pinned status, a
+   * current value) alive past its default hold without re-publishing.
+   *
+   * Self-authenticating, exactly like `kill`: only the message's signer can
+   * touch it.  Anonymous (unsigned) messages can't be touched.
+   *
+   * @param {string} topic   the topic the message was published to
+   * @param {string} msgId   64-char hex (the value `pub` returned)
+   * @param {object} [opts]
+   * @param {string|null} [opts.publisher]  same addressing mode used for pub
+   * @returns {Promise<{ ok: true }>}
+   */
+  async touch(topic, msgId, opts = {}) {
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new TouchError(ErrorCodes.TOUCH_INVALID_TOPIC,
+        `peer.touch: topic must be a non-empty string, got ${typeof topic}`,
+        { context: { topic } });
+    }
+    if (typeof msgId !== 'string' || !/^[0-9a-f]{64}$/.test(msgId)) {
+      throw new TouchError(ErrorCodes.TOUCH_INVALID_MSGID,
+        `peer.touch: msgId must be a 64-char hex string (the value peer.pub returned)`,
+        { context: { topic, msgId } });
+    }
+    if (!this._identity) {
+      throw new TouchError(ErrorCodes.TOUCH_SIGN_FAILED,
+        'peer.touch: identity required — a touch must be signed by the message creator',
+        { context: { topic } });
+    }
+    const am           = this._requireAxonaManager('touch');
+    const publisherId  = 'publisher' in opts ? opts.publisher : this._nodeIdHex();
+    const publisherBig = publisherId === null ? null : fromHex(publisherId);
+    const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
+    const topicIdHex   = publisherBig === null
+      ? await deriveTopicId(null, topic)
+      : await deriveTopicId(publisherId, topic);
+
+    let touch;
+    try {
+      touch = await buildTouch({
+        topicId: topicIdHex,
+        msgId,
+        seq:      this._nextPubSeq(),
+        identity: this._identity,
+      });
+    } catch (cause) {
+      throw new TouchError(ErrorCodes.TOUCH_SIGN_FAILED,
+        `peer.touch: signing the touch failed (${cause.message})`,
+        { cause, context: { topic, msgId } });
+    }
+
+    am.pubsubTouch(topicIdBig, touch);
     return { ok: true };
   }
 
