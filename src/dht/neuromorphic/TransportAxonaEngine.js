@@ -301,9 +301,16 @@ export class TransportAxonaEngine extends DHT {
     const fmt = (b, capLabel) => b.n === 0
       ? `none`
       : `n=${b.n} syn=${(b.sum/b.n).toFixed(1)} synMax=${b.max} atCap=${(100*b.atCap/b.n).toFixed(0)}% out=${(b.outSum/b.n).toFixed(1)}/${b.outMax} in=${(b.inSum/b.n).toFixed(1)}/${b.inMax} synCap=${capLabel}`;
+    // Effective per-direction cap (the binding constraint), not the raw
+    // directional sub-cap — see AxonaEngine for the rationale. maxIncoming
+    // defaults to Infinity, but the total connection cap (maxConnections) is
+    // what actually bounds in/out-degree; printing Infinity here misread as
+    // "uncapped incoming". effMaxIn = min(sub-cap, total cap).
+    const effMaxOut = Math.min(ctx.maxOutgoing, ctx.maxConnections);
+    const effMaxIn  = Math.min(ctx.maxIncoming, ctx.maxConnections);
     const entry = `[Axona SYN ${label}] ` +
       `hwPct=${ctx.highwayPct ?? 0} maxConn=${ctx.maxConnections} ` +
-      `maxOut=${ctx.maxOutgoing} maxIn=${ctx.maxIncoming} ` +
+      `effMaxOut=${effMaxOut} effMaxIn=${effMaxIn} ` +
       `MAX_SYNAPTOME=${this.domain.MAX_SYNAPTOME} | ` +
       `normal{${fmt(norm, this.domain.MAX_SYNAPTOME)}} | ` +
       `highway{${fmt(hwy, 256)}}`;

@@ -733,9 +733,18 @@ export class AxonaEngine extends DHT {
     const fmt = (b, capLabel) => b.n === 0
       ? `none`
       : `n=${b.n} syn=${(b.sum/b.n).toFixed(1)} synMax=${b.max} atCap=${(100*b.atCap/b.n).toFixed(0)}% out=${(b.outSum/b.n).toFixed(1)}/${b.outMax} in=${(b.inSum/b.n).toFixed(1)}/${b.inMax} synCap=${capLabel}`;
+    // Print the EFFECTIVE per-direction cap (the binding constraint), not the
+    // raw directional sub-cap. maxOutgoing/maxIncoming default to Infinity, so
+    // printing them verbatim reads as "uncapped incoming" — a red herring: the
+    // total connection cap (maxConnections) is what actually bounds in/out-
+    // degree (a synapse only forms when tryConnect, gated on maxConnections,
+    // succeeds). effMaxIn = min(directional sub-cap, total cap): shows 100 when
+    // webLimit binds it, and stays Infinity only when genuinely uncapped.
+    const effMaxOut = Math.min(this.maxOutgoing, this.maxConnections);
+    const effMaxIn  = Math.min(this.maxIncoming, this.maxConnections);
     const entry = `[NH-1 SYN ${label}] ` +
       `hwPct=${this.highwayPct ?? 0} maxConn=${this.maxConnections} ` +
-      `maxOut=${this.maxOutgoing} maxIn=${this.maxIncoming} ` +
+      `effMaxOut=${effMaxOut} effMaxIn=${effMaxIn} ` +
       `MAX_SYNAPTOME=${this.MAX_SYNAPTOME} | ` +
       `normal{${fmt(norm, this.MAX_SYNAPTOME)}} | ` +
       `highway{${fmt(hwy, 256)}}`;
