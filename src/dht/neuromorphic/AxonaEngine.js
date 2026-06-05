@@ -634,27 +634,39 @@ export class AxonaEngine extends DHT {
       (a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     );
 
+    // Per-node synaptome budget: highway nodes can grow up to 256 synapses
+    // (NX-6 uncapped parity); capped nodes use the global MAX_SYNAPTOME.
+    // PRE-PASS so every node's `_maxSynaptome` is set before ANY synapse is
+    // added — the reverse-index cap in NeuronNode.addIncomingSynapse keys off
+    // it, and a popular peer processed late would otherwise accept unbounded
+    // incoming before its own budget was ever set.
+    for (const node of sorted) {
+      const nodeBootstrapCap = node.maxConnections ?? maxConnections;
+      node._maxSynaptome = isFinite(nodeBootstrapCap)
+        ? Math.min(nodeBootstrapCap, this.MAX_SYNAPTOME)
+        : 256;
+    }
+
     // Shuffled processing order (NX-6 parity): under tight bilateral caps,
     // first-come-first-served iteration starves the tail of the sort.
     // Random order produces a uniform connection distribution across nodes.
     const processingOrder = [...sorted].sort(() => Math.random() - 0.5);
 
+    // Pass 1 — outgoing synaptomes (+ physical connections via tryConnect).
+    // Reverse edges are collected and installed in a SECOND pass so the
+    // incoming reverse-index is capped against the FULLY-built outgoing
+    // synaptome (shared in+out budget).  Adding it inline (as before) let
+    // popular nodes accrue unbounded in-degree — routing through far more
+    // peers than a real connection-capped node, inflating measured hop/latency.
+    const reverseEdges = [];
     for (const node of processingOrder) {
       // ── Per-node bootstrap budget (v0.66.13: highway-aware) ─────────────
       // Use the node's OWN maxConnections (set by DHT.buildRoutingTables
       // based on highwayPct) as the bootstrap cap. Highway nodes have
       // Infinity, so buildXorRoutingTable takes the sequential-fill branch
       // and returns ~280 candidates; capped nodes get the stratified
-      // branch with ~maxConnections candidates. This is the fix that
-      // makes highway% actually matter — previously every node bootstrapped
-      // from the same global stratified-100 plan regardless of highway
-      // status, which is why the v0.66.12 sweep was completely flat.
+      // branch with ~maxConnections candidates.
       const nodeBootstrapCap = node.maxConnections ?? maxConnections;
-      // Per-node synaptome cap: highway nodes can grow up to 256 synapses
-      // (NX-6 uncapped parity); capped nodes use the global MAX_SYNAPTOME.
-      node._maxSynaptome = isFinite(nodeBootstrapCap)
-        ? Math.min(nodeBootstrapCap, this.MAX_SYNAPTOME)
-        : 256;
       for (const peer of buildXorRoutingTable(node.id, sorted, k, nodeBootstrapCap)) {
         // Bilateral physical-cap gate: silently refuse if either side is full.
         if (!node.tryConnect(peer)) continue;
@@ -664,16 +676,24 @@ export class AxonaEngine extends DHT {
         syn.bootstrap = true;     // NX-6 parity: bootstrap synapses preferred to keep
         syn._addedBy  = 'bootstrap';
         node.addSynapse(syn);
-        if (bidirectional) {
-        peer.addIncomingSynapse(node.id, latMs, stratum);
+        if (bidirectional) reverseEdges.push({ node, peer, latMs, stratum });
+      }
+      // v0.70.20 — `_nodeMapRef` retired (commit 14).
+    }
+
+    // Pass 2 — mirror outgoing edges into the peer's reverse index, now
+    // bounded by the shared in+out synaptome budget.  Shuffle so a saturated
+    // popular node keeps an unbiased reverse sample rather than only its
+    // bootstrap-order-earliest neighbours.
+    if (bidirectional) {
+      for (const e of reverseEdges.sort(() => Math.random() - 0.5)) {
+        e.peer.addIncomingSynapse(e.node.id, e.latMs, e.stratum);
         // TRAFFIC: bidirectional bootstrap requires a hello/handshake
         // exchange. Counts as one wire message (zeroed by the pre-baseline
         // snapshot before training starts, so this only matters for
         // dedicated bootstrap diagnostics).
-        this._msg(node, peer, 'bootstrap');
+        this._msg(e.node, e.peer, 'bootstrap');
       }
-      }
-      // v0.70.20 — `_nodeMapRef` retired (commit 14).
     }
     // Cap-enforcement audit happens via DHT.verifyConnectionCap in main.js
     // after this method returns, so every protocol gets the same check.
