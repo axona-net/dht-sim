@@ -179,6 +179,39 @@ numbers will shift** from pre-refactor values (the new code uses
 `transport.getLatency` per-round, not post-walk pairwise `roundTripLatency`).
 Hop counts and success rates are stable across the change.
 
+### Re-verification (25,000 nodes · June 5, 2026 · `@axona/protocol` v2.17.1 · in-degree cap)
+
+Kernel **v2.17.1** bounds the incoming-synapse reverse index to the shared
+synaptome budget (`synaptome.size + incomingSynapses.size ≤ _maxSynaptome`).
+Previously the **outgoing** synaptome was hard-capped but `incomingSynapses` was
+not, so a popular node accrued an inflated reverse in-degree that AP routing
+(`progressCandidates`) could exploit — see the kernel/dht-sim NeuronNode +
+TransportAxonaEngine/AxonaEngine commits. Re-ran the **same** config as the
+May-27 snapshot below (Web limit on, maxConnections = 100, geoBits = 8, 5 %
+churn, omniscient init) on the fixed code:
+
+| Protocol | global ms | r500 ms | r2000 ms | r5000 ms | 5 % churn ms | success% |
+|---|---|---|---|---|---|---|
+| Kademlia | 846.5 | 817.9 | 819.1 | 837.7 | 779.5 | 100% |
+| G-DHT    | 807.2 | 196.7 | 259.1 | 398.3 | 731.4 | 100% |
+| NX-17    | 277.7 | 112.0 | 146.6 | 185.5 | 300.7 | 100% |
+| NH-1     | 270.8 | 113.2 | 142.5 | 185.0 | 306.8 | 100% |
+| **Axona**  | 277.2 | 121.9 | 144.4 | 192.3 | **241.8** | 100% |
+
+Churn hops: Kademlia 4.19 · G-DHT 5.04 · NX-17 6.26 · NH-1 6.33 · **Axona 4.45**.
+
+**Every cell is within run-to-run noise of the May-27 numbers** (≤ ~3 %). At the
+realistic `maxConnections = 100` cap the in-degree fix does **not** move the
+headline metrics: the physical connection cap already bounded in-degree at ~100,
+and AP routing is dominated by the *trained* outgoing synaptome (incoming
+entries carry baseline weight 0.1 and rarely win the AP selection). Axona's
+churn dividend (4.45 hops / 242 ms vs ~6.3 / ~305 for NX-17/NH-1) is preserved,
+and it now rests on a **production-faithful** graph (total routing degree ≤
+MAX_SYNAPTOME, as a real connection-capped peer). The inflation only grows
+unbounded with **Web Limit OFF** (uncapped `maxConnections` ⇒ no physical
+in-degree bound) — not the realistic / published config. Corrected CSV:
+`axona-docs/programmer-guide/benchmarks-25k/2026-06-05_25k_5protocols_5tests_v2.17.1_indegree-cap.csv`.
+
 ### Latest benchmark snapshot (25,000 nodes · May 27, 2026 · `@axona/protocol` v2.0.1)
 
 First benchmark on the standard-S2 partition (kernel v2.0.0+).  Cell
