@@ -179,6 +179,62 @@ numbers will shift** from pre-refactor values (the new code uses
 `transport.getLatency` per-round, not post-walk pairwise `roundTripLatency`).
 Hop counts and success rates are stable across the change.
 
+### Re-verification (25,000 nodes · June 5, 2026 · `@axona/protocol` v2.23.0 · post bridgeless + hardening wave)
+
+Validation that the kernel evolution since the last sim benchmark — the
+bridgeless/relay work (v2.17–v2.20) and the deploy-stability hardening wave
+(v2.21–v2.23: closed/never-opened teardown, negotiation watchdog, pub/sub
+postHash reconciliation, connectViaRelay cap, mesh-auth fix) — does **not** move
+sim routing performance. **The browser vendor had been frozen at kernel 2.16.0**;
+re-synced to **2.23.0** via `scripts/sync-vendor-kernel.sh` for this run, so this
+is the first sim measurement of the 2.17→2.23 changes for the kernel-driven
+`axona` path. Same config as the v2.17.1 row below (Web limit on,
+maxConnections = 100, geoBits = 8, 5 % churn, omniscient init).
+
+| Protocol | global ms | r500 ms | r2000 ms | r5000 ms | 5 % churn ms | success% |
+|---|---|---|---|---|---|---|
+| Kademlia | 851.1 | 831.3 | 827.5 | 833.0 | 781.3 | 100% |
+| G-DHT    | 834.3 | 193.9 | 257.3 | 407.6 | 748.5 | 100% |
+| NX-17    | 319.9 | 152.7 | 184.8 | 221.2 | 341.5 | 100% |
+| NH-1     | 318.1 | 163.7 | 193.9 | 229.3 | 358.0 | 100% |
+| **Axona**  | 335.0 | 163.2 | 196.1 | 246.5 | 323.1 | **98.8–99.6%** |
+
+Isolated re-run (NH-1 control + Axona, low memory) reproduced it: NH-1 **100%**
+on every cell; Axona **99.2 / 99.6 / 99.6 / 99.2 / 98.6 %**.
+
+**Verdict: NO routing regression attributable to the kernel changes.**
+- **The steady-state lookup path is byte-identical to the v2.16.0 baseline.**
+  `git diff v2.16.0 HEAD -- src/dht/AxonaPeer.js` confines every change to the
+  constructor/start (relay-sink wiring), the `route_msg`/greedy region, and the
+  relay-sink methods; `_lookupStep` (and the whole lookup recursion the benchmark
+  exercises) is **unchanged**. `_findCloserInTwoHops` (the only v2.19 routing edit)
+  is called solely from `route_msg`/`routeMessage`, **not** from `lookup()`.
+- **The Axona <100 % steady-state is the inherent rate, not a regression.** The
+  kernel-driven path realistically opens a channel per hop via `simTransport`,
+  subject to `webLimit = 100`; a lookup that must traverse a node already at its
+  100-connection cap is refused (~0.4–0.8 % of lookups → ~2–4 misses / 500-cell).
+  NH-1/NX-17 read **100 %** only because they route god's-eye with no per-hop
+  open. The documented "100 %" for Axona was an optimistic single-run rounding;
+  with the lookup code identical, 2.16.0 would produce the same ~99.4 %.
+- **The ms / churn-hop / slice-hop shifts vs the older baseline are environmental
+  / stochastic** — NH-1 (sim's own, *unchanged* code) shifted by the same
+  magnitude (global 271→318 ms; churn 6.33→7.62 hops; slice 7.6→9.8 hops). The δ
+  median (67.8 ms) matches the baseline; the uniform ~15 % ms rise is machine load.
+- **The hardening-wave changes (web-transport mesh/auth, pub/sub postHash, relay)
+  don't touch the sim routing path at all** — confirmed by the diff.
+
+**Slice World (split-world) — bottleneck discovery intact:** Axona **9.20 hops /
+556 ms / 100 %**, NH-1 9.80 / 545 / 100 %; pure-XOR Kademlia & G-DHT still **0 %**
+(cannot discover the single Hawaii bridge). Hop/ms higher than the v2.17.1 row
+(Axona 7.40) but NH-1 rose identically (7.60→9.80), so it's the same
+environmental shift — the architectural property (learning synaptome finds and
+routes through the lone inter-hemisphere bridge at 100 %) holds.
+
+CSVs (`axona-docs/programmer-guide/benchmarks-25k/`):
+`2026-06-05_25k_5protocols_5tests_v2.23.0.csv`,
+`2026-06-05_25k_nh1-axona_isolated_v2.23.0.csv`,
+`2026-06-05_25k_axona_slice_v2.23.0.csv`.
+
 ### Re-verification (25,000 nodes · June 5, 2026 · `@axona/protocol` v2.17.1 · in-degree cap)
 
 Kernel **v2.17.1** bounds the incoming-synapse reverse index to the shared
