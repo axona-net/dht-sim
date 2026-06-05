@@ -189,18 +189,33 @@ export class TransportAxonaEngine extends DHT {
       (a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     );
 
-    // Shuffled iteration order (parity with AxonaEngine) so the
-    // bilateral cap doesn't starve later nodes.
-    const order = [...sorted].sort(() => Math.random() - 0.5);
-
-    for (const node of order) {
-      // Per-node bootstrap cap (parity with AxonaEngine):
-      // honour the node's OWN maxConnections (set above by super),
-      // not the bare global value, so highwayPct mixes work later.
+    // Pre-pass: set EVERY node's synaptome budget before any synapse is
+    // added.  The reverse-index cap in NeuronNode.addIncomingSynapse keys off
+    // `_maxSynaptome`; setting it up front (rather than in the build loop)
+    // makes the cap active for every node regardless of the order incoming
+    // edges arrive — otherwise a popular peer processed late would accept
+    // unbounded incoming before its own budget was ever set.
+    for (const node of sorted) {
       const nodeBootstrapCap = node.maxConnections ?? maxConnections;
       node._maxSynaptome = isFinite(nodeBootstrapCap)
         ? Math.min(nodeBootstrapCap, this.domain.MAX_SYNAPTOME)
         : 256;
+    }
+
+    // Shuffled iteration order (parity with AxonaEngine) so the
+    // bilateral cap doesn't starve later nodes.
+    const order = [...sorted].sort(() => Math.random() - 0.5);
+
+    // Pass 1 — outgoing synaptomes (+ physical connections via tryConnect).
+    // Collect the reverse edges to install in a SECOND pass: a node's
+    // incoming reverse-index must be capped against its FULLY-built outgoing
+    // synaptome (shared budget), so we can't add incoming until every
+    // synaptome exists.  Adding it inline (as before) let popular nodes
+    // accrue unbounded in-degree — far more routing reach than a real,
+    // connection-capped peer, which inflated measured hop/latency.
+    const reverseEdges = [];
+    for (const node of order) {
+      const nodeBootstrapCap = node.maxConnections ?? maxConnections;
       const candidates = buildXorRoutingTable(node.id, sorted, k, nodeBootstrapCap);
       for (const peer of candidates) {
         if (!node.tryConnect(peer)) continue;
@@ -210,9 +225,17 @@ export class TransportAxonaEngine extends DHT {
         syn.bootstrap = true;
         syn._addedBy  = 'bootstrap';
         node.addSynapse(syn);
-        if (bidirectional) {
-          peer.addIncomingSynapse(node.id, latMs, stratum);
-        }
+        if (bidirectional) reverseEdges.push({ peer, fromId: node.id, latMs, stratum });
+      }
+    }
+
+    // Pass 2 — mirror outgoing edges into the peer's reverse index, now
+    // bounded by the shared in+out synaptome budget (NeuronNode enforces it).
+    // Shuffle so a saturated popular node keeps an unbiased reverse sample
+    // rather than only the bootstrap-order-earliest neighbours.
+    if (bidirectional) {
+      for (const e of reverseEdges.sort(() => Math.random() - 0.5)) {
+        e.peer.addIncomingSynapse(e.fromId, e.latMs, e.stratum);
       }
     }
 
