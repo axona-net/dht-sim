@@ -212,6 +212,13 @@ unbounded with **Web Limit OFF** (uncapped `maxConnections` ⇒ no physical
 in-degree bound) — not the realistic / published config. Corrected CSV:
 `axona-docs/programmer-guide/benchmarks-25k/2026-06-05_25k_5protocols_5tests_v2.17.1_indegree-cap.csv`.
 
+**Slice World re-check (Axona, same config):** 7.40 hops / 395.7 ms / **100 %**
+cross-hemisphere success (published v2.0.1: 8.10 / 425.1 / 100 %). The learning
+synaptome still discovers the single Hawaii bridge and routes through it after
+the cap — bottleneck discovery is intact (pure-XOR K-DHT/G-DHT still fail at
+0 % here, as before). CSV:
+`axona-docs/programmer-guide/benchmarks-25k/2026-06-05_25k_axona_slice_v2.17.1_indegree-cap.csv`.
+
 ### Latest benchmark snapshot (25,000 nodes · May 27, 2026 · `@axona/protocol` v2.0.1)
 
 First benchmark on the standard-S2 partition (kernel v2.0.0+).  Cell
