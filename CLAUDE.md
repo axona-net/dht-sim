@@ -209,13 +209,23 @@ on every cell; Axona **99.2 / 99.6 / 99.6 / 99.2 / 98.6 %**.
   relay-sink methods; `_lookupStep` (and the whole lookup recursion the benchmark
   exercises) is **unchanged**. `_findCloserInTwoHops` (the only v2.19 routing edit)
   is called solely from `route_msg`/`routeMessage`, **not** from `lookup()`.
-- **The Axona <100 % steady-state is the inherent rate, not a regression.** The
-  kernel-driven path realistically opens a channel per hop via `simTransport`,
-  subject to `webLimit = 100`; a lookup that must traverse a node already at its
-  100-connection cap is refused (~0.4–0.8 % of lookups → ~2–4 misses / 500-cell).
-  NH-1/NX-17 read **100 %** only because they route god's-eye with no per-hop
-  open. The documented "100 %" for Axona was an optimistic single-run rounding;
-  with the lookup code identical, 2.16.0 would produce the same ~99.4 %.
+- **The Axona <100 % steady-state was a HOP-CEILING artifact, not a regression —
+  FIXED in v2.24.0 (Axona now 100 %).** *(Corrected diagnosis — see below; an
+  earlier version of this note wrongly attributed it to an `openConnection`
+  admission refusal at the cap.)* Root cause: the kernel's `AxonaDomain.MAX_HOPS`
+  was **16** while dht-sim's `AxonaEngine` (NH-1/NX-17) has long used **40**.
+  Under the connection-capped (sparser) graph ~0.4–0.8 % of lookups need >16 hops
+  to converge; Axona abandoned them at hop 16 (`found=false`), NH-1 completed them
+  at 40. **Decisively verified**: instrumentation showed the lookup/relay path
+  **never** hit a refused `openConnection` (`ran=0`; the sim transport's
+  `acceptConnection` defaults to `() => true`, so the connection cap is enforced
+  only at *build* time via `tryConnect`, never at route time) — so the failures
+  were pure hop-exhaustion, not admission. Setting Axona's `MAX_HOPS=40` →
+  **100 % on global/r2000/r5000 at 25k**, exactly matching NH-1; `webLimit` off
+  (richer graph, all paths <16 hops) was already 100 %. Both reconcile. Kernel
+  `MAX_HOPS` is now **40** (v2.24.0); 40-hop lookups are exceedingly rare (avg ~7,
+  p95 ~11) so the worst-case ceiling is paid by almost no one. The numbers in the
+  table above are the **pre-fix (v2.23.0, MAX_HOPS=16)** measurement.
 - **The ms / churn-hop / slice-hop shifts vs the older baseline are environmental
   / stochastic** — NH-1 (sim's own, *unchanged* code) shifted by the same
   magnitude (global 271→318 ms; churn 6.33→7.62 hops; slice 7.6→9.8 hops). The δ
@@ -233,7 +243,9 @@ routes through the lone inter-hemisphere bridge at 100 %) holds.
 CSVs (`axona-docs/programmer-guide/benchmarks-25k/`):
 `2026-06-05_25k_5protocols_5tests_v2.23.0.csv`,
 `2026-06-05_25k_nh1-axona_isolated_v2.23.0.csv`,
-`2026-06-05_25k_axona_slice_v2.23.0.csv`.
+`2026-06-05_25k_axona_slice_v2.23.0.csv`,
+`2026-06-06_25k_nh1-axona_MAX_HOPS40_v2.24.0.csv` (post-fix: Axona **100 %** on
+global/r2000/r5000, matching NH-1).
 
 ### Re-verification (25,000 nodes · June 5, 2026 · `@axona/protocol` v2.17.1 · in-degree cap)
 
