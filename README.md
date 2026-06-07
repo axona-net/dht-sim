@@ -25,6 +25,15 @@ This simulator enforces three invariants on every benchmark, with guard rails th
 
 Full documentation — paper, whitepaper, explainer, presentation deck, readable pitch, architecture references, and red-team analyses — lives in the [**axona-docs**](https://github.com/axona-net/axona-docs) repository. The Whitepaper (Synthesis Edition) is the closest equivalent to the prior `Neuromorphic-DHT-Architecture.md` and is preserved alongside it in [`axona-docs/history/whitepaper/`](https://github.com/axona-net/axona-docs/tree/main/history/whitepaper).
 
+### The Axona ecosystem
+
+This simulator is the research/benchmark bench. The **deployed** Axona protocol lives in its own repositories, and the sim's `axona` protocol runs the *same vendored kernel* the network ships (currently **`@axona/protocol` v2.31.0**, synced into `vendor/axona-protocol/` via `scripts/sync-vendor-kernel.sh`):
+
+- [**axona-protocol**](https://github.com/axona-net/axona-protocol) — the pure-JS protocol kernel (`@axona/protocol`).
+- [**axona-peer**](https://github.com/axona-net/axona-peer) — the reference browser peer ([axona.net](https://axona.net)).
+- [**axona-bridge**](https://github.com/axona-net/axona-bridge) — the WebSocket signaling broker + TURN.
+- [**axona-relay**](https://github.com/axona-net/axona-relay) — a headless Node supernode (real WebRTC via `node-datachannel`) with a live console dashboard.
+
 The simulator renders a live WebGL globe of up to 100,000 nodes distributed on land, routes messages between them in real time, and benchmarks every protocol side by side — measuring hop counts, latency, churn resilience, regional performance, load distribution, and learning convergence over time.
 
 ---
@@ -32,7 +41,7 @@ The simulator renders a live WebGL globe of up to 100,000 nodes distributed on l
 ## Quick Start
 
 ```bash
-git clone https://github.com/YZ-social/dht-sim.git
+git clone https://github.com/axona-net/dht-sim.git
 cd dht-sim
 npm install
 npm start          # starts static server on http://localhost:3000
