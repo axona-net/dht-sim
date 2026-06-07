@@ -62,6 +62,25 @@ const LOCAL_PROBE_MAX   = 8;
 // finding 6) stays cached, so per-ICE-candidate signal frames within one
 // negotiation don't each pay a full lookup.
 const RELAY_REACH_TTL_MS = 5000;
+// Memory bounds for two caches that the TTL/threshold logic alone does NOT
+// bound by entry COUNT: the relay-reachability verdict cache keeps one entry
+// per distinct peer-id ever checked (TTL only gates freshness, never evicts),
+// and the triadic transit cache keeps one entry per (origin,next) pair that
+// never reaches TRIADIC_THRESHOLD. Both leak slowly on a churny/large mesh.
+const RELAY_REACH_CAP   = 1024;
+const TRANSIT_CACHE_CAP = 4096;
+
+/** Evict the oldest-inserted half of a Map once it exceeds `cap` (cheap FIFO
+ *  bound for caches whose entries are individually cheap to recompute). */
+function capOldest(map, cap) {
+  if (map.size <= cap) return;
+  const drop = cap / 2;
+  let i = 0;
+  for (const k of map.keys()) {
+    if (i++ >= drop) break;
+    map.delete(k);
+  }
+}
 
 export class AxonaPeer extends DHT {
   /**
@@ -1181,7 +1200,6 @@ export class AxonaPeer extends DHT {
 
   async lookup(targetKey) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
     if (!node || !node.alive) return null;
 
@@ -2162,8 +2180,20 @@ export class AxonaPeer extends DHT {
 
   // ── AxonaManager glue ────────────────────────────────────────────
 
+  // Forward AxonaManager's 24 security drop-path logs (bad-signature, stale,
+  // oversize, posthash-mismatch, unauthorized kill/touch/unpub, …) to this
+  // peer's onLog surface. Idempotent per manager instance; defensively
+  // optional so an older vendored AxonaManager without setLogSink is a no-op.
+  _wireManagerLog(am) {
+    if (am && typeof am.setLogSink === 'function' && this._managerLogWired !== am) {
+      am.setLogSink((level, msg, context) => this._emitLog(level, msg, context));
+      this._managerLogWired = am;
+    }
+    return am;
+  }
+
   _requireAxonaManager(callerName) {
-    if (this._axonaManager) return this._axonaManager;
+    if (this._axonaManager) return this._wireManagerLog(this._axonaManager);
     // Fallback 1: ask the engine for this node's AxonaManager.  Different
     // engine builds expose this differently; we probe in priority
     // order and cache the result.
@@ -2193,7 +2223,7 @@ export class AxonaPeer extends DHT {
       );
     }
     this._axonaManager = am;
-    return am;
+    return this._wireManagerLog(am);
   }
 
   /**
@@ -2851,7 +2881,6 @@ export class AxonaPeer extends DHT {
   /** Admission gate.  Same logic as engine._addByVitality verbatim. */
   async _addByVitality(newSyn) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
     const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
 
@@ -2920,6 +2949,7 @@ export class AxonaPeer extends DHT {
         .catch(() => { /* opportunistic — see _reinforceWave comment */ });
     } else {
       node.transitCache.set(key, count);
+      capOldest(node.transitCache, TRANSIT_CACHE_CAP);
     }
   }
 
@@ -2931,7 +2961,6 @@ export class AxonaPeer extends DHT {
    */
   async _tryAnneal() {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
     if (!node.alive || node.synaptome.size === 0) return;
 
@@ -2981,7 +3010,6 @@ export class AxonaPeer extends DHT {
    */
   async _evictAndReplace(deadSyn) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
 
     node.synaptome.delete(deadSyn.peerId);
@@ -3017,7 +3045,6 @@ export class AxonaPeer extends DHT {
    */
   async _localCandidate(lo, hi) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
 
     const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
@@ -3239,6 +3266,7 @@ export class AxonaPeer extends DHT {
     try { const lk = await this.lookup(toBig); ok = !!(lk && lk.found); }
     catch { ok = false; }
     this._relayReach.set(key, { ok, ts: Date.now() });
+    capOldest(this._relayReach, RELAY_REACH_CAP);
     return ok;
   }
 
@@ -3406,7 +3434,6 @@ export class AxonaPeer extends DHT {
   //
   async _lookupStep(ctx) {
     const node   = this._node;
-    const engine = this._engine;
     const domain = this._domain;
     if (!node || !node.alive) {
       return this._lookupResult(ctx, false);
