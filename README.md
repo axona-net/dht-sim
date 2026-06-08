@@ -27,7 +27,7 @@ Full documentation — paper, whitepaper, explainer, presentation deck, readable
 
 ### The Axona ecosystem
 
-This simulator is the research/benchmark bench. The **deployed** Axona protocol lives in its own repositories, and the sim's `axona` protocol runs the *same vendored kernel* the network ships (currently **`@axona/protocol` v2.31.0**, synced into `vendor/axona-protocol/` via `scripts/sync-vendor-kernel.sh`):
+This simulator is the research/benchmark bench. The **deployed** Axona protocol lives in its own repositories, and the sim's `axona` protocol runs the *same vendored kernel* the network ships (currently **`@axona/protocol` v2.32.0**, synced into `vendor/axona-protocol/` via `scripts/sync-vendor-kernel.sh`):
 
 - [**axona-protocol**](https://github.com/axona-net/axona-protocol) — the pure-JS protocol kernel (`@axona/protocol`).
 - [**axona-peer**](https://github.com/axona-net/axona-peer) — the reference browser peer ([axona.net](https://axona.net)).
