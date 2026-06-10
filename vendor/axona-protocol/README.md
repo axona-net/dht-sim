@@ -5,7 +5,7 @@ One node, one package — give it a Transport and it speaks the Axona wire
 protocol. Runs unchanged in browsers, Node servers, and the dht-sim
 simulator.
 
-**v2.31.0.** Powers [axona.net](https://axona.net) (browser peers),
+**v2.32.0.** Powers [axona.net](https://axona.net) (browser peers),
 [bridge.axona.net](https://bridge.axona.net) (signaling broker), the
 [`dht-sim`](https://github.com/axona-net/dht-sim) simulator at 50,000 peers, and
 the [`axona-relay`](https://github.com/axona-net/axona-relay) headless supernode.
@@ -16,10 +16,10 @@ Ed25519 signature before they can join (see
 > **Network epoch.** This is the `axona/5` line (`WIRE_VERSION 2.0`). The
 > protocol epoch is folded into the connect-time signed transcript, so an
 > `axona/5` node and a node on the older `axona/4` epoch **cannot** complete a
-> handshake — the two networks are cryptographically partitioned by design. The
-> SF testnet (`testnet.axona.net`) runs this line; production `axona.net`/
-> `bridge.axona.net` still run `axona/4` (kernel 2.16.0) until the flag-day
-> cutover.
+> handshake — older `axona/4` peers are partitioned out by design. As of the
+> **2026-06-08 flag-day cutover**, production (`axona.net` / `bridge.axona.net`)
+> and the SF testnet (`testnet.axona.net`) both run this line; the earlier
+> `axona/4` / kernel-2.16 network has been retired.
 
 ## Install
 
@@ -152,29 +152,29 @@ the same 264-bit keyspace.
 
 The 8-bit S2 prefix indexes one of **192 valid region cells**
 (`face·32 + truncated-Hilbert`; codes `[0,192)`, 192–255 reserved). Each region
-carries **two human-readable names** — one for each of the cell's two S2 level-3
-sub-cells ("halves") — and **both names resolve to the same code**, so a user
-sees the label closest to their actual location while addressing stays stable.
-Homogeneous cells (a single country, open ocean) share one name.
+has exactly **one** human-readable name, so a region always presents the same
+label (no location-dependent flip-flop). Homogeneous cells (a single country,
+open ocean) keep their name; where a cell straddles an ocean and a landmass the
+land name wins; a multi-country cell takes its dominant city. A name is usually
+unique to one code, though an area larger than one cell may span adjacent codes
+(`regionCode` then returns the canonical/lowest code).
 
 ```js
 import {
-  regionNames, regionName, regionCode, resolveRegion, regionNameForLatLng,
+  regionName, regionCode, resolveRegion, regionNameForLatLng,
   geoCellId, geoCellSubCenters, geoCellHalf,
 } from '@axona/protocol';
 
-regionNames(0x89);                 // ['bahamas', 'useast']  → both map to 0x89
-regionName(0x89, 40, -75);         // half-aware: 'useast'
-regionCode('bahamas');             // 0x89
-resolveRegion('useast');           // → { code: 0x89, ... }
+regionName(0x89);                  // 'useast'
+regionCode('useast');              // 0x89
+resolveRegion('useast');           // 0x89   (a name, or '0x89'/137 → code)
 regionNameForLatLng(40, -75);      // 'useast'
 ```
 
 Names match `/^[a-z0-9_]{1,8}$/`; open-ocean cells are `<ocean3>_<hex>`
-(`pac_68`, `atl_0a`, …); small islands claim a single cell; large landmasses
-that span cells take a single-letter compass suffix. The interactive
+(`pac_68`, `atl_0a`, …). The interactive
 [`examples/s2-region-visualizer/`](examples/s2-region-visualizer/) renders all
-192 cells with both names and the code on a 3D globe.
+192 cells — one name + code each — on a 3D globe.
 
 ## Authenticated handshake
 
@@ -319,9 +319,9 @@ The full programmer-facing documentation lives in
 
 | Document | When to read |
 |---|---|
-| [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v2.16.0.md) | You want a working pub/sub roundtrip in 5 minutes |
-| [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-API-Reference-v2.16.0.md) | You're building and need a specific call's signature |
-| [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v2.16.0.md) | You're starting a new application against Axona |
+| [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v2.32.0.md) | You want a working pub/sub roundtrip in 5 minutes |
+| [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-API-Reference-v2.32.0.md) | You're building and need a specific call's signature |
+| [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v2.32.0.md) | You're starting a new application against Axona |
 
 ## Wire protocol
 
@@ -338,7 +338,7 @@ reference.
 npm test
 ```
 
-Runs 51 smoke suites covering addressing, the 192 region names (two-per-cell,
+Runs 51 smoke suites covering addressing, the 192 region names (one per cell,
 name→code uniqueness), errors, persistence (in-memory, file, IndexedDB),
 identity (incl. non-extractable keys + key-correspondence checks), all three
 transports, version handshake, the `axona/5` authenticated handshake (primitive
