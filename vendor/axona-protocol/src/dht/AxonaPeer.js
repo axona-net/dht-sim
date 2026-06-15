@@ -40,7 +40,7 @@
 import { DHT }            from '../contracts/DHT.js';
 import { Synapse }        from './Synapse.js';
 import { Subscription }   from './Subscription.js';
-import { clz264, toHex, fromHex, isHexId } from '../utils/hexid.js';
+import { clz264, toHex, fromHex, isHexId, BAD_ID_CODE } from '../utils/hexid.js';
 import { deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 import { buildEnvelope }  from '../pubsub/envelope.js';
 import { buildKill }      from '../pubsub/kill.js';
@@ -1689,6 +1689,82 @@ export class AxonaPeer extends DHT {
     return { ok: true, removed: subs.length };
   }
 
+  /**
+   * Host a topic — store and serve it for other peers WITHOUT subscribing as
+   * a consumer. This is the relay/infrastructure primitive: it makes the node
+   * a willing root/replica so publishes land on it and subscribers can pull
+   * replays from it, but it registers NO handler and delivers nothing to a
+   * local application. Decoupled from `sub()` on purpose — hosting is "I'll
+   * serve this for others," subscribing is "I want to receive this."
+   *
+   * Two forms:
+   *   • `host()`           — host this node's own keyspace neighborhood: get
+   *                          recruited as a root for whatever topics land near
+   *                          this node's id ("host whatever lands near me").
+   *   • `host(topic, opts)` — host one specific topic. `opts.publisher` selects
+   *                          the topic-id derivation exactly like `sub()`
+   *                          (default = this node's feed, `null` = public
+   *                          topic, hex = someone else's feed).
+   *
+   * Wire-compatible with every existing kernel (reuses `subscribe-k`), so it
+   * needs no flag day. Idempotent.
+   *
+   * @param {string} [topic]
+   * @param {object} [opts]
+   * @param {string|null} [opts.publisher]
+   * @returns {Promise<{ ok: boolean, scope: 'keyspace'|'topic', topicId?: string }>}
+   */
+  async host(topic, opts = {}) {
+    const am = this._requireAxonaManager('host');
+    if (topic === undefined) {
+      am.pubsubHostKeyspace(true);
+      this._markPersistDirty('hosting');
+      return { ok: true, scope: 'keyspace' };
+    }
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new SubscribeError(ErrorCodes.SUBSCRIBE_INVALID_TOPIC,
+        `peer.host: topic must be a non-empty string (or omitted for keyspace), got ${typeof topic}`,
+        { context: { topic } });
+    }
+    const publisherId  = 'publisher' in opts ? opts.publisher : this._nodeIdHex();
+    const publisherBig = publisherId === null ? null : fromHex(publisherId);
+    const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
+    this._applySince(am, topicIdBig, opts.since);
+    am.pubsubHost(topicIdBig);
+    this._markPersistDirty('hosting');
+    return { ok: true, scope: 'topic', topicId: toHex(topicIdBig) };
+  }
+
+  /**
+   * Stop hosting — the counterpart to `host()`. `unhost()` with no topic
+   * turns off keyspace hosting; `unhost(topic)` drops one hosted topic.
+   * Does NOT touch your subscriptions. Idempotent.
+   *
+   * @param {string} [topic]
+   * @param {object} [opts]
+   * @param {string|null} [opts.publisher]
+   * @returns {Promise<{ ok: boolean, scope: 'keyspace'|'topic' }>}
+   */
+  async unhost(topic, opts = {}) {
+    const am = this._requireAxonaManager('unhost');
+    if (topic === undefined) {
+      am.pubsubHostKeyspace(false);
+      this._markPersistDirty('hosting');
+      return { ok: true, scope: 'keyspace' };
+    }
+    if (typeof topic !== 'string' || topic.length === 0) {
+      throw new SubscribeError(ErrorCodes.SUBSCRIBE_INVALID_TOPIC,
+        `peer.unhost: topic must be a non-empty string (or omitted), got ${typeof topic}`,
+        { context: { topic } });
+    }
+    const publisherId  = 'publisher' in opts ? opts.publisher : this._nodeIdHex();
+    const publisherBig = publisherId === null ? null : fromHex(publisherId);
+    const topicIdBig   = await deriveTopicIdBig(publisherBig, topic);
+    am.pubsubUnhost(topicIdBig);
+    this._markPersistDirty('hosting');
+    return { ok: true, scope: 'topic' };
+  }
+
   /** @internal — called by Subscription.stop() */
   async _unsubscribeInternal(sub) {
     // sub._topicId is the BigInt key (kernel form); sub.topicId getter
@@ -2024,6 +2100,10 @@ export class AxonaPeer extends DHT {
         }
       } catch { /* best-effort */ }
     }
+    let hosting = null;
+    if (am && typeof am.inspectHosting === 'function') {
+      try { hosting = am.inspectHosting(); } catch { /* best-effort */ }
+    }
     // ── transport / routing-truth observability ──────────────────────
     // Web transport exposes boundPeers() (authenticated nodeIds), .mesh
     // (DC-level peer snapshot), and .webrtc (mesh-only bind set).  Sim
@@ -2069,6 +2149,7 @@ export class AxonaPeer extends DHT {
       peers:         this.peers(),
       subscriptions: this._subscriptions.size,
       axonRoles,
+      hosting,
       wireVersion:   this._transport?.wireVersion ?? null,
       started:       this._started === true,
       transport,
@@ -2436,7 +2517,18 @@ export class AxonaPeer extends DHT {
       return;
     }
     if (since === 'all') {
-      am._lastSeenTsByTopic.set(topicId, 0);
+      // Full replay: forget ALL retained per-topic consumption state, not just
+      // the ts floor. Zeroing lastSeenTs alone is silently overridden by a
+      // retained `have` digest (roots then replay nothing) and by the
+      // _appDelivered dedup (replayed messages dropped before the handler) —
+      // the "re-subscribed topic never re-delivers" / "missed alert until
+      // reload" bug. pubsubResetTopicConsumption clears have + ts + this
+      // topic's app-dedup together.
+      if (typeof am.pubsubResetTopicConsumption === 'function') {
+        am.pubsubResetTopicConsumption(topicId);
+      } else {
+        am._lastSeenTsByTopic.set(topicId, 0);     // older kernel: best-effort
+      }
       return;
     }
     if (since === 'latest') {
@@ -3283,9 +3375,26 @@ export class AxonaPeer extends DHT {
       const result = await handler(payload, meta);
       return result || 'forward';
     } catch (err) {
-      console.error(`AxonaPeer routed handler error at ${node.id} for '${type}':`, err);
+      this._onHandlerError('routed', type, err);
       return 'forward';
     }
+  }
+
+  /**
+   * Single sink for any error a pub/sub message handler throws (sync or async,
+   * direct or routed). A malformed-id error (`BAD_ID_CODE` — a truncated id from
+   * a peer mid-teardown reaching a field the transport-level fromId check didn't
+   * cover) is an EXPECTED churn-time drop, logged at debug; anything else is a
+   * genuine bug, logged loudly. This is the one place that makes "a malformed
+   * frame can never crash or spam a node" true for every handler and every id
+   * field — no per-handler or per-registration guard required.
+   */
+  _onHandlerError(kind, type, err) {
+    if (err && err.code === BAD_ID_CODE) {
+      this._emitLog?.('debug', 'drop-malformed-frame', { kind, type, reason: err.message });
+      return;
+    }
+    console.error(`AxonaPeer ${kind} handler error at ${this._node?.id} for '${type}':`, err);
   }
 
   /**
@@ -3407,10 +3516,26 @@ export class AxonaPeer extends DHT {
         const h = this._directHandlers.get(type);
         if (!h) return;
         const fromHex = (typeof fromId === 'bigint') ? nodeIdToHex(fromId) : fromId;
+        // A node id is ALWAYS 66 hex chars. A present-but-malformed sender id
+        // (e.g. a 3-char `fromId` from a peer tearing down mid-shutdown) is a
+        // corrupt frame for every subsystem, not just pub/sub — drop it once,
+        // here, rather than letting each handler re-discover it by throwing.
+        // (null/undefined fromId = locally-originated ⇒ allowed.)
+        if (typeof fromHex === 'string' && fromHex.length > 0 && !isHexId(fromHex)) {
+          this._emitLog?.('debug', 'drop-malformed-frame', { type, reason: 'bad-fromId' });
+          return;
+        }
         try {
-          h(payload, { fromId: fromHex, type });
+          // Handlers are frequently async: a *synchronous* throw inside one (e.g.
+          // parsing a malformed id from a frame) becomes a REJECTED PROMISE that
+          // this synchronous try/catch cannot see — on Node that escalates to a
+          // process-killing unhandledRejection. Catch both the sync throw and the
+          // async rejection (as _deliverRouted does), and treat a malformed-id
+          // error as an expected drop, not a loud bug.
+          const r = h(payload, { fromId: fromHex, type });
+          if (r && typeof r.then === 'function') r.catch((err) => this._onHandlerError('direct', type, err));
         } catch (err) {
-          console.error(`AxonaPeer direct handler error at ${node.id} for '${type}':`, err);
+          this._onHandlerError('direct', type, err);
         }
       });
     }

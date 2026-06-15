@@ -138,6 +138,19 @@ function _wire(hex) {
   return fromHex(hex);
 }
 
+/**
+ * Like `_wire`, but tolerant of malformed inbound wire data: returns `null`
+ * instead of throwing on a non-hex / wrong-length id. Untrusted ingress must
+ * never crash a handler — e.g. a peer tearing down mid-shutdown can deliver a
+ * truncated `fromId`/`topicId`, and in an *async* handler a synchronous throw
+ * becomes a rejected promise that escalates to a process-killing
+ * unhandledRejection on Node. Use this for any id parsed from a received frame.
+ */
+function _wireSafe(hex) {
+  if (hex === null || hex === undefined) return null;
+  try { return _wire(hex); } catch { return null; }
+}
+
 // ── AxonaManager ────────────────────────────────────────────────────────────
 
 export class AxonaManager {
@@ -261,6 +274,26 @@ export class AxonaManager {
     /** @type {Map<bigint, TopicSub>} topicId(BigInt) → sub state for our own subs */
     this.mySubscriptions = new Map();
 
+    /**
+     * @type {Map<bigint, {hostedAt:number}>} topicId(BigInt) → host state.
+     * Topics this node HOSTS (stores + serves) without consuming. A hosted
+     * topic is announced into its K-closest set on the same subscribe-k
+     * heartbeat a subscriber uses — so the node is surfaced in neighbors'
+     * synaptomes and recruited as a root/replica — but it is deliberately
+     * NOT in mySubscriptions (no app delivery, no "my own feed" semantics).
+     * Decouples "I will host this for others" from "I want to receive this."
+     */
+    this._hostedTopics = new Map();
+
+    /**
+     * When true, this node volunteers as a host for its OWN keyspace
+     * neighborhood: each refresh it announces toward the ids closest to its
+     * nodeId, so publishers' findKClosest surface it and demand-driven
+     * recruitment makes it a root for whatever topics land near it. This is
+     * the "host whatever lands near me" relay primitive.
+     */
+    this._hostKeyspace = false;
+
     /** Delivery callback — registered by PubSubAdapter via onPubsubDelivery. */
     this._deliveryCallback = null;
 
@@ -290,7 +323,12 @@ export class AxonaManager {
     this._seenMetricsReqs    = new Set();
     this._seenMetricsReqCap  = 1024;
 
-    // Register handlers with the DHT.
+    // Register handlers with the DHT. Malformed-frame robustness lives ONE layer
+    // down, in the AxonaPeer dispatch boundary that wraps every handler: a
+    // corrupt sender id (`fromId`) is dropped there for all subsystems, and any
+    // handler that throws on a malformed payload id is contained + classified
+    // (AxonaPeer._onHandlerError). So these registrations stay plain — there's no
+    // per-site guard to forget on the next handler added.
     dht.onRoutedMessage('pubsub:subscribe',    (p, m) => this._onSubscribe(p, m));
     dht.onRoutedMessage('pubsub:unsubscribe',  (p, m) => this._onUnsubscribe(p, m));
     dht.onRoutedMessage('pubsub:publish',      (p, m) => this._onPublish(p, m));
@@ -396,6 +434,8 @@ export class AxonaManager {
   resetState() {
     this.axonRoles.clear();
     this.mySubscriptions.clear();
+    this._hostedTopics.clear();
+    this._hostKeyspace = false;
     this._lastSeenTsByTopic.clear();
     this._receivedPublishIds.clear();
     this._seenPublishes.clear();
@@ -651,8 +691,45 @@ export class AxonaManager {
       throw new TypeError(`AxonaManager.pubsubUnsubscribe: topicId must be bigint, got ${typeof topicId}`);
     }
     this.mySubscriptions.delete(topicId);
+    // Forget this node's consumption state so a later since:'all' resubscribe
+    // truly replays + re-delivers (the "re-subscribed hashtag never reappears"
+    // bug). Safe even if we still HOST the topic — only subscriber-side state.
+    this.pubsubResetTopicConsumption(topicId);
     this._asyncUnsubscribe(topicId)
       .catch(err => console.error('AxonaManager: unsubscribe failed:', err));
+  }
+
+  /**
+   * Forget this node's CONSUMPTION state for a topic so a subsequent
+   * `since:'all'` subscribe truly replays from the roots AND re-delivers to the
+   * app. Three per-topic structures otherwise survive an unsub and each one
+   * silently suppresses redelivery:
+   *
+   *   - `_haveByTopic`        — the gap-safe digest we send on (re)subscribe. If
+   *     retained, the roots compute `missed = []` (we claim to already hold
+   *     everything) and replay NOTHING. This is the dominant masking layer:
+   *     it overrides even a `lastSeenTs = 0` floor, because the root's
+   *     `Array.isArray(have)` branch takes precedence over the ts branch.
+   *   - `_lastSeenTsByTopic`  — the legacy replay-floor timestamp.
+   *   - `_appDelivered` (this topic's entries) — the exactly-once app gate; a
+   *     replayed message whose publishId was delivered before the unsub is
+   *     dropped in `_deliverToApp` before it reaches the handler.
+   *
+   * Does NOT touch the node's ROOT/host role (`axonRoles`/`replayCache`) — only
+   * its subscriber-side delivery state — so a node that also hosts the topic
+   * keeps serving others. Wire-compatible: it changes only what THIS node asks
+   * for on its next subscribe.
+   *
+   * @param {bigint} topicId
+   */
+  pubsubResetTopicConsumption(topicId) {
+    if (typeof topicId !== 'bigint') return;
+    this._haveByTopic.delete(topicId);
+    this._lastSeenTsByTopic.delete(topicId);
+    const prefix = `${topicId}:`;
+    for (const k of this._appDelivered.keys()) {
+      if (typeof k === 'string' && k.startsWith(prefix)) this._appDelivered.delete(k);
+    }
   }
 
   /** @private — burst-send pattern. */
@@ -678,6 +755,84 @@ export class AxonaManager {
   /** True when the underlying transport supports K-closest lookup. */
   _useKClosestMode() {
     return this.rootSetSize > 0 && typeof this.dht.findKClosest === 'function';
+  }
+
+  /**
+   * Host a topic (store + serve for others) WITHOUT subscribing as a
+   * consumer. Announces this node into the topic's K-closest set using the
+   * SAME `pubsub:subscribe-k` heartbeat a subscriber uses — so the node is
+   * surfaced in neighbors' synaptomes and recruited as a root/replica, and
+   * the roots backfill it (via the `have` digest in `_asyncSubscribe`) so it
+   * can serve replays. The difference from `pubsubSubscribe` is purely local:
+   * the topic is tracked in `_hostedTopics` (re-announced every refresh) and
+   * NOT in `mySubscriptions`, and the AxonaPeer layer registers no
+   * Subscription/handler — so nothing is delivered to a local application.
+   *
+   * Wire-compatible with every existing kernel: a root processing our
+   * subscribe-k can't tell a host from a subscriber, so no flag day.
+   *
+   * @param {bigint} topicId
+   */
+  pubsubHost(topicId) {
+    if (typeof topicId !== 'bigint') {
+      throw new TypeError(`AxonaManager.pubsubHost: topicId must be bigint, got ${typeof topicId}`);
+    }
+    this._hostedTopics.set(topicId, { hostedAt: this._now() });
+    const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
+    this._asyncSubscribe(topicId, lastSeenTs)
+      .catch(err => console.error('AxonaManager: host failed:', err));
+  }
+
+  /**
+   * Stop hosting a topic. Best-effort tells the root set to drop us
+   * (unsubscribe-k removes only our OWN id — the B-1 invariant), and the
+   * recruited role lapses naturally once traffic stops reaching us.
+   * @param {bigint} topicId
+   */
+  pubsubUnhost(topicId) {
+    if (typeof topicId !== 'bigint') {
+      throw new TypeError(`AxonaManager.pubsubUnhost: topicId must be bigint, got ${typeof topicId}`);
+    }
+    this._hostedTopics.delete(topicId);
+    this._asyncUnsubscribe(topicId).catch(() => { /* best-effort */ });
+  }
+
+  /**
+   * Toggle keyspace hosting — volunteer as a host for whatever topics land
+   * near this node's id. When on, `_announceKeyspace` runs now and on every
+   * refresh tick.
+   * @param {boolean} [on=true]
+   */
+  pubsubHostKeyspace(on = true) {
+    this._hostKeyspace = !!on;
+    if (this._hostKeyspace) {
+      this._announceKeyspace().catch(err => console.error('AxonaManager: host-keyspace failed:', err));
+    }
+  }
+
+  /**
+   * Announce this node toward its own keyspace neighborhood so neighbors keep
+   * it in their synaptome and surface it in find_closest_set responses — the
+   * prerequisite for demand-driven recruitment as a root for nearby topics.
+   * Reuses subscribe-k under topicId = our own nodeId (a self-anchored,
+   * never-published "topic"); the role neighbors create for it is harmless
+   * keyspace bookkeeping that TTLs out, while the side effect — being known —
+   * is exactly what gets us recruited for the REAL topics near us.
+   * @private
+   */
+  async _announceKeyspace() {
+    if (!this._useKClosestMode()) return;
+    const selfHex   = toHex(this.nodeId);
+    const neighbors = await this._findKClosest(this.nodeId, this.rootSetSize);
+    if (!neighbors || neighbors.length === 0) return;
+    const neighborsHex = neighbors.map(r => typeof r === 'bigint' ? toHex(r) : r);
+    for (const peerId of neighbors) {
+      if (peerId === this.nodeId) continue;
+      const p = this.dht.sendDirect(peerId, 'pubsub:subscribe-k', {
+        topicId: selfHex, subscriberId: selfHex, peerRoots: neighborsHex,
+      });
+      if (p?.catch) p.catch(() => {});
+    }
   }
 
   /**
@@ -939,7 +1094,8 @@ export class AxonaManager {
    * _handleKill exactly as on the primary path, so this is not a censorship lever.
    */
   async _onKillSync(payload, meta) {
-    const topicId = _wire(payload.topicId);
+    const topicId = _wireSafe(payload?.topicId);
+    if (topicId == null) return;                                 // malformed frame → drop, never throw
     const kills = Array.isArray(payload?.kills) ? payload.kills.slice(0, MAX_KILL_SYNC) : [];
     for (const kill of kills) {
       try { await this._handleKill(topicId, kill); } catch { /* per-kill best effort */ }
@@ -995,11 +1151,11 @@ export class AxonaManager {
   /** Sibling asked what they're missing: reply with the cache entries whose
    *  postHash isn't in their `have` digest (bounded, tombstones excluded). */
   async _onMsgSync(payload, meta) {
-    const topicId = _wire(payload.topicId);
+    const topicId = _wireSafe(payload?.topicId);
+    if (topicId == null) return;                                 // malformed frame → drop, never throw
     const role = this.axonRoles.get(topicId);
     if (!role || !(role.isRoot || role.isInRootSet)) return;     // only a hosting root answers
-    const requester = meta?.fromId != null ? _wire(meta.fromId)
-                    : (typeof payload.requesterId === 'string' ? _wire(payload.requesterId) : null);
+    const requester = _wireSafe(meta?.fromId) ?? _wireSafe(payload?.requesterId);
     if (requester == null || requester === this.nodeId) return;
     this._sweepRole(role, this._now());
     const have = new Set(Array.isArray(payload.have) ? payload.have.slice(0, MAX_HAVE) : []);
@@ -1012,7 +1168,8 @@ export class AxonaManager {
 
   /** Sibling's reply: re-verify + ingest each message we were missing. */
   async _onMsgSyncResp(payload, meta) {
-    const topicId = _wire(payload.topicId);
+    const topicId = _wireSafe(payload?.topicId);
+    if (topicId == null) return;                                 // malformed frame → drop, never throw
     const role = this.axonRoles.get(topicId);
     if (!role || !(role.isRoot || role.isInRootSet)) return;
     const batch = Array.isArray(payload.messages) ? payload.messages.slice(0, MAX_REPLAY_BATCH) : [];
@@ -1717,8 +1874,12 @@ export class AxonaManager {
   _deliverToApp(topicId, json, publishId, publishTs) {
     if (!this._deliveryCallback) return;
     if (publishId) {
-      if (this._appDelivered.has(publishId)) return;     // already delivered locally
-      this._appDelivered.set(publishId, this._now());
+      // TOPIC-SCOPED dedup key: lets pubsubResetTopicConsumption() forget
+      // exactly one topic's deliveries (on unsub / since:'all' resubscribe) so
+      // a fresh subscribe re-delivers, without disturbing other topics.
+      const dkey = `${topicId}:${publishId}`;
+      if (this._appDelivered.has(dkey)) return;     // already delivered locally
+      this._appDelivered.set(dkey, this._now());
       this._capStore(this._appDelivered, this._appDeliveredCap);
     }
     try {
@@ -2259,6 +2420,18 @@ export class AxonaManager {
       const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
       issueSubscribe(topicId, lastSeenTs, null);
     }
+    // Host heartbeat: re-announce explicitly-hosted topics (same wire as a
+    // subscriber, no local delivery) so the root set keeps us in its serving
+    // tree, and announce our keyspace so we keep getting recruited for
+    // whatever lands near us.
+    for (const topicId of this._hostedTopics.keys()) {
+      if (this.mySubscriptions.has(topicId)) continue;   // already announced above
+      const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
+      issueSubscribe(topicId, lastSeenTs, null);
+    }
+    if (this._hostKeyspace) {
+      this._announceKeyspace().catch(() => { /* best-effort */ });
+    }
     for (const [topicId, role] of this.axonRoles) {
       if (role.children.size === 0) continue;
       const lastSeenTs = this._lastSeenTsByTopic.get(topicId);
@@ -2692,11 +2865,24 @@ export class AxonaManager {
     return out;
   }
 
+  /**
+   * Host-mode introspection for health()/the relay TUI.
+   * @returns {{keyspace:boolean, topics:string[]}}
+   */
+  inspectHosting() {
+    return {
+      keyspace: this._hostKeyspace,
+      topics:   [...this._hostedTopics.keys()].map(t => typeof t === 'bigint' ? toHex(t) : t),
+    };
+  }
+
   /** Clean shutdown — stop the timer. */
   destroy() {
     this.stop();
     this.axonRoles.clear();
     this.mySubscriptions.clear();
+    this._hostedTopics.clear();
+    this._hostKeyspace = false;
     this._deliveryCallback = null;
   }
 }
