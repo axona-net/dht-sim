@@ -25,7 +25,7 @@
 import {
   SimNetwork, simTransport,
   AxonaPeer,
-  deriveIdentity,
+  createNodeIdentity,
   buildEnvelope, verifyEnvelope,
   WIRE_VERSION,
   KERNEL_VERSION,
@@ -44,22 +44,24 @@ function testKernelLoads() {
   console.log('\n── kernel modules load from dht-sim/node_modules ──');
   check('WIRE_VERSION is a string',   typeof WIRE_VERSION === 'string');
   check('KERNEL_VERSION is a string', typeof KERNEL_VERSION === 'string');
-  check('SimNetwork is a class',      typeof SimNetwork === 'function');
-  check('simTransport is a factory',  typeof simTransport === 'function');
-  check('AxonaPeer is a class',       typeof AxonaPeer === 'function');
-  check('deriveIdentity is async fn', typeof deriveIdentity === 'function');
+  check('SimNetwork is a class',          typeof SimNetwork === 'function');
+  check('simTransport is a factory',      typeof simTransport === 'function');
+  check('AxonaPeer is a class',           typeof AxonaPeer === 'function');
+  check('createNodeIdentity is async fn', typeof createNodeIdentity === 'function');
 }
 
 async function testIdentityAndEnvelope() {
   console.log('\n── identity + envelope works in dht-sim env ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   check('identity has 66-char hex id',
     typeof id.id === 'string' && id.id.length === 66);
   check('identity has pubkey + privkey',
     id.pubkey instanceof Uint8Array && id.privateKey != null);
 
   const env = await buildEnvelope({
-    topic: 'integration-test',
+    // Envelope v3: topic is the structured DESCRIPTOR { region, owner, name, write }
+    // (signed, so verifyEnvelope can recompute the topic id + enforce write policy).
+    topic: { region: 'useast', owner: null, name: 'integration-test', write: 'open' },
     message: { hello: 'from dht-sim' },
     identity: id,
   });
@@ -74,8 +76,8 @@ async function testIdentityAndEnvelope() {
 
 async function testTwoPeerDirectMessage() {
   console.log('\n── two peers exchange a direct message via Transport.sim ──');
-  const aliceId = await deriveIdentity(LONDON);
-  const bobId   = await deriveIdentity(TOKYO);
+  const aliceId = await createNodeIdentity(LONDON);
+  const bobId   = await createNodeIdentity(TOKYO);
 
   const network        = new SimNetwork();
   const aliceTransport = simTransport({ network, identity: aliceId, heartbeatMs: 0 });
@@ -88,13 +90,13 @@ async function testTwoPeerDirectMessage() {
   const alice = new AxonaPeer({
     engine:    { onEvent: () => () => {} },
     node:      { id: aliceId.id, alive: true, synaptome: new Map() },
-    identity:  aliceId,
+    nodeIdentity: aliceId,
     transport: aliceTransport,
   });
   const bob = new AxonaPeer({
     engine:    { onEvent: () => () => {} },
     node:      { id: bobId.id, alive: true, synaptome: new Map() },
-    identity:  bobId,
+    nodeIdentity: bobId,
     transport: bobTransport,
   });
 
@@ -121,14 +123,14 @@ async function testTwoPeerDirectMessage() {
 
 async function testStandaloneJoin() {
   console.log('\n── AxonaPeer.join() (standalone, no sponsor) ──');
-  const id = await deriveIdentity(LONDON);
+  const id = await createNodeIdentity(LONDON);
   const network = new SimNetwork();
   const transport = simTransport({ network, identity: id, heartbeatMs: 0 });
 
   const peer = new AxonaPeer({
     engine: { onEvent: () => () => {} },
     node:   { id: id.id, alive: true, synaptome: new Map() },
-    identity: id,
+    nodeIdentity: id,
     transport,
   });
   await peer.join();        // standalone — start + open transport

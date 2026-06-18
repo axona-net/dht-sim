@@ -38,7 +38,7 @@
 import {
   SimNetwork, simTransport,
   AxonaPeer,
-  deriveIdentity,
+  createNodeIdentity,
   buildEnvelope, verifyEnvelope,
 }                          from '@axona/protocol';
 
@@ -74,12 +74,12 @@ async function spawnPeer(network) {
   // Use ~5km grid points around London so S2 prefixes vary modestly.
   const lat = 51.5 + (Math.random() - 0.5) * 0.5;
   const lng = -0.1 + (Math.random() - 0.5) * 0.5;
-  const identity = await deriveIdentity({ lat, lng });
+  const identity = await createNodeIdentity({ lat, lng });
   const transport = simTransport({ network, identity, heartbeatMs: 0 });
   const node = { id: identity.id, alive: true, synaptome: new Map() };
   const peer = new AxonaPeer({
     engine:    { onEvent: () => () => {} },
-    node, identity, transport,
+    node, nodeIdentity: identity, transport,
     axonaManager: new MockAxonManager(identity.id),
   });
   return { peer, identity, transport };
@@ -155,7 +155,7 @@ async function runEnvelopeAtScale(N) {
   const t0 = Date.now();
   const identities = [];
   for (let i = 0; i < N; i++) {
-    identities.push(await deriveIdentity({
+    identities.push(await createNodeIdentity({
       lat: 51.5 + i * 0.01, lng: -0.1 + i * 0.01,
     }));
   }
@@ -165,7 +165,8 @@ async function runEnvelopeAtScale(N) {
   const tBuildStart = Date.now();
   for (let i = 0; i < N; i++) {
     envelopes.push(await buildEnvelope({
-      topic:    'regression',
+      // Envelope v3: topic is the structured DESCRIPTOR { region, owner, name, write }.
+      topic:    { region: 'useast', owner: null, name: 'regression', write: 'open' },
       message:  { i, hello: 'from peer ' + i },
       identity: identities[i],
       ts:       1700000000000 + i,
@@ -202,7 +203,7 @@ async function runSubscriptionRefcount(N) {
   // peer's internal _subscriptions set holds N handles and that
   // stopping all of them eventually triggers a single
   // AxonManager.pubsubUnsubscribe call.
-  const id = await deriveIdentity({ lat: 51.5, lng: -0.1 });
+  const id = await createNodeIdentity({ lat: 51.5, lng: -0.1 });
   const am = new MockAxonManager(id.id);
   let unsubCount = 0;
   am.pubsubUnsubscribe = () => unsubCount++;
@@ -210,14 +211,14 @@ async function runSubscriptionRefcount(N) {
   const peer = new AxonaPeer({
     engine:    { onEvent: () => () => {} },
     node:      { id: id.id, alive: true, synaptome: new Map() },
-    identity:  id,
+    nodeIdentity: id,
     axonaManager: am,
   });
 
   const t0 = Date.now();
   const subs = [];
   for (let i = 0; i < N; i++) {
-    subs.push(await peer.sub('regression', () => {}));
+    subs.push(await peer.sub({ region: 'useast', name: 'regression' }, () => {}));
   }
   const tSubs = Date.now() - t0;
   check(`registered ${N} subs to same topic`, subs.length === N);
