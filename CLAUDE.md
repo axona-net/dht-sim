@@ -179,6 +179,47 @@ numbers will shift** from pre-refactor values (the new code uses
 `transport.getLatency` per-round, not post-walk pairwise `roundTripLatency`).
 Hop counts and success rates are stable across the change.
 
+### Re-verification (25,000 nodes · June 19, 2026 · `@axona/protocol` v3.1.0 · identity/authorship v0.3 + region resolution)
+
+First sim benchmark on the **v3.x kernel** (identity/authorship rebuild, v3.0.0)
+including the **v3.1.0 region-resolution change** (topic region is explicit or the
+publisher's node region; the old key-derived placement was removed). The region
+change is pure pub/sub topic *placement* — it does not touch `_lookupStep`, the
+lookup recursion, or the sim's own pub/sub benchmark path (dht-sim uses its own
+`AxonPubSub`/`post.js`, not the kernel's v0.3 pub/sub) — so **no routing movement
+was expected, and none was observed.** Vendor re-synced to 3.1.0 via
+`scripts/sync-vendor-kernel.sh`; the 57 Node-side kernel-integration/regression
+smokes (`smoke_kernel_integration` 18, `smoke_kernel_regression` 30,
+`smoke_transport_axona_engine` 9) all pass on the 3.1.0 vendor. Same config as the
+rows below (Web limit on, maxConnections = 100, geoBits = 8, 5 % churn, omniscient
+init). δ median ≈ 68 ms one-way.
+
+| Protocol | global ms | r500 ms | r2000 ms | r5000 ms | 5 % churn ms | success% |
+|---|---|---|---|---|---|---|
+| Kademlia | 851.2 | 824.8 | 813.4 | 819.8 | 790.6 | 100% |
+| G-DHT    | 809.2 | 198.1 | 263.2 | 403.4 | 741.3 | 100% |
+| NX-17    | 311.1 | 152.7 | 182.9 | 226.0 | 338.3 | 100% |
+| NH-1     | 321.8 | 159.1 | 191.3 | 228.6 | 356.1 | 100% |
+| **Axona**  | 341.4 | 163.3 | 211.7 | 247.2 | **336.6** | **100%** |
+
+**Verdict: NO routing regression from the v3.x / region change.**
+- **Every cell is within run-to-run noise of the v2.23.0 / v2.24.0 baselines** (e.g.
+  Kademlia global 851→851; NH-1 churn 358→356; Axona churn 323→337).
+- **Axona ↔ NH-1 parity holds**, and Axona keeps its churn dividend (336.6 ms /
+  7.26 hops vs NH-1 356.1 ms / 7.85 hops) — the explicit dead-peer eviction edge.
+- **Axona is 100 % on every cell** (incl. churn), since the vendored kernel carries
+  the `MAX_HOPS=40` fix (v2.24.0+); this is cleaner than the pre-fix v2.23.0 row's
+  98.8–99.6 %.
+
+**Slice World (split-hemisphere, single Hawaii bridge):** Axona **8.40 hops /
+429.8 ms / 100 %**, NH-1 7.90 / 442.4 / 100 %, NX-17 8.60 / 489.9 / 100 %; pure-XOR
+Kademlia & G-DHT still **0 %** (cannot discover the lone inter-hemisphere bridge).
+The learning-synaptome bottleneck-discovery property is intact on v3.1.0.
+
+CSVs (`axona-docs/programmer-guide/benchmarks-25k/`):
+`2026-06-19_25k_5protocols_5tests_v3.1.0.csv`,
+`2026-06-19_25k_5protocols_slice_v3.1.0.csv`.
+
 ### Re-verification (25,000 nodes · June 5, 2026 · `@axona/protocol` v2.23.0 · post bridgeless + hardening wave)
 
 Validation that the kernel evolution since the last sim benchmark — the
