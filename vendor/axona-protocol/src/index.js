@@ -127,6 +127,27 @@ export {
   canonical,
   sha256Hex,
 } from './pubsub/post.js';
+// Derived metric-topic convention (clients + roots must agree byte-for-byte, so
+// it lives in core beside deriveTopicId, not in the optional std/ helper layer).
+export {
+  metricTopic,
+  isMetricTopic,
+  isMetricTopicName,
+  dataTopicIdOf,
+  METRIC_NAMESPACE,
+} from './pubsub/metrics.js';
+
+// Author-class attestation — voluntary, signed human/agent provenance bound to
+// the author key (NOT the address). Carrier + verify live in core so every
+// consumer derives the profile topic and verifies the claim identically.
+export {
+  authorClassTopic,
+  buildAuthorClass,
+  verifyAuthorClass,
+  AUTHOR_CLASS_KIND,
+  AUTHOR_CLASS_NAME,
+  AUTHOR_CLASS_REGION,
+} from './pubsub/authorClass.js';
 
 // ── Bridge directory (discovery + failover ranking) ────────────────
 export {
