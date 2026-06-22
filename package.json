@@ -4,7 +4,10 @@
   "description": "DHT simulation and visualization on a 3D globe",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "pubsub:one": "node harness/pubsub-real-kernel.mjs",
+    "pubsub:scale": "node harness/pubsub-sweep.mjs",
+    "test:kernel": "node test/smoke_kernel_integration.mjs && node test/smoke_transport_axona_engine.mjs && node test/smoke_kernel_regression.mjs"
   },
   "dependencies": {
     "express": "^4.18.2",

@@ -4,6 +4,40 @@
 - Running at **http://localhost:3000** (node server.js)
 - Source in `src/`, entry point `index.html`
 
+## Scalable pub/sub — real-kernel axonic-tree test (Node)
+
+The browser benchmark below measures **routing**; pub/sub fan-out is tested
+separately, on the REAL shipped kernel, via `harness/pubsub-real-kernel.mjs`
+(+ `harness/pubsub-sweep.mjs`). They import `@axona/protocol` (the `file:` link
+= the kernel dht-sim's Node side runs), build peers EXACTLY as
+axona-peer/axona-relay do (`new AxonaPeer({domain,node,nodeIdentity,transport})`
+— no axonaManager, no pickRelayPeer), seed a navigable XOR mesh, drive real
+`peer.pub`/`peer.sub`, and reconstruct the actual axon tree (roots, sub-axons,
+fan-out, depth, per-publish delivery, post-churn self-heal).
+
+```
+npm run pubsub:one     # single scenario — env: N, SUBS, K, SYN_CAP, PICK_RELAY,
+                       #   PUBS, REFRESH, SETTLE, DELIVER, CHURN_PCT, TRACE
+npm run pubsub:scale   # size sweep → table + results/pubsub-scale_<ts>.csv
+                       #   env: SIZES, SUB_FRAC, CONFIGS=default|pickrelay|both, CHURN_PCT
+npm run test:kernel    # the 3 kernel-integration smokes (57 checks)
+```
+
+**GOTCHA:** AxonaManager is built **lazily on first pub/sub** — the AxonaPeer
+constructor leaves `_axonaManager` null. Force it (`peer._requireAxonaManager(…)`)
+right after `peer.start()` before configuring/instrumenting, or an `if (am)`
+guard silently no-ops and you measure an unconfigured manager. The harness emits
+an instrument-sanity line precisely to catch that.
+
+**Finding (kernel v3.9.0):** the kernel now wires `pickRelayPeer` into the default
+manager (`AxonaPeer._buildDefaultManager`), so sub-axon recruitment uses **batch
+adoption** → the axon tree stays **flat (depth ~3–4)** with bounded fan-out (20)
+as a topic grows, ~100% delivery, and 100% post-churn (20% kill) self-heal.
+Before v3.9.0 the default fell back to one-at-a-time child promotion → a **deep
+chain** (depth ~21 @ 600 subs). NOTE: the browser `axona` engine
+(`TransportAxonaEngine`) is still **routing-only** (no `axonFor`); giving it one
+so the browser pub/sub path also runs the real peer is a follow-on.
+
 ## Adaptive Benchmark Loop
 
 Claude drives parameter exploration by:

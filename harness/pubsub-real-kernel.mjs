@@ -17,12 +17,14 @@
 //      REGION (lat,lng cluster), PICK_RELAY=1 (wire batch-adoption to compare).
 // =====================================================================
 
-const KSRC = '/Users/croqueteer/Documents/claude/axona-protocol/src';
-const {
+// Imports the kernel via the `@axona/protocol` package link (file:../axona-protocol
+// in package.json) — i.e. the SAME shipped kernel dht-sim's Node side already uses,
+// so this test always exercises the current peer, never a stale vendored snapshot.
+import {
   AxonaPeer, AxonaDomain, NeuronNode, Synapse, SimNetwork, simTransport,
-  createNodeIdentity, createAuthorIdentity, deriveTopicId, clz264,
-} = await import(`${KSRC}/index.js`);
-const { buildXorRoutingTable } = await import(`${KSRC}/utils/geo.js`);
+  createNodeIdentity, createAuthorIdentity, deriveTopicId, clz264, KERNEL_VERSION,
+} from '@axona/protocol';
+import { buildXorRoutingTable } from '@axona/protocol/utils/geo.js';
 
 const N        = +(process.env.N || 120);
 const SUBS     = +(process.env.SUBS || 80);
@@ -34,7 +36,7 @@ const SETTLE = +(process.env.SETTLE || 1500);   // ms after subscribes, before p
 const DELIVER = +(process.env.DELIVER || 2000);  // ms after publish, before measuring
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
-console.log(`[harness] N=${N} SUBS=${SUBS} K=${K} pickRelay=${PICK_RELAY}  (kernel src: ${KSRC})`);
+console.log(`[harness] N=${N} SUBS=${SUBS} K=${K} pickRelay=${PICK_RELAY}  (kernel @axona/protocol v${KERNEL_VERSION})`);
 
 // ── 1. Build N peers exactly as production does ──────────────────────
 const network = new SimNetwork();
@@ -269,5 +271,37 @@ if (TRACE) {
   const withSent = subscribers.filter(s => (tx.sent.get(norm(s.hex)) || 0) > 0).length;
   console.log(`[trace] instrument sanity: subscribers with pubsubSubscribe called = ${withCall}/${SUBS}; with ≥1 subscribe-k sent = ${withSent}/${SUBS}`);
 }
+
+// ── 7. Churn / self-healing (optional): kill CHURN_PCT% of nodes, heal, re-publish ──
+const CHURN_PCT = +(process.env.CHURN_PCT || 0);
+let churn = null;
+if (CHURN_PCT > 0) {
+  const killN = Math.max(1, Math.floor(N * CHURN_PCT / 100));
+  const victims = peers.filter(p => p !== publisher).sort(() => Math.random() - 0.5).slice(0, killN);
+  const victimBig = new Set(victims.map(v => v.big));
+  for (const v of victims) { try { await v.peer.stop?.(); } catch {} }   // ungraceful death (unregisters transport, clears timers)
+  // Survivors forget the dead from their synaptomes (production does this via
+  // vitality / dead-peer eviction; we do it explicitly so routing avoids ghosts).
+  for (const p of peers) { if (victimBig.has(p.big)) continue; for (const vb of victimBig) p.node.synaptome.delete(vb); }
+  const survSubs = subscribers.filter(s => !victimBig.has(s.big));
+  await wait(Math.max(DELIVER, REFRESH * 4));   // heal: refresh re-subscribes survivors to the new K-closest
+  const cId = String(await publisher.peer.pub(topic, 'post-churn-probe', { signWith: publisher.author }));
+  await wait(DELIVER);
+  const survDeliv = survSubs.filter(s => recv.get(s.hex).has(cId)).length;
+  // recompute tree depth among survivors
+  const rb = new Map();
+  for (const p of peers) { if (victimBig.has(p.big)) continue; const r = p.peer._axonaManager?.axonRoles?.get(topicBig); if (r) rb.set(p.big, r); }
+  const dF = (big, seen) => { const r = rb.get(big); if (!r || seen.has(big)) return 1; seen.add(big); let mx = 1; for (const [cb, m] of (r.children ?? new Map())) if (m?.isSubaxon && rb.has(cb)) mx = Math.max(mx, 1 + dF(cb, seen)); return mx; };
+  let dDepth = 0; for (const [big, r] of rb) if (r.isRoot || r.isInRootSet) dDepth = Math.max(dDepth, dF(big, new Set())); if (!dDepth && rb.size) dDepth = 1;
+  churn = { killedPct: CHURN_PCT, killed: killN, survSubs: survSubs.length, delivered: survDeliv, pct: +(100 * survDeliv / survSubs.length).toFixed(1), depth: dDepth };
+  console.log(`[churn] killed ${killN} (${CHURN_PCT}%); post-churn delivery to survivors: ${survDeliv}/${survSubs.length} (${churn.pct}%); tree depth ${dDepth}`);
+}
+
+// Machine-readable result line for the sweep runner to aggregate.
+console.log('RESULT_JSON ' + JSON.stringify({
+  N, SUBS, K, pickRelay: PICK_RELAY, synCap: SYN_CAP,
+  delivery: delivered, deliveryPct: +(100 * delivered / SUBS).toFixed(1),
+  depth: maxDepth, maxFanout, roleNodes, subaxons, churn,
+}));
 
 process.exit(0);
