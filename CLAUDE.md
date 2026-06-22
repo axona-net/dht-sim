@@ -20,7 +20,7 @@ npm run pubsub:one     # single scenario — env: N, SUBS, K, SYN_CAP, PICK_RELA
                        #   PUBS, REFRESH, SETTLE, DELIVER, CHURN_PCT, TRACE
 npm run pubsub:scale   # size sweep → table + results/pubsub-scale_<ts>.csv
                        #   env: SIZES, SUB_FRAC, CONFIGS=default|pickrelay|both, CHURN_PCT
-npm run test:kernel    # the 3 kernel-integration smokes (57 checks)
+npm run test:kernel    # the 4 kernel-integration smokes (60 checks)
 ```
 
 **GOTCHA:** AxonaManager is built **lazily on first pub/sub** — the AxonaPeer
@@ -34,9 +34,17 @@ manager (`AxonaPeer._buildDefaultManager`), so sub-axon recruitment uses **batch
 adoption** → the axon tree stays **flat (depth ~3–4)** with bounded fan-out (20)
 as a topic grows, ~100% delivery, and 100% post-churn (20% kill) self-heal.
 Before v3.9.0 the default fell back to one-at-a-time child promotion → a **deep
-chain** (depth ~21 @ 600 subs). NOTE: the browser `axona` engine
-(`TransportAxonaEngine`) is still **routing-only** (no `axonFor`); giving it one
-so the browser pub/sub path also runs the real peer is a follow-on.
+chain** (depth ~21 @ 600 subs).
+
+The browser `axona` engine (`TransportAxonaEngine`) now also exposes **`axonFor`**
+(+ `resetAllAxons`): a thin shim that delegates the `PubSubAdapter` contract
+(`pubsubSubscribe`/`Unsubscribe`/`Publish`/`onPubsubDelivery`) to the real
+`peer.sub`/`peer.pub` — mapping the adapter's opaque topicId → a kernel descriptor
+`{region:'useast', name:'sim:'+id}` and signing with one durable author per peer.
+So the browser membership / `pubsubm` test runs the **shipped** pub/sub for the
+`axona` protocol (not a sim-native manager). Validated by
+`test/smoke_transport_axona_pubsub.mjs` (axonFor → PubSubAdapter → 100% delivery
+over the real axon tree).
 
 ## Adaptive Benchmark Loop
 

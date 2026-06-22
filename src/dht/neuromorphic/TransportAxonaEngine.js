@@ -46,6 +46,7 @@ import {
   geoCellId,
   roundTripLatency,
   randomU32,
+  createAuthorIdentity,
 } from '@axona/protocol';
 import { buildXorRoutingTable }     from '@axona/protocol/utils/geo.js';
 import { DHT } from '../DHT.js';
@@ -696,6 +697,70 @@ export class TransportAxonaEngine extends DHT {
     // v1 no-op.  The engine-side check walks every node's
     // synaptome.size — we already enforce caps in buildRoutingTables
     // via tryConnect.
+  }
+
+  // ─── Pub/sub: expose the REAL kernel peer's pub/sub to the membership
+  // benchmark (the PubSubAdapter contract: pubsubSubscribe / pubsubUnsubscribe
+  // / pubsubPublish / onPubsubDelivery). Each node gets a thin shim that
+  // delegates to the peer's PUBLIC `peer.sub` / `peer.pub` — so the `axona`
+  // protocol's pub/sub path runs the SHIPPED kernel (real axon-tree
+  // recruitment, depth, fan-out), not a sim-native manager.
+  //
+  // The adapter speaks in opaque topicIds it computes itself; the kernel needs
+  // a structured descriptor. We map id → { region:'useast', name:'sim:'+id } —
+  // deterministic and identical across every peer, so all peers resolve the
+  // same kernel topic and converge. Publishes are signed with one durable
+  // author per peer (key-separation: the node key never signs).
+  axonFor(node) {
+    if (!this._axonShims) this._axonShims = new Map();
+    const id = node.id;
+    const cached = this._axonShims.get(id);
+    if (cached) return cached;
+    const peer = this._peers.get(id);
+    if (!peer) return null;
+
+    const TOPIC = (tid) => ({ region: 'useast', name: 'sim:' + tid });
+    const subs  = new Map();   // topicId(hex) → Subscription (or `true` while subscribing)
+    let   deliveryCb = null;
+    let   authorP    = null;
+    const author = () => (authorP ??= createAuthorIdentity());   // one durable author per peer
+
+    const shim = {
+      nodeId: (peer.getNodeId?.() ?? String(id)),   // PubSubAdapter tags senderId with this
+      onPubsubDelivery(cb) { deliveryCb = cb; },
+      async pubsubSubscribe(topicId) {
+        if (subs.has(topicId)) return;
+        subs.set(topicId, true);   // reserve synchronously — idempotent under concurrent calls
+        const sub = await peer.sub(TOPIC(topicId), (env) => {
+          if (deliveryCb && env && env.message != null) deliveryCb(topicId, env.message);
+        });
+        subs.set(topicId, sub);
+        // Arm the manager's refresh loop (production parity — axona-peer arms it
+        // at sub time); idempotent, so subsequent subscribes are no-ops.
+        peer._axonaManager?.start?.();
+      },
+      async pubsubUnsubscribe(topicId) {
+        const s = subs.get(topicId);
+        if (s && s !== true) { try { await s.stop(); } catch { /* */ } }
+        subs.delete(topicId);
+      },
+      async pubsubPublish(topicId, json) {
+        await peer.pub(TOPIC(topicId), json, { signWith: await author() });
+      },
+      _stop() {
+        for (const s of subs.values()) if (s && s !== true) { try { s.stop(); } catch { /* */ } }
+        subs.clear();
+      },
+    };
+    this._axonShims.set(id, shim);
+    return shim;
+  }
+
+  /** Tear down all pub/sub shims (PubSubAdapter contract — called between runs). */
+  resetAllAxons() {
+    if (!this._axonShims) return;
+    for (const shim of this._axonShims.values()) { try { shim._stop(); } catch { /* */ } }
+    this._axonShims.clear();
   }
 
   /** Iterate live nodes — the simulator uses this to choose lookup
