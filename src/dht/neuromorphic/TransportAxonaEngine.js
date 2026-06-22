@@ -766,7 +766,7 @@ export class TransportAxonaEngine extends DHT {
    * publish once, and let the tree recruit + converge. The tree lives in each
    * peer's _axonaManager.axonRoles — read it back with axonTreeEdges().
    */
-  async buildAxonTree({ subscribers = 2000, topicName = 'viz', settleMs = 9000, refreshMs = 1500, localize = false, onProgress = null } = {}) {
+  async buildAxonTree({ subscribers = 2000, topicName = 'viz', settleMs = 9000, refreshMs = 1500, localize = false, rounds = 10, roundMs = 500, onProgress = null } = {}) {
     const wait = (ms) => new Promise(r => setTimeout(r, ms));
     const topic = { region: 'useast', name: 'sim:' + topicName };
     this._vizTopicBig = BigInt('0x' + await deriveTopicId(topic));
@@ -799,21 +799,47 @@ export class TransportAxonaEngine extends DHT {
     for (const node of subs) {
       const peer = this._peers.get(node.id);
       if (!peer) continue;
-      // Force-build + accelerate the refresh loop BEFORE start: the manager
-      // is lazy, and the default 10s refresh tick is far too slow to converge
-      // (re-subscribe-k + sub-axon recruitment) inside a viz settle window.
+      // peer.sub force-builds the (lazy) manager and issues the FIRST subscribe-k
+      // immediately — but that initial set is computed against a cold/narrow view,
+      // so subscribers land on a fragmented root set. We DON'T start the wall-clock
+      // refresh timer; instead we drive refreshTick deterministically below.
       try {
         await peer.sub(topic, () => {});
         const am = peer._axonaManager;
-        if (am) { am.refreshIntervalMs = refreshMs; am.start(); }
+        if (am) am.refreshIntervalMs = refreshMs;
         armed++;
       } catch { /* */ }
       if (onProgress && (armed % 200 === 0)) onProgress(armed, subs.length);
     }
-    await wait(settleMs);   // recruitment + refresh convergence (≈ settleMs/refreshMs ticks)
+    await wait(roundMs);   // let the first subscribe-k reach roots + build their managers
+
+    // ── Deterministic convergence (ports the Node harness's refresh-driving) ──
+    // Production arms refreshTick on EVERY peer; here we drive it explicitly on
+    // every manager-bearing peer (subscribers + the roots/relays they reached).
+    // Each tick flushes the K-closest cache and RE-ISSUES subscribe-k to the
+    // freshly-recomputed root set, so subscribers re-anchor off their cold initial
+    // roots onto the converged R-closest set (collapsing the fragmented root count
+    // toward rootSetSize), while roots run adopt-subscribers + root-to-root
+    // anti-entropy. A few rounds converges where a single cold publish does not.
+    const driveRefresh = async () => {
+      const ticks = [];
+      for (const peer of this._peers.values()) {
+        const am = peer._axonaManager;
+        if (am) { try { const p = am.refreshTick(); if (p?.catch) ticks.push(p.catch(() => {})); } catch { /* */ } }
+      }
+      await Promise.all(ticks);
+      await wait(roundMs);   // let subscribe-k / adopt / anti-entropy messages flow
+    };
+    for (let r = 0; r < rounds; r++) {
+      await driveRefresh();
+      if (onProgress) onProgress(armed, subs.length, `converging ${r + 1}/${rounds}`);
+    }
+
+    // Publish, then a few more refresh rounds so root-to-root anti-entropy carries
+    // the message across the whole (now converged) root set before we measure.
     const pubPeer = this._peers.get(pubNode.id);
     if (pubPeer) { try { await pubPeer.pub(topic, 'viz-probe', { signWith: await createAuthorIdentity() }); } catch { /* */ } }
-    await wait(settleMs);   // delivery fan-out settles the tree
+    for (let r = 0; r < Math.min(3, rounds); r++) await driveRefresh();
     return { topicBig: this._vizTopicBig, subscribed: armed };
   }
 
