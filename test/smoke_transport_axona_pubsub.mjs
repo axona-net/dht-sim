@@ -48,5 +48,17 @@ check('delivery ≥ 90% over the real kernel axon tree', delivered >= Math.ceil(
 eng.resetAllAxons();
 check('resetAllAxons clears the shims', eng._axonShims.size === 0);
 
+// ── visualization data path: buildAxonTree → axonTreeEdges (what the globe draws) ──
+console.log('\n── buildAxonTree + axonTreeEdges (the green-tree viz data) ──');
+const veng = new TransportAxonaEngine({ k: 20, geoBits: 8 });
+for (let i = 0; i < 60; i++) await veng.addNode(38 + Math.random() * 2, -77 + Math.random() * 2);
+await veng.buildRoutingTables({ bidirectional: true });
+const { topicBig, subscribed } = await veng.buildAxonTree({ subscribers: 45, settleMs: 3000 });
+const tree = veng.axonTreeEdges(topicBig);
+console.log(`  tree: subs=${subscribed} edges=${tree.edges.length} roots=${tree.roots.size} subaxons=${tree.subaxons.size} depth=${tree.depth}`);
+check('buildAxonTree produced tree edges', tree.edges.length > 0);
+check('tree has ≥1 root', tree.roots.size >= 1);
+check('every edge endpoint resolves to a renderable node', tree.edges.every(([p, c]) => veng.nodeMap.has(p) && veng.nodeMap.has(c)));
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

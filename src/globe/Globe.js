@@ -818,6 +818,67 @@ export class Globe {
     }
   }
 
+  /**
+   * Overlay a pub/sub AXON TREE: draw a bright-green great-circle arc for every
+   * parent→child edge (root→subscriber, root→sub-axon, sub-axon→subscriber).
+   * This is the pub/sub delivery tree (role.children), NOT the routing mesh.
+   * All arcs are merged into ONE LineSegments so thousands of edges stay cheap.
+   *
+   * @param {Array<[bigint,bigint]>} edges   parent→child node-id pairs
+   * @param {Map} nodeMap                     id → { lat, lng }
+   * @param {object} [opts]
+   * @param {Iterable<bigint>} [opts.roots]   root/sub-axon ids to highlight brighter
+   */
+  showAxonTree(edges, nodeMap, opts = {}) {
+    this.clearConnections();
+    const COLOR_EDGE = 0x00ff66;   // bright green
+    const COLOR_LEAF = 0x39ff8a;   // green node tint
+    const COLOR_ROOT = 0xeaff00;   // yellow-green for roots/sub-axons
+
+    const R_NODE  = GLOBE_RADIUS * 1.009;
+    const R_ORBIT = GLOBE_RADIUS * 1.06;     // lower orbit than routing arcs so the tree reads as its own layer
+    const R_TRANS = R_ORBIT - R_NODE;
+
+    const positions = [];
+    const touched = new Set();
+    for (const [pid, cid] of edges) {
+      const a = nodeMap.get(pid), b = nodeMap.get(cid);
+      if (!a || !b) continue;
+      touched.add(pid); touched.add(cid);
+      const ra = this._v3(a.lat, a.lng, 1).normalize();
+      const rb = this._v3(b.lat, b.lng, 1).normalize();
+      const omega = Math.acos(Math.max(-1, Math.min(1, ra.dot(rb))));
+      if (omega < 0.001) continue;
+      const rampFrac = Math.min(R_TRANS / omega, 0.45);
+      const N = 24, sinO = Math.sin(omega);
+      let prev = null;
+      for (let i = 0; i <= N; i++) {
+        const t = i / N;
+        const w0 = Math.sin((1 - t) * omega) / sinO;
+        const w1 = Math.sin(t * omega) / sinO;
+        const dir = new THREE.Vector3(
+          ra.x * w0 + rb.x * w1, ra.y * w0 + rb.y * w1, ra.z * w0 + rb.z * w1,
+        ).normalize();
+        let h;
+        if (t < rampFrac)       h = R_NODE + R_TRANS * Math.sin((t / rampFrac) * (Math.PI / 2));
+        else if (t > 1 - rampFrac) h = R_NODE + R_TRANS * Math.sin(((1 - t) / rampFrac) * (Math.PI / 2));
+        else                    h = R_ORBIT;
+        const p = dir.multiplyScalar(h);
+        if (prev) positions.push(prev.x, prev.y, prev.z, p.x, p.y, p.z);  // emit as line segments
+        prev = p;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    const mat = new THREE.LineBasicMaterial({ color: COLOR_EDGE, transparent: true, opacity: 0.85, depthWrite: false });
+    this.connGroup.add(new THREE.LineSegments(geo, mat));
+
+    // Tint participant nodes; roots/sub-axons brighter.
+    for (const id of touched) this._setInstancedColor(id, COLOR_LEAF);
+    for (const id of (opts.roots || [])) this._setInstancedColor(id, COLOR_ROOT);
+    return { edges: edges.length, nodes: touched.size };
+  }
+
   clearConnections() {
     this.connGroup.clear();
     // Restore colours for previously highlighted individual-mesh nodes.

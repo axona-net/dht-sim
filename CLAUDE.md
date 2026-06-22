@@ -46,6 +46,27 @@ So the browser membership / `pubsubm` test runs the **shipped** pub/sub for the
 `test/smoke_transport_axona_pubsub.mjs` (axonFor → PubSubAdapter → 100% delivery
 over the real axon tree).
 
+**264-bit identities (v0.95.0):** `TransportAxonaEngine.addNode` now builds each
+peer with the real production `createNodeIdentity({lat,lng})` — a **264-bit** nodeId
+`[8-bit S2 geoCellId(lat,lng,8) prefix] ‖ [256-bit SHA-256(pubkey)]`, passed as
+`nodeIdentity` to `AxonaPeer` and bound into `simTransport` — instead of the legacy
+64-bit geo-prefixed `randomU64`. The geo-prefix byte is unchanged (XOR distance still
+tracks geography; `buildXorRoutingTable`/`clz264` already work on the full BigInt), so
+routing is unaffected (all kernel integration/regression smokes green), but pub/sub
+**K-closest root selection now converges** because node ids and `deriveTopicId` topics
+live in the SAME 264-bit keyspace. Before this, a 264-bit topic id vs a near-zero-padded
+64-bit node id scattered the root set → only ~27% delivery at 150 subs; now ~77% with a
+proper ~5-root tree (the residual gap to the Node harness's 100% is convergence-quality
+tuning — synaptome cap 50 + bilateral admission vs the harness's cleaner XOR seed —
+deferred). `window.__sim.showAxonTree({subscribers})` renders the real `role.children`
+delivery tree in bright green on the globe; at 2500 nodes / 2000 subs it forms a genuine
+multi-tier recruited tree (depth ~5, ~190 sub-axons). The legacy comparison protocols
+(K-DHT/G-DHT/NX/NH) stay on the 64-bit `src/utils/geo.js` `clz64` path — they are XOR
+baselines, not the deployed kernel. **NOTE:** `createNodeIdentity` does a real Ed25519
+keygen per node, so the browser `axona` path is now keygen-bound at build time — 25k
+live kernel peers is not browser-feasible; scale-faithful axon-tree tests run in Node
+(`harness/pubsub-real-kernel.mjs`).
+
 ## Adaptive Benchmark Loop
 
 Claude drives parameter exploration by:

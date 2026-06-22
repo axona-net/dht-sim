@@ -43,29 +43,21 @@ import {
   Synapse,
   SimNetwork,
   simTransport,
-  geoCellId,
   roundTripLatency,
-  randomU32,
+  createNodeIdentity,
   createAuthorIdentity,
+  deriveTopicId,
+  clz264,
 } from '@axona/protocol';
 import { buildXorRoutingTable }     from '@axona/protocol/utils/geo.js';
 import { DHT } from '../DHT.js';
-
-// 64-bit BigInt random (the simulator addressing layer is still on
-// the legacy 64-bit nodeId path; the new kernel hex API is for
-// production deployments).
-function randomU64() {
-  const hi = BigInt(randomU32());
-  const lo = BigInt(randomU32());
-  return (hi << 32n) | lo;
-}
 
 export class TransportAxonaEngine extends DHT {
   constructor(opts = {}) {
     super();
     this._k       = opts.k       ?? 20;
     this._alpha   = opts.alpha   ?? 3;
-    this._bits    = opts.bits    ?? 64;
+    this._bits    = opts.bits    ?? 264;
     this.GEO_BITS = opts.geoBits ?? 8;
 
     // One shared domain for every peer in this engine.  Hands the
@@ -113,36 +105,41 @@ export class TransportAxonaEngine extends DHT {
   // ─── DHT contract — addNode ──────────────────────────────────────
 
   async addNode(lat, lng) {
-    // Geographic ID assignment — top GEO_BITS encode S2 cell prefix
-    // for (lat, lng), bottom bits are random.  Same encoding the
-    // engine-driven AxonaEngine uses; keeps XOR distance correlated
-    // with geographic distance so the bootstrap routing table is
-    // useful immediately.
-    const prefix   = geoCellId(lat, lng, this.GEO_BITS);
-    const shift    = BigInt(64 - this.GEO_BITS);
-    const randBits = randomU64() & ((1n << shift) - 1n);
-    const id       = (BigInt(prefix) << shift) | randBits;
+    // PRODUCTION-FAITHFUL 264-bit identity.  createNodeIdentity derives the
+    // real deployed nodeId:
+    //
+    //     nodeId = [8-bit S2 prefix = geoCellId(lat,lng,8)] ‖ [256-bit SHA-256(pubkey)]
+    //
+    // i.e. the SAME top-byte S2 geo-prefix the legacy 64-bit scheme used (so
+    // XOR distance still correlates with geography and the bootstrap XOR table
+    // stays useful), but with a 256-bit pubkey-hash tail instead of 56 random
+    // bits.  This is exactly how axona-peer / axona-bridge / the relay build a
+    // peer in the wild — and, critically, it's the SAME 264-bit keyspace the
+    // kernel hashes topics into (deriveTopicId), so K-closest pub/sub root
+    // selection actually converges (the 64-bit substrate could not — a 264-bit
+    // topic id vs a near-zero-padded 64-bit node id scattered the root set).
+    const identity = await createNodeIdentity({ lat, lng });
+    const id       = BigInt('0x' + identity.id);
 
     const node = new NeuronNode({ id, lat, lng });
     node.alive       = true;
     node.temperature = this.domain.T_INIT;
     this.nodeMap.set(id, node);
 
-    // Wire kernel transport + register with the SimNetwork latency
-    // model.  Pass BigInt id directly — simTransport.start hex-
-    // encodes internally (Phase 5e normalisation).
-    const transport = simTransport({ network: this._network, heartbeatMs: 0 });
-    await transport.start(id);
+    // Wire kernel transport (bound to the SAME identity, so the transport's
+    // local hex id === the node id) + register with the SimNetwork latency
+    // model.
+    const transport = simTransport({ network: this._network, identity, heartbeatMs: 0 });
+    await transport.start(identity.id);
     node.transport = transport;
 
-    // Make the position-by-hex lookup work for the latencyFn closure
-    // above.  start() converted BigInt → hex; ask the transport for
-    // its own resolved local id rather than re-encoding here.
+    // Make the position-by-hex lookup work for the latencyFn closure above.
     this._positionByHex.set(transport.getLocalNodeId(), node);
 
     const peer = new AxonaPeer({
       domain: this.domain,
       node,
+      nodeIdentity: identity,
       transport,
     });
     await peer.start();              // installs lookup_step handler
@@ -221,7 +218,7 @@ export class TransportAxonaEngine extends DHT {
       for (const peer of candidates) {
         if (!node.tryConnect(peer)) continue;
         const latMs   = roundTripLatency(node, peer);
-        const stratum = clz64(node.id ^ peer.id);
+        const stratum = clz264(node.id ^ peer.id);
         const syn = new Synapse({ peerId: peer.id, latencyMs: latMs, stratum });
         syn.bootstrap = true;
         syn._addedBy  = 'bootstrap';
@@ -413,7 +410,7 @@ export class TransportAxonaEngine extends DHT {
       if (newNode.synaptome.size >= newNode._maxSynaptome) return false;
       if (!newNode.tryConnect(peer)) return false;
       const latMs   = roundTripLatency(newNode, peer);
-      const stratum = clz64(newNode.id ^ peer.id);
+      const stratum = clz264(newNode.id ^ peer.id);
       const syn = new Synapse({ peerId: peer.id, latencyMs: latMs, stratum });
       syn._addedBy = 'bootstrapJoin';
       newNode.addSynapse(syn);
@@ -554,7 +551,7 @@ export class TransportAxonaEngine extends DHT {
       if (!candidate.alive) continue;
       if (candidate.id === node.id) continue;
       if (node.synaptome.has(candidate.id)) continue;
-      const stratum = clz64(node.id ^ candidate.id);
+      const stratum = clz264(node.id ^ candidate.id);
       const stratumDist = Math.abs(stratum - targetStratum);
       // Tie-break stratum equality by XOR distance — smaller is closer.
       const xor = node.id ^ candidate.id;
@@ -568,7 +565,7 @@ export class TransportAxonaEngine extends DHT {
     if (!node.tryConnect(best)) return null;
     try { await node.transport.openConnection(best.id); } catch {}
     const latMs   = roundTripLatency(node, best);
-    const stratum = clz64(node.id ^ best.id);
+    const stratum = clz264(node.id ^ best.id);
     const syn = new Synapse({ peerId: best.id, latencyMs: latMs, stratum });
     syn._addedBy = 'postChurnHeal';
     node.addSynapse(syn);
@@ -763,23 +760,75 @@ export class TransportAxonaEngine extends DHT {
     this._axonShims.clear();
   }
 
+  /**
+   * Build a pub/sub AXON TREE for visualization: subscribe `subscribers` random
+   * peers to one topic over the REAL kernel (peer.sub), arm the refresh loop,
+   * publish once, and let the tree recruit + converge. The tree lives in each
+   * peer's _axonaManager.axonRoles — read it back with axonTreeEdges().
+   */
+  async buildAxonTree({ subscribers = 2000, topicName = 'viz', settleMs = 9000, refreshMs = 1500, onProgress = null } = {}) {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    const topic = { region: 'useast', name: 'sim:' + topicName };
+    this._vizTopicBig = BigInt('0x' + await deriveTopicId(topic));
+
+    const alive = [...this.nodeMap.values()].filter(n => n.alive);
+    for (let i = alive.length - 1; i > 0; i--) { const j = ((i + 1) * Math.random()) | 0; [alive[i], alive[j]] = [alive[j], alive[i]]; }
+    const subs    = alive.slice(0, Math.min(subscribers, Math.max(0, alive.length - 1)));
+    const pubNode = alive[subs.length] || alive[0];
+
+    let armed = 0;
+    for (const node of subs) {
+      const peer = this._peers.get(node.id);
+      if (!peer) continue;
+      // Force-build + accelerate the refresh loop BEFORE start: the manager
+      // is lazy, and the default 10s refresh tick is far too slow to converge
+      // (re-subscribe-k + sub-axon recruitment) inside a viz settle window.
+      try {
+        await peer.sub(topic, () => {});
+        const am = peer._axonaManager;
+        if (am) { am.refreshIntervalMs = refreshMs; am.start(); }
+        armed++;
+      } catch { /* */ }
+      if (onProgress && (armed % 200 === 0)) onProgress(armed, subs.length);
+    }
+    await wait(settleMs);   // recruitment + refresh convergence (≈ settleMs/refreshMs ticks)
+    const pubPeer = this._peers.get(pubNode.id);
+    if (pubPeer) { try { await pubPeer.pub(topic, 'viz-probe', { signWith: await createAuthorIdentity() }); } catch { /* */ } }
+    await wait(settleMs);   // delivery fan-out settles the tree
+    return { topicBig: this._vizTopicBig, subscribed: armed };
+  }
+
+  /**
+   * Extract the axon-tree edges for a topic from every peer's role.children.
+   * Returns { edges:[[parentId, childId]…], roots:Set, subaxons:Set, depth } —
+   * parent = the peer holding the role, child = each entry in role.children.
+   */
+  axonTreeEdges(topicBig = this._vizTopicBig) {
+    const edges = [], roots = new Set(), subaxons = new Set();
+    if (topicBig == null) return { edges, roots, subaxons, depth: 0 };
+    const roleByBig = new Map();
+    for (const [pid, peer] of this._peers) {
+      const role = peer._axonaManager?.axonRoles?.get(topicBig);
+      if (!role) continue;
+      roleByBig.set(pid, role);
+      if (role.isRoot || role.isInRootSet) roots.add(pid);
+      for (const [childId, meta] of (role.children ?? new Map())) {
+        edges.push([pid, childId]);
+        if (meta?.isSubaxon) subaxons.add(childId);
+      }
+    }
+    // depth = longest root→…→leaf chain via isSubaxon children that hold roles
+    const dF = (big, seen) => {
+      const r = roleByBig.get(big); if (!r || seen.has(big)) return 1; seen.add(big);
+      let mx = 1; for (const [cb, m] of (r.children ?? new Map())) if (m?.isSubaxon && roleByBig.has(cb)) mx = Math.max(mx, 1 + dF(cb, seen)); return mx;
+    };
+    let depth = 0; for (const big of roots) depth = Math.max(depth, dF(big, new Set()));
+    return { edges, roots, subaxons, depth: depth || (roleByBig.size ? 1 : 0) };
+  }
+
   /** Iterate live nodes — the simulator uses this to choose lookup
    *  sources / destinations and pubsubm role analysis. */
   *aliveNodes() {
     for (const n of this.nodeMap.values()) if (n.alive) yield n;
   }
-}
-
-// ─── Local 64-bit shim (mirrors AxonaEngine + axona-peer pattern) ──
-// Kernel v1.0 dropped clz64 in favour of clz264 for the 264-bit hex
-// path.  buildXorRoutingTable + Synapse-stratum machinery is still
-// on the legacy 64-bit BigInt path here.  Math.clz32-chunks impl
-// is ~100× faster than the naive BigInt-shift loop and matches
-// what the simulator's AxonaEngine and axona-peer already use.
-function clz64(x) {
-  if (x === 0n) return 64;
-  const hi = Number((x >> 32n) & 0xFFFFFFFFn);
-  if (hi !== 0) return Math.clz32(hi);
-  const lo = Number(x & 0xFFFFFFFFn);
-  return 32 + Math.clz32(lo);
 }

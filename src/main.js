@@ -132,6 +132,29 @@ window.__sim = {
   get dht()      { return dht;      },
   get sweep()    { return sweep;    },
   get controls() { return controls; },
+
+  // Build a pub/sub AXON TREE on the current `axona` network and draw it in
+  // bright green on the globe (the real kernel role.children delivery tree, not
+  // the routing mesh). Usage: select the Axona protocol, Initialize a network,
+  // then `await window.__sim.showAxonTree({ subscribers: 2000 })`.
+  async showAxonTree({ subscribers = 2000, topicName = 'viz' } = {}) {
+    if (!dht || typeof dht.buildAxonTree !== 'function') {
+      controls.setStatus('Axon tree needs the `axona` protocol — select Axona + Initialize first.', 'warn');
+      return null;
+    }
+    controls.setStatus(`Building axon tree (subscribing ${subscribers})…`, 'info');
+    const { topicBig, subscribed } = await dht.buildAxonTree({
+      subscribers,
+      onProgress: (n, t) => controls.setStatus(`Subscribing ${n}/${t}…`, 'info'),
+    });
+    const { edges, roots, subaxons, depth } = dht.axonTreeEdges(topicBig);
+    const nodeMap = new Map(dht.getNodes().map(n => [n.id, n]));
+    globe.showAxonTree(edges, nodeMap, { roots });
+    const msg = `Axon tree: ${subscribed} subs · ${edges.length} edges · ${roots.size} roots · ${subaxons.size} sub-axons · depth ${depth}`;
+    controls.setStatus(msg, 'success');
+    console.log('[axon-tree] ' + msg);
+    return { subscribed, edges: edges.length, roots: roots.size, subaxons: subaxons.size, depth };
+  },
 };
 const results  = new Results('resultsOverlay');
 
