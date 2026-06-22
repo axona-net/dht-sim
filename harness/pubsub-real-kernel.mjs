@@ -29,6 +29,7 @@ const SUBS     = +(process.env.SUBS || 80);
 const K        = +(process.env.K || 20);
 const PICK_RELAY = process.env.PICK_RELAY === '1';
 const LAT = +(process.env.LAT || 38.0), LNG = +(process.env.LNG || -77.0);   // us-east cluster
+const SYN_CAP = +(process.env.SYN_CAP || 0);     // cap synaptome size (0=uncapped); bounded ≈ production
 const SETTLE = +(process.env.SETTLE || 1500);   // ms after subscribes, before publish
 const DELIVER = +(process.env.DELIVER || 2000);  // ms after publish, before measuring
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
@@ -69,7 +70,7 @@ if (PICK_RELAY) {
 const sortedNodes = peers.map(p => p.node).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 let edges = 0;
 for (const p of peers) {
-  const cands = buildXorRoutingTable(p.node.id, sortedNodes, K);
+  const cands = buildXorRoutingTable(p.node.id, sortedNodes, K, SYN_CAP || Infinity);
   for (const cand of cands) {
     if (cand.id === p.node.id || p.node.synaptome.has(cand.id)) continue;
     const syn = new Synapse({ peerId: cand.id, latencyMs: 1, stratum: clz264(p.node.id ^ cand.id) });
@@ -208,17 +209,25 @@ for (const p of peers) {
 }
 fanouts.sort((a,b)=>a-b);
 
-// Tree depth via parentId chains among role-holders (roots=depth 1).
+// Tree depth, top-down: from each root, follow children flagged isSubaxon that
+// themselves hold a role, recursively. Robust across BOTH recruitment paths
+// (fallback promote-axon and pickRelayPeer batch adoption both mark the child
+// meta isSubaxon), unlike a parentId walk which the batch path sets differently.
 const roleByBig = new Map();
 for (const p of peers) { const r = p.peer._axonaManager?.axonRoles?.get(topicBig); if (r) roleByBig.set(p.big, r); }
-let maxDepth = roleByBig.size ? 1 : 0;
-for (const [, r] of roleByBig) {
-  let d = 1, cur = r, seen = new Set();
-  while (cur?.parentId != null && !seen.has(cur.parentId)) {
-    seen.add(cur.parentId); cur = roleByBig.get(cur.parentId); if (!cur) break; d++;
+const depthFrom = (big, seen) => {
+  const r = roleByBig.get(big);
+  if (!r || seen.has(big)) return 1;
+  seen.add(big);
+  let mx = 1;
+  for (const [childBig, meta] of (r.children ?? new Map())) {
+    if (meta?.isSubaxon && roleByBig.has(childBig)) mx = Math.max(mx, 1 + depthFrom(childBig, seen));
   }
-  if (d > maxDepth) maxDepth = d;
-}
+  return mx;
+};
+let maxDepth = 0;
+for (const [big, r] of roleByBig) if (r.isRoot || r.isInRootSet) maxDepth = Math.max(maxDepth, depthFrom(big, new Set()));
+if (!maxDepth && roleByBig.size) maxDepth = 1;
 
 console.log('\n================ RESULT ================');
 console.log(`per-publish delivery (/${SUBS}): [${perPub.join(', ')}]  first→last`);
