@@ -137,7 +137,11 @@ window.__sim = {
   // bright green on the globe (the real kernel role.children delivery tree, not
   // the routing mesh). Usage: select the Axona protocol, Initialize a network,
   // then `await window.__sim.showAxonTree({ subscribers: 2000 })`.
-  async showAxonTree({ subscribers = 2000, topicName = 'viz' } = {}) {
+  //
+  // `primary` (default true) draws the spanning tree — each subscriber's single
+  // closest-root edge — so the branching structure is legible. Pass primary:false
+  // to draw the full K-closest mesh (every subscriber × ~5 roots ≈ 5× the arcs).
+  async showAxonTree({ subscribers = 2000, topicName = 'viz', primary = true } = {}) {
     if (!dht || typeof dht.buildAxonTree !== 'function') {
       controls.setStatus('Axon tree needs the `axona` protocol — select Axona + Initialize first.', 'warn');
       return null;
@@ -147,13 +151,30 @@ window.__sim = {
       subscribers,
       onProgress: (n, t) => controls.setStatus(`Subscribing ${n}/${t}…`, 'info'),
     });
-    const { edges, roots, subaxons, depth } = dht.axonTreeEdges(topicBig);
+    return this._drawAxonTree(topicBig, primary, subscribed);
+  },
+
+  // Re-draw the CURRENT topic's tree without re-subscribing — for instantly
+  // toggling between the spanning tree (primary:true) and the full redundant
+  // mesh (primary:false): `window.__sim.redrawAxonTree({ primary:false })`.
+  redrawAxonTree({ primary = true } = {}) {
+    if (!dht || dht._vizTopicBig == null) {
+      controls.setStatus('No axon tree built yet — run showAxonTree first.', 'warn');
+      return null;
+    }
+    return this._drawAxonTree(dht._vizTopicBig, primary, null);
+  },
+
+  _drawAxonTree(topicBig, primary, subscribed) {
+    const { edges, roots, subaxons, depth } = dht.axonTreeEdges(topicBig, { primary });
     const nodeMap = new Map(dht.getNodes().map(n => [n.id, n]));
     globe.showAxonTree(edges, nodeMap, { roots });
-    const msg = `Axon tree: ${subscribed} subs · ${edges.length} edges · ${roots.size} roots · ${subaxons.size} sub-axons · depth ${depth}`;
+    const subs = subscribed != null ? `${subscribed} subs · ` : '';
+    const view = primary ? 'spanning tree' : 'full mesh';
+    const msg = `Axon tree (${view}): ${subs}${edges.length} edges · ${roots.size} roots · ${subaxons.size} sub-axons · depth ${depth}`;
     controls.setStatus(msg, 'success');
     console.log('[axon-tree] ' + msg);
-    return { subscribed, edges: edges.length, roots: roots.size, subaxons: subaxons.size, depth };
+    return { subscribed, primary, edges: edges.length, roots: roots.size, subaxons: subaxons.size, depth };
   },
 };
 const results  = new Results('resultsOverlay');

@@ -55,10 +55,19 @@ for (let i = 0; i < 60; i++) await veng.addNode(38 + Math.random() * 2, -77 + Ma
 await veng.buildRoutingTables({ bidirectional: true });
 const { topicBig, subscribed } = await veng.buildAxonTree({ subscribers: 45, settleMs: 3000 });
 const tree = veng.axonTreeEdges(topicBig);
-console.log(`  tree: subs=${subscribed} edges=${tree.edges.length} roots=${tree.roots.size} subaxons=${tree.subaxons.size} depth=${tree.depth}`);
+console.log(`  tree (full): subs=${subscribed} edges=${tree.edges.length} roots=${tree.roots.size} subaxons=${tree.subaxons.size} depth=${tree.depth}`);
 check('buildAxonTree produced tree edges', tree.edges.length > 0);
 check('tree has ≥1 root', tree.roots.size >= 1);
 check('every edge endpoint resolves to a renderable node', tree.edges.every(([p, c]) => veng.nodeMap.has(p) && veng.nodeMap.has(c)));
+
+// ── primary (spanning-tree) view: one parent per child, fewer edges ──
+const prim = veng.axonTreeEdges(topicBig, { primary: true });
+const childParents = new Map();
+for (const [p, c] of prim.edges) childParents.set(c, (childParents.get(c) || 0) + 1);
+console.log(`  tree (primary): edges=${prim.edges.length} (full=${tree.edges.length}) maxParentsPerChild=${Math.max(0, ...childParents.values())}`);
+check('primary view has ≤ full edges (collapses root-set redundancy)', prim.edges.length <= tree.edges.length);
+check('primary view gives every child exactly one parent', [...childParents.values()].every(n => n === 1));
+check('primary edges still renderable', prim.edges.every(([p, c]) => veng.nodeMap.has(p) && veng.nodeMap.has(c)));
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

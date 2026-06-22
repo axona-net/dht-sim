@@ -802,22 +802,45 @@ export class TransportAxonaEngine extends DHT {
    * Extract the axon-tree edges for a topic from every peer's role.children.
    * Returns { edges:[[parentId, childId]…], roots:Set, subaxons:Set, depth } —
    * parent = the peer holding the role, child = each entry in role.children.
+   *
+   * `opts.primary` (default false) collapses the K-closest **root-set redundancy**
+   * for legibility: in the full view every subscriber is a child of ~R roots
+   * (rootSetSize, ≈5) so the edge count is ≈ subscribers × R — a dense overlapping
+   * mesh. With `primary:true` each child keeps a SINGLE parent — the one closest
+   * (XOR) to the topic id, i.e. its most root-ward holder — yielding one spanning
+   * tree (≈ one edge per subscriber + sub-axon tier links). `roots`/`subaxons`/
+   * `depth` describe the same underlying hierarchy in both modes.
    */
-  axonTreeEdges(topicBig = this._vizTopicBig) {
-    const edges = [], roots = new Set(), subaxons = new Set();
-    if (topicBig == null) return { edges, roots, subaxons, depth: 0 };
+  axonTreeEdges(topicBig = this._vizTopicBig, { primary = false } = {}) {
+    const roots = new Set(), subaxons = new Set();
+    if (topicBig == null) return { edges: [], roots, subaxons, depth: 0 };
     const roleByBig = new Map();
+    const allEdges = [];   // [parentId, childId] across every role.children
     for (const [pid, peer] of this._peers) {
       const role = peer._axonaManager?.axonRoles?.get(topicBig);
       if (!role) continue;
       roleByBig.set(pid, role);
       if (role.isRoot || role.isInRootSet) roots.add(pid);
       for (const [childId, meta] of (role.children ?? new Map())) {
-        edges.push([pid, childId]);
+        allEdges.push([pid, childId]);
         if (meta?.isSubaxon) subaxons.add(childId);
       }
     }
+
+    let edges = allEdges;
+    if (primary) {
+      // one parent per child: the holder closest (XOR) to the topic id (root-ward).
+      const best = new Map();   // childId -> { parent, dist }
+      for (const [p, c] of allEdges) {
+        const dist = p ^ topicBig;             // BigInt XOR (both non-negative)
+        const cur = best.get(c);
+        if (!cur || dist < cur.dist) best.set(c, { parent: p, dist });
+      }
+      edges = [...best.entries()].map(([c, v]) => [v.parent, c]);
+    }
+
     // depth = longest root→…→leaf chain via isSubaxon children that hold roles
+    // (structural hierarchy depth — identical in both edge views)
     const dF = (big, seen) => {
       const r = roleByBig.get(big); if (!r || seen.has(big)) return 1; seen.add(big);
       let mx = 1; for (const [cb, m] of (r.children ?? new Map())) if (m?.isSubaxon && roleByBig.has(cb)) mx = Math.max(mx, 1 + dF(cb, seen)); return mx;
