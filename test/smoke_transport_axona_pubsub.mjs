@@ -69,5 +69,12 @@ check('primary view has ≤ full edges (collapses root-set redundancy)', prim.ed
 check('primary view gives every child exactly one parent', [...childParents.values()].every(n => n === 1));
 check('primary edges still renderable', prim.edges.every(([p, c]) => veng.nodeMap.has(p) && veng.nodeMap.has(c)));
 
+// ── backbone view: only axon→sub-axon links (the relay tree, no subscriber leaves) ──
+const bb = veng.axonTreeEdges(topicBig, { primary: true, backbone: true });
+const subaxonSet = tree.subaxons;
+console.log(`  tree (backbone): edges=${bb.edges.length} (every child is a sub-axon)`);
+check('backbone has ≤ primary edges (leaves dropped)', bb.edges.length <= prim.edges.length);
+check('every backbone child is a sub-axon', bb.edges.every(([, c]) => subaxonSet.has(c)));
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

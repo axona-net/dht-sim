@@ -803,35 +803,47 @@ export class TransportAxonaEngine extends DHT {
    * Returns { edges:[[parentId, childId]…], roots:Set, subaxons:Set, depth } —
    * parent = the peer holding the role, child = each entry in role.children.
    *
-   * `opts.primary` (default false) collapses the K-closest **root-set redundancy**
-   * for legibility: in the full view every subscriber is a child of ~R roots
-   * (rootSetSize, ≈5) so the edge count is ≈ subscribers × R — a dense overlapping
-   * mesh. With `primary:true` each child keeps a SINGLE parent — the one closest
-   * (XOR) to the topic id, i.e. its most root-ward holder — yielding one spanning
-   * tree (≈ one edge per subscriber + sub-axon tier links). `roots`/`subaxons`/
-   * `depth` describe the same underlying hierarchy in both modes.
+   * Two independent axes select WHICH edges come back:
+   *
+   * `opts.backbone` (default false) — what counts as an edge:
+   *   - false → ALL `role.children` links, i.e. axon→sub-axon (the relay backbone)
+   *     AND axon→subscriber (leaf attachments). Leaves dominate: for 2000 subs the
+   *     leaf edges are ~10.5k vs only ~180 backbone links.
+   *   - true  → ONLY the axon→sub-axon links (`isSubaxon`) — *the relay tree itself*,
+   *     roots forwarding to sub-axons forwarding to sub-axons, with the subscriber
+   *     leaves omitted. This is the ≈ (subscribers / maxDirectSubs) skeleton.
+   *
+   * `opts.primary` (default false) — root-set redundancy:
+   *   K-closest replicates every child across the ~R-member root set (rootSetSize≈5),
+   *   so the full view has ≈ children × R edges (a dense overlapping mesh). With
+   *   `primary:true` each child keeps a SINGLE parent — the holder closest (XOR) to
+   *   the topic id, i.e. its most root-ward holder — yielding one spanning tree.
+   *
+   * `roots`/`subaxons`/`depth` describe the same underlying hierarchy regardless.
    */
-  axonTreeEdges(topicBig = this._vizTopicBig, { primary = false } = {}) {
+  axonTreeEdges(topicBig = this._vizTopicBig, { primary = false, backbone = false } = {}) {
     const roots = new Set(), subaxons = new Set();
     if (topicBig == null) return { edges: [], roots, subaxons, depth: 0 };
     const roleByBig = new Map();
-    const allEdges = [];   // [parentId, childId] across every role.children
+    const allEdges = [];   // [parentId, childId, isSubaxon] across every role.children
     for (const [pid, peer] of this._peers) {
       const role = peer._axonaManager?.axonRoles?.get(topicBig);
       if (!role) continue;
       roleByBig.set(pid, role);
       if (role.isRoot || role.isInRootSet) roots.add(pid);
       for (const [childId, meta] of (role.children ?? new Map())) {
-        allEdges.push([pid, childId]);
+        allEdges.push([pid, childId, !!meta?.isSubaxon]);
         if (meta?.isSubaxon) subaxons.add(childId);
       }
     }
 
-    let edges = allEdges;
+    // backbone: keep only axon→sub-axon links (drop subscriber-leaf attachments).
+    let pool = backbone ? allEdges.filter(e => e[2]) : allEdges;
+    let edges = pool.map(([p, c]) => [p, c]);
     if (primary) {
       // one parent per child: the holder closest (XOR) to the topic id (root-ward).
       const best = new Map();   // childId -> { parent, dist }
-      for (const [p, c] of allEdges) {
+      for (const [p, c] of pool) {
         const dist = p ^ topicBig;             // BigInt XOR (both non-negative)
         const cur = best.get(c);
         if (!cur || dist < cur.dist) best.set(c, { parent: p, dist });
