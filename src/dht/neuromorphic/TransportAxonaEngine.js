@@ -766,14 +766,33 @@ export class TransportAxonaEngine extends DHT {
    * publish once, and let the tree recruit + converge. The tree lives in each
    * peer's _axonaManager.axonRoles — read it back with axonTreeEdges().
    */
-  async buildAxonTree({ subscribers = 2000, topicName = 'viz', settleMs = 9000, refreshMs = 1500, onProgress = null } = {}) {
+  async buildAxonTree({ subscribers = 2000, topicName = 'viz', settleMs = 9000, refreshMs = 1500, localize = false, onProgress = null } = {}) {
     const wait = (ms) => new Promise(r => setTimeout(r, ms));
     const topic = { region: 'useast', name: 'sim:' + topicName };
     this._vizTopicBig = BigInt('0x' + await deriveTopicId(topic));
 
     const alive = [...this.nodeMap.values()].filter(n => n.alive);
-    for (let i = alive.length - 1; i > 0; i--) { const j = ((i + 1) * Math.random()) | 0; [alive[i], alive[j]] = [alive[j], alive[i]]; }
+    if (localize) {
+      // Regional topic: draw subscribers from nodes NEAR the topic's region.
+      // The topic id is region-prefixed, so its roots already cluster in the
+      // region; localizing the subscribers too keeps subscribe-k routes short
+      // (they converge to the same keyspace/geographic neighbourhood) — which
+      // both fixes enrollment for a sparse subscriber set on a large mesh AND
+      // yields a geographically TIGHT tree you can actually read. Anchor =
+      // us-east (matches topic region 'useast'); nearest-N by great-circle.
+      const { lat: aLat, lng: aLng } = localize === true ? { lat: 38, lng: -77 } : localize;
+      const d2 = (n) => {
+        const dLat = (n.lat - aLat) * Math.PI / 180;
+        const dLng = (n.lng - aLng) * Math.PI / 180;
+        return dLat * dLat + dLng * dLng * Math.cos(aLat * Math.PI / 180) ** 2;
+      };
+      alive.sort((a, b) => d2(a) - d2(b));
+    } else {
+      for (let i = alive.length - 1; i > 0; i--) { const j = ((i + 1) * Math.random()) | 0; [alive[i], alive[j]] = [alive[j], alive[i]]; }
+    }
     const subs    = alive.slice(0, Math.min(subscribers, Math.max(0, alive.length - 1)));
+    // publisher: a node in/near the region too (last of the localized slice's
+    // neighbourhood), so its publish routes into the same root cluster.
     const pubNode = alive[subs.length] || alive[0];
 
     let armed = 0;

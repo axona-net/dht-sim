@@ -76,5 +76,15 @@ console.log(`  tree (backbone): edges=${bb.edges.length} (every child is a sub-a
 check('backbone has ≤ primary edges (leaves dropped)', bb.edges.length <= prim.edges.length);
 check('every backbone child is a sub-axon', bb.edges.every(([, c]) => subaxonSet.has(c)));
 
+// ── localized subscribers: regional topic enrolls + forms a tree ──
+console.log('\n── buildAxonTree localize (regional subscriber set) ──');
+const leng = new TransportAxonaEngine({ k: 20, geoBits: 8 });
+for (let i = 0; i < 120; i++) await leng.addNode(-55 + Math.random() * 110, -175 + Math.random() * 350); // GLOBAL spread
+await leng.buildRoutingTables({ bidirectional: true });
+const lt = await leng.buildAxonTree({ subscribers: 40, localize: { lat: 38, lng: -77 }, settleMs: 3000 });
+const ltree = leng.axonTreeEdges(lt.topicBig, { primary: true });
+console.log(`  localized: subs=${lt.subscribed} edges=${ltree.edges.length} roots=${ltree.roots.size}`);
+check('localized build enrolls subscribers + forms a tree', lt.subscribed > 0 && ltree.edges.length > 0);
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

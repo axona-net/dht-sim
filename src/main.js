@@ -144,14 +144,19 @@ window.__sim = {
   //     attachments too (~one per sub, ≫ backbone, so the picture gets dense).
   //   `primary`  (default true) — collapse the K-closest root-set redundancy to one
   //     parent per node. false draws the full ~5× overlapping mesh.
-  async showAxonTree({ subscribers = 2000, topicName = 'viz', primary = true, backbone = true } = {}) {
+  //   `localize` (default false) — draw subscribers from the topic's region
+  //     instead of globally. A region-prefixed topic's roots already cluster in
+  //     the region; localizing the subscribers keeps subscribe-k routes short
+  //     (better enrollment for a sparse set on a large mesh) and yields a
+  //     geographically tight, readable tree. Pass true (us-east) or {lat,lng}.
+  async showAxonTree({ subscribers = 2000, topicName = 'viz', primary = true, backbone = true, localize = false } = {}) {
     if (!dht || typeof dht.buildAxonTree !== 'function') {
       controls.setStatus('Axon tree needs the `axona` protocol — select Axona + Initialize first.', 'warn');
       return null;
     }
     controls.setStatus(`Building axon tree (subscribing ${subscribers})…`, 'info');
     const { topicBig, subscribed } = await dht.buildAxonTree({
-      subscribers,
+      subscribers, localize,
       onProgress: (n, t) => controls.setStatus(`Subscribing ${n}/${t}…`, 'info'),
     });
     return this._drawAxonTree(topicBig, { primary, backbone }, subscribed);
