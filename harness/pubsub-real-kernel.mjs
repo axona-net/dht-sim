@@ -198,15 +198,16 @@ for (const p of peers) {
   const role = p.peer._axonaManager?.axonRoles?.get(topicBig);
   if (!role) continue;
   roleNodes++;
+  // Routing-only kernel (v3.12+): role.subscribers = ALL direct attachments
+  // (leaves + child relays) = the fan-out; role.children = a Set of just the
+  // child-relay ids (the backbone / "sub-axons").
+  const fan  = role.subscribers?.size ?? 0;
   const kids = role.children?.size ?? 0;
   totalChildren += kids;
-  maxFanout = Math.max(maxFanout, kids);
-  fanouts.push(kids);
+  subaxons      += kids;
+  maxFanout = Math.max(maxFanout, fan);
+  fanouts.push(fan);
   if (role.isRoot || role.isInRootSet) roots++;
-  // count sub-axon children this role delegated to
-  for (const childMeta of (role.children?.values?.() ?? [])) {
-    if (childMeta?.isSubaxon) subaxons++;
-  }
   if (!(role.isRoot || role.isInRootSet)) plainRoleNodes++;
 }
 fanouts.sort((a,b)=>a-b);
@@ -217,19 +218,37 @@ fanouts.sort((a,b)=>a-b);
 // meta isSubaxon), unlike a parentId walk which the batch path sets differently.
 const roleByBig = new Map();
 for (const p of peers) { const r = p.peer._axonaManager?.axonRoles?.get(topicBig); if (r) roleByBig.set(p.big, r); }
+const toBig = (hex) => { try { return BigInt('0x' + hex); } catch { return null; } };
 const depthFrom = (big, seen) => {
   const r = roleByBig.get(big);
   if (!r || seen.has(big)) return 1;
   seen.add(big);
   let mx = 1;
-  for (const [childBig, meta] of (r.children ?? new Map())) {
-    if (meta?.isSubaxon && roleByBig.has(childBig)) mx = Math.max(mx, 1 + depthFrom(childBig, seen));
+  for (const childHex of (r.children instanceof Set ? r.children : [])) {
+    const cb = toBig(childHex);
+    if (cb != null && roleByBig.has(cb)) mx = Math.max(mx, 1 + depthFrom(cb, seen));
   }
   return mx;
 };
 let maxDepth = 0;
 for (const [big, r] of roleByBig) if (r.isRoot || r.isInRootSet) maxDepth = Math.max(maxDepth, depthFrom(big, new Set()));
 if (!maxDepth && roleByBig.size) maxDepth = 1;
+
+// ── Root-election quality (the v3.10.0 fix): the root set must be the topic's
+// ~rootSetSize CLOSEST nodes — not a balloon of spurious self-promoted roots.
+// Classify every role flagged isRoot/in-root-set against the canonical closest
+// set, and count spurious roots that nonetheless hold children (the failure mode
+// the fix targets).
+const ROOT_SET_SIZE = peers[0].peer._axonaManager?.rootSetSize ?? 5;
+const trueRootSet = new Set((await publisher.peer.findKClosest(topicBig, ROOT_SET_SIZE)).map(b => (typeof b === 'bigint' ? b : BigInt('0x' + b))));
+let rootsInTrue = 0, spuriousRoots = 0, spuriousRootsWithChildren = 0;
+for (const p of peers) {
+  const role = p.peer._axonaManager?.axonRoles?.get(topicBig);
+  if (!role || !(role.isRoot || role.isInRootSet)) continue;
+  if (trueRootSet.has(p.big)) rootsInTrue++;
+  else { spuriousRoots++; if ((role.children?.size ?? 0) > 0) spuriousRootsWithChildren++; }
+}
+console.log(`root election:    rootSetSize=${ROOT_SET_SIZE}  roots-in-true-closest=${rootsInTrue}  spurious-roots=${spuriousRoots} (with children: ${spuriousRootsWithChildren})`);
 
 console.log('\n================ RESULT ================');
 console.log(`per-publish delivery (/${SUBS}): [${perPub.join(', ')}]  first→last`);
@@ -293,15 +312,27 @@ if (CHURN_PCT > 0) {
   for (const p of peers) { if (victimBig.has(p.big)) continue; const r = p.peer._axonaManager?.axonRoles?.get(topicBig); if (r) rb.set(p.big, r); }
   const dF = (big, seen) => { const r = rb.get(big); if (!r || seen.has(big)) return 1; seen.add(big); let mx = 1; for (const [cb, m] of (r.children ?? new Map())) if (m?.isSubaxon && rb.has(cb)) mx = Math.max(mx, 1 + dF(cb, seen)); return mx; };
   let dDepth = 0; for (const [big, r] of rb) if (r.isRoot || r.isInRootSet) dDepth = Math.max(dDepth, dF(big, new Set())); if (!dDepth && rb.size) dDepth = 1;
-  churn = { killedPct: CHURN_PCT, killed: killN, survSubs: survSubs.length, delivered: survDeliv, pct: +(100 * survDeliv / survSubs.length).toFixed(1), depth: dDepth };
-  console.log(`[churn] killed ${killN} (${CHURN_PCT}%); post-churn delivery to survivors: ${survDeliv}/${survSubs.length} (${churn.pct}%); tree depth ${dDepth}`);
+  // Post-churn root election: roots must re-converge on the NEW closest set
+  // (dead roots replaced), with no spurious-root regrowth among survivors.
+  const trueRootSet2 = new Set((await publisher.peer.findKClosest(topicBig, ROOT_SET_SIZE)).map(b => (typeof b === 'bigint' ? b : BigInt('0x' + b))));
+  let dRoots = 0, dRootsInTrue = 0, dSpuriousWithChildren = 0;
+  for (const [big, r] of rb) {
+    if (!(r.isRoot || r.isInRootSet)) continue;
+    dRoots++;
+    if (trueRootSet2.has(big)) dRootsInTrue++;
+    else if ((r.children?.size ?? 0) > 0) dSpuriousWithChildren++;
+  }
+  churn = { killedPct: CHURN_PCT, killed: killN, survSubs: survSubs.length, delivered: survDeliv, pct: +(100 * survDeliv / survSubs.length).toFixed(1), depth: dDepth, roots: dRoots, rootsInTrue: dRootsInTrue, spuriousRootsWithChildren: dSpuriousWithChildren };
+  console.log(`[churn] killed ${killN} (${CHURN_PCT}%); post-churn delivery to survivors: ${survDeliv}/${survSubs.length} (${churn.pct}%); depth ${dDepth}; roots ${dRoots} (in-true ${dRootsInTrue}, spurious-w/children ${dSpuriousWithChildren})`);
 }
 
 // Machine-readable result line for the sweep runner to aggregate.
 console.log('RESULT_JSON ' + JSON.stringify({
   N, SUBS, K, pickRelay: PICK_RELAY, synCap: SYN_CAP,
   delivery: delivered, deliveryPct: +(100 * delivered / SUBS).toFixed(1),
-  depth: maxDepth, maxFanout, roleNodes, subaxons, churn,
+  depth: maxDepth, maxFanout, roleNodes, subaxons,
+  rootSetSize: ROOT_SET_SIZE, roots, rootsInTrue, spuriousRoots, spuriousRootsWithChildren,
+  churn,
 }));
 
 process.exit(0);

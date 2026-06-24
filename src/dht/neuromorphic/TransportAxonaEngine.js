@@ -734,7 +734,16 @@ export class TransportAxonaEngine extends DHT {
         subs.set(topicId, sub);
         // Arm the manager's refresh loop (production parity — axona-peer arms it
         // at sub time); idempotent, so subsequent subscribes are no-ops.
-        peer._axonaManager?.start?.();
+        // The routing-only kernel (v3.12+) gates renewals by renewMs (60s in the
+        // wild). The sim runs accelerated, so use a fast renew cadence: imperfect
+        // initial subscribe routes converge over a few renewal cycles in seconds,
+        // not a minute. Set BEFORE start() so the armed interval picks it up.
+        const am = peer._axonaManager;
+        if (am) {
+          if (am.renewMs === undefined || am.renewMs > 2000) am.renewMs = 2000;
+          if (!am._timer) am.refreshIntervalMs = 1000;
+          am.start?.();
+        }
       },
       async pubsubUnsubscribe(topicId) {
         const s = subs.get(topicId);
@@ -755,9 +764,18 @@ export class TransportAxonaEngine extends DHT {
 
   /** Tear down all pub/sub shims (PubSubAdapter contract — called between runs). */
   resetAllAxons() {
-    if (!this._axonShims) return;
-    for (const shim of this._axonShims.values()) { try { shim._stop(); } catch { /* */ } }
-    this._axonShims.clear();
+    if (this._axonShims) {
+      for (const shim of this._axonShims.values()) { try { shim._stop(); } catch { /* */ } }
+      this._axonShims.clear();
+    }
+    // Also stop the managers' wall-clock refresh timers. axonFor arms them
+    // (production parity); if left running they keep firing refreshTick on a
+    // background interval and contend with a later run's deterministic
+    // convergence (e.g. a subsequent buildAxonTree on another engine), making
+    // it flaky. Stopping them here makes between-run state clean.
+    for (const peer of this._peers?.values?.() ?? []) {
+      try { peer._axonaManager?.stop?.(); } catch { /* */ }
+    }
   }
 
   /**
@@ -825,6 +843,11 @@ export class TransportAxonaEngine extends DHT {
       const ticks = [];
       for (const peer of this._peers.values()) {
         const am = peer._axonaManager;
+        // renewMs=0 ⇒ each driven refreshTick actually RE-ISSUES the subscribe
+        // (the routing-only kernel gates renewals by renewMs; without this the
+        // rapid in-sim rounds never reach the 60s wall-clock renew threshold and
+        // the tree never converges). Applies to roots/relays built lazily mid-run.
+        if (am) am.renewMs = 0;
         if (am) { try { const p = am.refreshTick(); if (p?.catch) ticks.push(p.catch(() => {})); } catch { /* */ } }
       }
       await Promise.all(ticks);
@@ -840,6 +863,14 @@ export class TransportAxonaEngine extends DHT {
     const pubPeer = this._peers.get(pubNode.id);
     if (pubPeer) { try { await pubPeer.pub(topic, 'viz-probe', { signWith: await createAuthorIdentity() }); } catch { /* */ } }
     for (let r = 0; r < Math.min(3, rounds); r++) await driveRefresh();
+    // Stabilize: the fixed wall-clock rounds above can be starved under
+    // event-loop load (other timers, GC) so the subscribe routes haven't all
+    // converged onto the root by the time we return. Keep driving until a tree
+    // is actually present (≥1 root) — cheap when already converged, robust when
+    // not. Bounded so a genuinely-empty topic still returns.
+    for (let r = 0; r < rounds && this.axonTreeEdges(this._vizTopicBig).roots.size === 0; r++) {
+      await driveRefresh();
+    }
     return { topicBig: this._vizTopicBig, subscribed: armed };
   }
 
@@ -870,15 +901,25 @@ export class TransportAxonaEngine extends DHT {
     const roots = new Set(), subaxons = new Set();
     if (topicBig == null) return { edges: [], roots, subaxons, depth: 0 };
     const roleByBig = new Map();
-    const allEdges = [];   // [parentId, childId, isSubaxon] across every role.children
+    const allEdges = [];   // [parentId, childId(BigInt), isSubaxon]
+    // Routing-only kernel (v3.12+): a relay's role holds `subscribers` (a Map of
+    // ALL direct attachments — leaves AND child relays = the delivery edges) and
+    // `children` (a Set of just the child-relay ids = the backbone). Keys are
+    // 66-char lowercase hex; convert to the BigInt the node map / XOR use.
+    const toBig = (hex) => { try { return BigInt('0x' + hex); } catch { return null; } };
     for (const [pid, peer] of this._peers) {
       const role = peer._axonaManager?.axonRoles?.get(topicBig);
       if (!role) continue;
       roleByBig.set(pid, role);
       if (role.isRoot || role.isInRootSet) roots.add(pid);
-      for (const [childId, meta] of (role.children ?? new Map())) {
-        allEdges.push([pid, childId, !!meta?.isSubaxon]);
-        if (meta?.isSubaxon) subaxons.add(childId);
+      const backbone = (role.children instanceof Set) ? role.children : new Set();
+      const subscribers = (role.subscribers instanceof Map) ? role.subscribers.keys() : [];
+      for (const childHex of subscribers) {
+        const childBig = toBig(childHex);
+        if (childBig == null) continue;
+        const isSub = backbone.has(childHex);     // a child RELAY (backbone), not a leaf
+        allEdges.push([pid, childBig, isSub]);
+        if (isSub) subaxons.add(childBig);
       }
     }
 
@@ -900,7 +941,10 @@ export class TransportAxonaEngine extends DHT {
     // (structural hierarchy depth — identical in both edge views)
     const dF = (big, seen) => {
       const r = roleByBig.get(big); if (!r || seen.has(big)) return 1; seen.add(big);
-      let mx = 1; for (const [cb, m] of (r.children ?? new Map())) if (m?.isSubaxon && roleByBig.has(cb)) mx = Math.max(mx, 1 + dF(cb, seen)); return mx;
+      let mx = 1;
+      const kids = (r.children instanceof Set) ? r.children : [];
+      for (const childHex of kids) { const cb = toBig(childHex); if (cb != null && roleByBig.has(cb)) mx = Math.max(mx, 1 + dF(cb, seen)); }
+      return mx;
     };
     let depth = 0; for (const big of roots) depth = Math.max(depth, dF(big, new Set()));
     return { edges, roots, subaxons, depth: depth || (roleByBig.size ? 1 : 0) };
