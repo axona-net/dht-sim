@@ -61,6 +61,55 @@ mean%/distinct-roots/rootmix are the robust signals, not dip/recover).
   set, warm successor) so a single churn doesn't lose the root; (iii) churn-matched,
   event-driven failover (current 60s renew >> mobile churn).
 
+## Update (2026-06-25, later) — stability-weighted root election
+
+Added `MODE` (baseline | closest | stable | protect | stablehost), Lindy churn,
+and a global age oracle to probe whether electing the root by **stability** (not
+pure XOR-closeness) removes the churn fragility without relays.
+
+| mode | what it does | mean% (relay-poor, 30% Lindy) |
+|---|---|---|
+| baseline | root = XOR-closest terminus (stock) | 50–56 |
+| closest | hint everyone → XOR-closest | 59 |
+| stable | hint everyone → most-stable in K-closest band | **46** (worse) |
+| protect | exempt the natural root from churn | **77** (min 47, root-changes 1) |
+
+**Key finding 1 — a durable root is the cure (protect: 50→77%, thrash 5→1).**
+Root-thrash is the dominant loss; the residual 23% is subscriber churn-in.
+
+**Key finding 2 — you cannot relocate the root by hinting.** `stable` was *worse*
+because the kernel binds `root ≡ XOR-closest terminus`: `_topicDecision` only lets
+a node act as root for a `via[0]=self` message if it ALREADY holds the role, else
+it rerolls to the closest node. So a hint toward a non-closest stable node can't
+make it root — it just adds a popped hop + instability. Electing a stable root
+needs the node to actually HOLD a role (via `host()`) AND be hinted — tested as
+`stablehost` (result: _[fill]_), which is the faithful mechanism using existing
+primitives (no new invariant).
+
+Design model: `axona-docs/architecture/Pubsub-Stability-Root-Election-v0.1.md`.
+
+## Update 2 (2026-06-25) — REPLICATED (5 reps): root election is NO-GO
+
+Single-seed delivery% turned out wildly noisy (protect read 77% one run, 53% the
+next). Replicated, relay-poor, 30% Lindy churn, 5 reps each:
+
+| mode | delivery% | min-floor% | root-changes |
+|---|---|---|---|
+| baseline | 48 ± 8 | 4 | 3.8 ± 2.6 |
+| protect (durable root) | 52 ± 7 | 17 | 1.4 ± 1.0 |
+| stablehost (host+hint mechanism) | 44 ± 1 | 0 | 6.0 ± 1.3 |
+
+**A perfectly stable root barely moves average delivery (48→52%, within sd).** It
+stabilises the root (changes 3.8→1.4) and helps the worst rounds (floor 4→17%), but
+the bulk of the loss is elsewhere → **subscriber churn-in**, not root-thrash. The
+`stablehost` mechanism was *worse*. **Decision: do NOT build stability-weighted root
+election** — eclipse-sensitive invariant change for ~4 pts inside the noise.
+**Pivot → replay-on-join** (reliable history pull on (re)subscribe) + faster
+re-attach. See `axona-docs/architecture/Pubsub-Stability-Root-Election-v0.1.md` §9.
+
+Methodology lesson: single-seed sim deliveries are noise; require REPS≥5 mean±sd
+before any conclusion. (I twice over-claimed off one run before repping.)
+
 ## Caveats / next
 
 - Churn of 15–50%/round (~3s rounds) is a stress ceiling, not a forecast. Relative
