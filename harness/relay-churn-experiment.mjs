@@ -43,6 +43,9 @@ const REFRESH  = +(process.env.REFRESH || 1200);
 const SETTLE   = +(process.env.SETTLE || 3500);
 const ROUND_SETTLE = +(process.env.ROUND_SETTLE || 3200);
 const DELIVER  = +(process.env.DELIVER || 1500);
+// A subscriber younger than CONVERGE_MS at publish time hasn't had time to attach
+// → a miss is "join-related" (recoverable by replay-on-join). Older = "root/mesh".
+const CONVERGE_MS = +(process.env.CONVERGE_MS || 2600);
 const LAT = 38.0, LNG = -77.0;
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 const lc = (h) => String(h).toLowerCase().replace(/^0x/, '');
@@ -96,6 +99,22 @@ async function wireInto(p, liveNodes, byBig) {
     const t = byBig.get(peerBig);
     if (t) { try { await p.peer._transport.openConnection(t.hex); } catch { /* */ } }
   }
+}
+
+// Ongoing routing-table maintenance — the harness analog of the kernel's peer
+// learning (gossip / find_closest / dead-peer eviction). Without this, nodes wired
+// once at join accumulate stale synapses as the mesh churns and tenured nodes lose
+// their route to the root — a HARNESS artifact, not a protocol property. Prune dead
+// synapses on every live node, then re-wire toward the current live K-closest.
+// (Optimistic: instant perfect re-learning → an upper bound on maintenance quality.)
+const MAINTAIN = (process.env.MAINTAIN ?? '1') !== '0';
+async function maintainMesh(byBig) {
+  if (!MAINTAIN) return;
+  const live = [...byBig.values()];
+  for (const p of live) {
+    for (const peerBig of [...p.node.synaptome.keys()]) if (!byBig.has(peerBig)) p.node.synaptome.delete(peerBig);
+  }
+  for (const p of live) await wireInto(p, live, byBig);
 }
 
 function rootsOf(live, topicBig) {
@@ -164,7 +183,13 @@ async function runCondition(mode, R, churn) {
   for (const p of all) p.am?.start?.();
 
   const recv = new Map();
-  const subscribe = async (p) => { if (!recv.has(p.hex)) recv.set(p.hex, new Set()); await p.peer.sub(topic, (env) => { if (env?.msgId) recv.get(p.hex).add(String(env.msgId)); }); };
+  const subAt = new Map();   // hex -> when this peer (re)subscribed
+  const subscribe = async (p) => { if (!recv.has(p.hex)) recv.set(p.hex, new Set()); subAt.set(p.hex, Date.now()); await p.peer.sub(topic, (env) => { if (env?.msgId) recv.get(p.hex).add(String(env.msgId)); }); };
+  // re-seat: re-issue the subscribe (re-home at the CURRENT root) WITHOUT resetting
+  // tenure — simulates fast event-driven re-home. REHOME=1 re-seats all live subs each
+  // round; this sizes the "keep subscribers seated" fix against the orphaning loss.
+  const REHOME = process.env.REHOME === '1';
+  const reseat = async (p) => { try { await p.peer.sub(topic, (env) => { if (env?.msgId) recv.get(p.hex)?.add(String(env.msgId)); }); } catch { /* */ } };
   const subSet = subs.slice(0, SUBS);
   for (const p of subSet) { await subscribe(p); await wait(3); }
 
@@ -191,8 +216,12 @@ async function runCondition(mode, R, churn) {
   const rows = [];
   const seenRoots = new Set();
   let prevRootHex = null;
+  // miss classification accumulators
+  let missJoin = 0, missRoot = 0, recvN = 0, recvTenSum = 0, missTenSum = 0, missN = 0, noRootRounds = 0;
+  let missSeated = 0, missOrphan = 0;   // seated-but-missed (routing) vs not-seated (orphaned)
   for (let round = 0; round < ROUNDS; round++) {
     const id = String(await pub.peer.pub(topic, `r${round}`, { signWith: pub.author }));
+    const tPub = Date.now();
     await wait(DELIVER);
     const liveSubs = subSet.filter(s => byBig.has(s.big));
     const delivered = liveSubs.filter(s => recv.get(s.hex)?.has(id)).length;
@@ -206,6 +235,24 @@ async function runCondition(mode, R, churn) {
     if (rootHex) seenRoots.add(rootHex);
     rows.push({ round, live: liveSubs.length, pct: pct.toFixed(0), nRoots: rs.length, rootClass, changed: rootHex !== prevRootHex });
     prevRootHex = rootHex;
+
+    // classify each live subscriber's outcome by tenure at publish time.
+    if (rs.length === 0) noRootRounds++;
+    // DIRECT cause probe: is the subscriber actually SEATED in the primary root's
+    // subscriber set right now? not-seated = orphaned (root changed / never re-homed);
+    // seated-but-missed = a routing/delivery failure despite being a known subscriber.
+    const primaryRole = primary?.peer._axonaManager?.axonRoles?.get(topicBig) || null;
+    const seatedOf = (s) => !!primaryRole?.subscribers?.has(s.hex.toLowerCase());
+    for (const s of liveSubs) {
+      const tenure = tPub - (subAt.get(s.hex) ?? tPub);
+      const got = recv.get(s.hex)?.has(id);
+      if (got) { recvN++; recvTenSum += tenure; }
+      else {
+        missN++; missTenSum += tenure;
+        if (tenure < CONVERGE_MS) missJoin++; else missRoot++;
+        if (seatedOf(s)) missSeated++; else missOrphan++;   // the definitive split
+      }
+    }
 
     if (churn > 0 && round < ROUNDS - 1) {
       let liveNow = subs.filter(s => byBig.has(s.big));
@@ -232,7 +279,12 @@ async function runCondition(mode, R, churn) {
         np.am?.start?.();
         subSet.push(np); await subscribe(np);
       }
+      await maintainMesh(byBig);   // keep existing nodes' routing tables fresh (kernel peer-learning analog)
       await reElect();   // re-elect R* over the new live set + re-host/re-hint
+      // THE FIX UNDER TEST: re-seat every live subscriber at the current root each
+      // round (fast event-driven re-home), so root changes / renewal lapses don't
+      // orphan tenured subscribers. Sizes the "keep subscribers seated" win.
+      if (REHOME) for (const s of subSet.filter(x => byBig.has(x.big))) await reseat(s);
     }
     await wait(ROUND_SETTLE);
   }
@@ -242,7 +294,8 @@ async function runCondition(mode, R, churn) {
   const min  = Math.min(...pcts);
   const rootChanges = Math.max(0, rows.filter(r => r.changed).length - 1);
   const rootMix = rows.reduce((m, r) => (m[r.rootClass] = (m[r.rootClass] || 0) + 1, m), {});
-  return { mode, R, churn, rows, mean, min, distinctRoots: seenRoots.size, rootChanges, rootMix };
+  return { mode, R, churn, rows, mean, min, distinctRoots: seenRoots.size, rootChanges, rootMix,
+           missJoin, missRoot, missN, recvN, recvTenSum, missTenSum, noRootRounds, missSeated, missOrphan };
 }
 
 const REPS = +(process.env.REPS || 1);
@@ -251,20 +304,30 @@ const sd  = (a) => { if (a.length < 2) return 0; const m = avg(a); return Math.s
 const agg = [];
 for (const mode of MODES) for (const cond of MATRIX) {
   process.stdout.write(`\n### mode=${mode}  relays=${cond.relays}  churn=${(cond.churn*100).toFixed(0)}%/round (${CHURN_MODEL})  reps=${REPS} ###\n`);
-  const means = [], mins = [], rchanges = [], droots = [];
+  const means = [], mins = [], rchanges = [];
+  let mJoin = 0, mRoot = 0, mTotal = 0, rTenSum = 0, rN = 0, mTenSum = 0, noRoot = 0, roundsTot = 0, mSeated = 0, mOrphan = 0;
   for (let rep = 0; rep < REPS; rep++) {
     const r = await runCondition(mode, cond.relays, cond.churn);
-    means.push(+r.mean); mins.push(+r.min); rchanges.push(r.rootChanges); droots.push(r.distinctRoots);
-    console.log(`  rep ${rep}: mean=${r.mean}% min=${r.min}% root-changes=${r.rootChanges} distinct-roots=${r.distinctRoots}`);
+    means.push(+r.mean); mins.push(+r.min); rchanges.push(r.rootChanges);
+    mJoin += r.missJoin; mRoot += r.missRoot; mTotal += r.missN; mSeated += r.missSeated; mOrphan += r.missOrphan;
+    rTenSum += r.recvTenSum; rN += r.recvN; mTenSum += r.missTenSum; noRoot += r.noRootRounds; roundsTot += r.rows.length;
+    console.log(`  rep ${rep}: mean=${r.mean}% root-changes=${r.rootChanges}  miss seated/orphan=${r.missSeated}/${r.missOrphan}`);
   }
-  agg.push({ mode, R: cond.relays, churn: cond.churn, means, mins, rchanges, droots });
-  console.log(`  → delivery mean ${avg(means).toFixed(0)}% ±${sd(means).toFixed(0)}  (min-floor avg ${avg(mins).toFixed(0)}%)  root-changes ${avg(rchanges).toFixed(1)} ±${sd(rchanges).toFixed(1)}`);
+  const joinShare = mTotal ? (100 * mJoin / mTotal) : 0;
+  agg.push({ mode, R: cond.relays, churn: cond.churn, means, mins, rchanges,
+             joinShare, mJoin, mRoot, mTotal,
+             recvTen: rN ? rTenSum / rN : 0, missTen: mTotal ? mTenSum / mTotal : 0,
+             noRootPct: roundsTot ? 100 * noRoot / roundsTot : 0 });
+  const orphanShare = mTotal ? (100 * mOrphan / mTotal) : 0;
+  console.log(`  → delivery ${avg(means).toFixed(0)}%±${sd(means).toFixed(0)}  root-changes ${avg(rchanges).toFixed(1)}  | misses ${mTotal}: ORPHANED(not-seated-at-root) ${orphanShare.toFixed(0)}% / seated-but-missed ${(100-orphanShare).toFixed(0)}%`);
+  console.log(`     tenure recv/miss(ms): ${(rN ? rTenSum/rN : 0).toFixed(0)} / ${(mTotal ? mTenSum/mTotal : 0).toFixed(0)}`);
+  agg[agg.length-1].orphanShare = orphanShare;
 }
 
 console.log('\n================= SUMMARY (mean ± sd over reps) =================');
-console.log('mode       relays churn  delivery%      min-floor%   root-changes');
+console.log('mode       churn  delivery%     root-chg   miss-split (join/root)   tenure recv/miss(ms)');
 for (const a of agg) {
-  console.log(`${a.mode.padEnd(10)} ${String(a.R).padEnd(6)} ${(String((a.churn*100).toFixed(0))+'%').padEnd(6)} ${(avg(a.means).toFixed(0)+'±'+sd(a.means).toFixed(0)).padEnd(13)}  ${avg(a.mins).toFixed(0).padEnd(11)}  ${avg(a.rchanges).toFixed(1)}±${sd(a.rchanges).toFixed(1)}`);
+  console.log(`${a.mode.padEnd(10)} ${(String((a.churn*100).toFixed(0))+'%').padEnd(6)} ${(avg(a.means).toFixed(0)+'±'+sd(a.means).toFixed(0)).padEnd(12)}  ${avg(a.rchanges).toFixed(1).padEnd(8)}   ${(a.joinShare.toFixed(0)+'% / '+(100-a.joinShare).toFixed(0)+'%').padEnd(22)}   ${a.recvTen.toFixed(0)} / ${a.missTen.toFixed(0)}`);
 }
-console.log(`\nReps average out the heavy subscriber-churn-in noise in delivery%. Trust the mean±sd, not any single run. root-changes is the most stable signal of root-thrash.`);
+console.log(`\nMiss classification (CONVERGE_MS=${CONVERGE_MS}): join-related = the missing subscriber was younger than convergence at publish (recoverable by replay-on-join); root-related = tenured subscriber still missed. If join-share is high AND missed-tenure ≪ received-tenure, subscriber churn-in is the dominant loss and replay-on-join is the lever.`);
 process.exit(0);

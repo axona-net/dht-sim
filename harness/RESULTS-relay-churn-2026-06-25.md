@@ -110,6 +110,34 @@ re-attach. See `axona-docs/architecture/Pubsub-Stability-Root-Election-v0.1.md` 
 Methodology lesson: single-seed sim deliveries are noise; require REPS≥5 mean±sd
 before any conclusion. (I twice over-claimed off one run before repping.)
 
+## Update 3 (2026-06-25) — ROOT CAUSE FOUND + FIX VALIDATED: subscription continuity
+
+Instrumented each missed message: (a) tenure of the missing subscriber, (b) is it
+SEATED in the current root's subscriber set, (c) added per-round routing-table
+maintenance (`MAINTAIN`, the kernel peer-learning analog) to remove a frozen-table
+confound. Findings (relay-poor, 30% Lindy churn, real kernel):
+
+- Maintaining routing tables did **not** help (46% vs frozen 48%) → not a routing-
+  table-staleness problem.
+- **93% of misses are ORPHANED** — the subscriber is NOT in the current root's
+  subscriber set at publish time; only 7% are seated-but-undelivered (true routing).
+  Missers are systematically the *tenured* subscribers (28s vs 8s received).
+- Mechanism: when the root changes (or a renewal lapses), existing subscribers were
+  seated at the OLD root; the new root doesn't know them until they re-home. Fresh
+  (re)subscribers are always seated at the current root → they receive.
+- **FIX VALIDATED (`REHOME`): re-seat every live subscriber at the current root each
+  round → delivery 41% → 91%±7**, misses 726 → 107, with root-thrash *unchanged/higher*
+  (5.7 vs 4.7). The win is 100% subscription continuity, 0% root stabilization.
+
+**The lever is keeping subscribers seated across root change — NOT root election, NOT
+relays, NOT stable routing tables.** Kernel directions (all low-risk, no eclipse/
+invariant change): (1) event-driven re-home — a subscriber re-subscribes to the
+current root immediately on a root-change signal (the v4.1 root beacon already names
+the root) instead of waiting for the `renewMs=60s` tick (≫ churn); (2) root-side
+subscriber-set handoff on promotion (transfer subscribers to the successor, like
+stamped-replay-up transfers history); (3) shorter renewMs. Caveat: `REHOME` re-seats
+every ~4.7s (optimistic/periodic); event-driven would target the change moment.
+
 ## Caveats / next
 
 - Churn of 15–50%/round (~3s rounds) is a stress ceiling, not a forecast. Relative
