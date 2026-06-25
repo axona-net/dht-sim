@@ -74,7 +74,11 @@ async function makePeer(network, domain, role) {
   const peer = new AxonaPeer({ domain, node, nodeIdentity: identity, transport });
   await peer.start();
   const am = peer._requireAxonaManager?.('exp-init');
-  if (am) am.refreshIntervalMs = REFRESH;
+  // RENEW = the re-subscribe gate (renewMs). It IS the orphan window: a subscriber
+  // re-homes after a root change only when it renews. Default 60s in prod. Lowering
+  // it is the real churn fix (the v0.1 §21 "event-driven via beacon" idea can't reach
+  // the tree — sub-axons/leaves have random ids, outside the topic's beacon basin).
+  if (am) { am.refreshIntervalMs = REFRESH; am.renewMs = +(process.env.RENEW || 60000); }
   return { peer, node, hex: identity.id, big: node.id, role, am, author: null, bornAt: Date.now() };
 }
 
