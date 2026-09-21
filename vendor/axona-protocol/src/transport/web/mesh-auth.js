@@ -46,6 +46,7 @@
 import { buildAuthHello, verifyAuthHello, makeNonce, cbvFromNonces, cbvFromFingerprints, AUTH_PROTO } from '../handshake-auth.js';
 import { signCapAttest, verifyCapAttest, WRITE_FLIGHT_ACK_V1 } from '../../pubsub/capAttest.js';
 import { hexToBytes } from '../../pubsub/ackProof.js';
+import { envStr } from '../../utils/env.js';
 
 /** Symmetric domain-separation tag for the WebRTC-mesh CBV.  MUST be a
  *  constant both endpoints share (see header). */
@@ -202,6 +203,16 @@ export class MeshAuth {
         if (st.peerNodeId && res.nodeId !== st.peerNodeId) {
           this._log('auth-mesh-id-mismatch', { meshId }); return;
         }
+        // CLOSED-FLEET ALLOWLIST (Part A, level-isolation spec v2; David-approved testnet
+        // build). Admit only a proven identity that is on the run's allowlist. Absent
+        // FLEET_ALLOWLIST = dormant (allow-all), so prod/normal runs are byte-identical.
+        try {
+          const _al = envStr('FLEET_ALLOWLIST');
+          if (_al) {
+            const _set = new Set(_al.split(',').map((s) => s.trim()).filter(Boolean));
+            if (_set.size && !_set.has(res.nodeId)) { this._log('auth-mesh-not-allowlisted', { meshId, peer: res.nodeId }); return; }
+          }
+        } catch { /* no process.env (pure browser) */ }
         // Symmetric per-channel key = the sorted nonce pair.  Both endpoints
         // hold the same two nonces, so this string is IDENTICAL on each side
         // of a given channel — letting the transport deterministically pick

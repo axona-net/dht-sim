@@ -159,20 +159,17 @@ export const wireHandlersMethods = {
       if (idBig(via[0]) === this.nodeId) return this.axonRoles.has(idBig(payload.topicId)) ? 'handle' : 'reroute';
       return meta.isTerminal ? 'reroute' : 'forward';      // waypoint dead; I'm just closest to it
     }
-    // Bare topic id → only the terminus handles. REGION RULE: a topic may only be
-    // rooted by a node IN ITS REGION. If I'm the routing terminus but out-of-region,
-    // the topic's region has no node — REFUSE rather than root it here (which would
-    // pull a foreign region's traffic into mine and hotspot my region). The handlers
-    // treat 'reject' as "drop, don't seat/store/root."
+    // Bare topic id → only the terminus handles. The closest reachable node roots
+    // the topic whatever its region — region is a placement hint folded into the id,
+    // never an eligibility gate.
     if (!meta.isTerminal) return 'forward';
-    return this._regionOk(idBig(payload.topicId)) ? 'handle' : 'reject';
+    return 'handle';
   },
 
   // ── SUBSCRIBE ────────────────────────────────────────────────────────
-  _onSub(payload, meta) {
+  async _onSub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -199,7 +196,23 @@ export const wireHandlersMethods = {
       // roots on its own publish and serves its local subscriber.
       if (idBig(lc(payload.subscriberId)) === this.nodeId && this._rootClaim.meshBare()) return 'consumed';
     }
-    let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'sub-terminal');
+    let role = this.axonRoles.get(topicBig);
+    if (!role) {
+      // Synchronous terminal verification (council 2026-08-30, gated). Before a
+      // greedy terminal crowns itself sub-terminal, confirm origin-independently
+      // that it is genuinely closest. A strictly-closer reachable node → attach
+      // there (the proven beacon-defer path, source now the iterative oracle
+      // instead of a beacon). Timeout/inconclusive → FAIL CLOSED: hold the seat
+      // (mySubscriptions is set, so the renewal retries) and never self-root a
+      // local minimum. Flag OFF → byte-identical to the prior line.
+      if (this._subTerminalVerify) {
+        const verdict = await this._verifyTerminalOwnership(topicBig);
+        if (verdict.kind === 'closer') { this._deferToRoot(topicBig, T.SUB, payload, verdict.rootHex); return 'consumed'; }
+        if (verdict.kind !== 'self') return 'consumed';   // inconclusive → fail closed, renewal retries
+        // 'self' → verified local ownership → fall through to self-root
+      }
+      role = this._becomeRoot(topicBig, 'sub-terminal');
+    }
     if (!role) {
       // Admission refused (bridge fence) — do not seat here. This used to return
       // silently, which is the SAME missing concept as the PUB loop wearing the
@@ -250,7 +263,6 @@ export const wireHandlersMethods = {
   _onUnsub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.UNSUB, payload); return 'consumed'; }
     const role = this.axonRoles.get(idBig(payload.topicId));
     if (role) { const s = lc(payload.subscriberId); role.subscribers.delete(s); role.children.delete(s); role.sync.pulledLw.delete(s); }
@@ -305,13 +317,11 @@ export const wireHandlersMethods = {
   // ≥2 leaves. Returning false tells _accept to deepen (delegate to a child)
   // instead of seating the newcomer over capacity.
   _promoteChild(role) {
-    // REGION RULE: the tree's relay infrastructure must be IN-REGION. Only promote
-    // an in-region leaf to a child relay; foreign leaves stay as direct leaves of
-    // the root (they still receive, they just never relay for a region not theirs).
+    // Any leaf may be promoted to a child relay — region is not an eligibility
+    // predicate (it is only a placement hint folded into the id).
     const leaves = [];
     for (const s of role.subscribers.keys()) {
       if (role.children.has(s)) continue;
-      if (!this._regionOk(idBig(s))) continue;   // out-of-region subscriber: never a relay child (when region lock on)
       leaves.push(s);
     }
     if (leaves.length < 2) return false;
@@ -337,10 +347,6 @@ export const wireHandlersMethods = {
   _onAdopt(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // routed to me specifically
     const topicBig = idBig(payload.topicId);
-    // REGION RULE: never become a child relay for a topic outside my region (the
-    // tree infrastructure is region-homogeneous). A correct parent won't delegate
-    // here, but refuse defensively so a stale/foreign ADOPT can't spill the tree.
-    if (!this._regionOk(topicBig)) return 'consumed';
     const role = this._rootClaim.adoptChild(topicBig, lc(payload.parent));
     for (const s of (Array.isArray(payload.subs) ? payload.subs : [])) {
       const sh = lc(s.subscriberId);
@@ -355,7 +361,6 @@ export const wireHandlersMethods = {
   async _onPub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -400,8 +405,10 @@ export const wireHandlersMethods = {
   async _ingestPublish(role, json) {
     let env;
     try { env = JSON.parse(json); } catch { this._log('warn', 'drop-unparseable'); return { ok: false, reason: 'unparseable' }; }
+    this._latStage(env?.msgId, 'root:recv');
 
     const v = await verifyEnvelope(env);                                 // B-4 sig + msgId
+    this._latStage(env?.msgId, 'root:verified');
     if (!v.ok) { this._log('warn', 'drop-bad-envelope', { reason: v.reason }); return { ok: false, reason: 'bad-envelope' }; }
     const fr = checkFreshness(env, { now: this._now() });                 // C-2 freshness (live ingress)
     if (!fr.ok) { this._log('warn', 'drop-stale', { reason: fr.reason }); return { ok: false, reason: 'stale' }; }
@@ -410,7 +417,20 @@ export const wireHandlersMethods = {
     let tid;
     try { tid = await deriveTopicIdBig({ region: desc.region, owner: desc.owner, name: desc.name, write: desc.write }); }
     catch { this._log('warn', 'drop-bad-descriptor'); return { ok: false, reason: 'bad-descriptor' }; }
-    if (tid !== role.topicId) { this._log('warn', 'drop-topic-mismatch'); return { ok: false, reason: 'topic-mismatch' }; }
+    if (tid !== role.topicId) {
+      // Diagnostic detail (GH #26): the bare event can't tell a stale cross-network
+      // kill from a real mismatch. Emit the computed id, the id this root actually
+      // holds, the full descriptor that produced the computed id, and the msgId —
+      // enough for a publisher to match against their own published-data record
+      // (present → real; absent → a kill from another session/network).
+      this._log('warn', 'drop-topic-mismatch', {
+        computed: tid.toString(16),
+        held: role.topicId.toString(16),
+        region: desc.region, owner: desc.owner, name: desc.name, write: desc.write,
+        msgId: env.msgId
+      });
+      return { ok: false, reason: 'topic-mismatch' };
+    }
     if (desc.write === 'owner' && (!env.signerPubkey || lc(env.signerPubkey) !== lc(desc.owner))) {
       this._log('warn', 'drop-write-policy', { topic: desc.name }); return { ok: false, reason: 'write-policy' };
     }
@@ -436,11 +456,14 @@ export const wireHandlersMethods = {
     // The DURABILITY obligation opens at the stamp and can only be discharged
     // by a cohort verdict below. The DELIVERY leg is _pendingPub and moves
     // independently — that separation is the whole point (Aster, seq 123).
-    this._durability.open(env.msgId, role.topicId);
+    this._durability.open(role, env.msgId);
     // rootReplicas = 0 means cohort replication is NOT configured, so the gate
     // below never runs and nothing could ever discharge this entry. Choose the
     // terminal state explicitly rather than leaving it pending forever.
-    if (!this._rootReplicas) this._durability.noCohortConfigured(env.msgId);
+    if (!this._rootReplicas) this._durability.noCohortConfigured(role, env.msgId);
+    this._latStage(env.msgId, 'root:fanout');
+    this._rootOrigin(env.msgId, role.epoch);   // publish-time origin-root identity (Aster c755397a)
+    if (this._latTrace) this._disc(role.topicId, 'root-members', { msgId: env.msgId, n: role.subscribers.size, members: [...role.subscribers.keys()].map((k) => String(k).slice(0, 12)) });
     this._fanout(role, msg, null);                                       // to subscribers
     // local app (if subscribed)
     //
@@ -490,7 +513,7 @@ export const wireHandlersMethods = {
         // the periodic path retries. Nothing is silently swallowed; it is simply not
         // counted as an attempt that happened.
         .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0,
-                         dispatched: false, snapshot: false, noCohort: false,
+                         dispatched: false, snapshot: false, noCohort: false, failures: [],
                          reason: String(e?.message || e) }));
       // v4.58.0 FAIL-CLOSED. Confirm requires POSITIVE evidence: attempted > 0
       // demands verified > 0. The previous gate also required unreported === 0,
@@ -508,10 +531,12 @@ export const wireHandlersMethods = {
       // written by me one commit after "capability is DECLARED, never inferred", which
       // is how deeply the habit runs. recordOne shares _classify with the periodic
       // path, so the two callers cannot drift and neither can restate the rule wrong.
-      this._durability.recordOne(env.msgId, rep);
+      this._durability.recordOne(role, env.msgId, rep);
       if (rep.attempted > 0 && rep.verified === 0) {
         this._log('warn', 'pubsub:replicate-all-failed', {
-          topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
+          topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted,
+          failed: rep.failed, unsupported: rep.unsupported, violation: rep.violation,
+          targets: rep.failures,   // [{id,v}] — WHO the push failed to + its dispatch verdict (attribution: reach/contract, and which cohort members)
         });
         // INGEST happened (cached, stamped, fanned) — the ack below still
         // fires; durability is the cohort's job and the tick keeps retrying
@@ -813,6 +838,7 @@ export const wireHandlersMethods = {
         if (s) s.interval = this.renewFastMs;
       }
       this._upstream.set(topicBig, [fromHex]);
+      this._disc(topicBig, 'sub-root', { root: fromHex ? String(fromHex).slice(0, 12) : null });
     }
 
     const role = this.axonRoles.get(topicBig);        // set iff I'm a relay → re-fan
@@ -833,6 +859,7 @@ export const wireHandlersMethods = {
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
         this._fanout(role, m, lc(payload.from));       // exclude the sender (m carries seq)
       }
+      this._edgeRecv(m.msgId, lc(payload.from));   // edge-join receipt: from=upstream sender, to=self (Aster c755397a)
       this._deliverToApp(topicBig, m.json, m.msgId, m.publishTs, m.seq);
     }
     return 'consumed';
@@ -841,6 +868,9 @@ export const wireHandlersMethods = {
   // Fan a stamped message to every subscriber (optionally excluding the sender).
   _fanout(role, msg, excludeHex) {
     const base = { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [msg] };
+    // Publish-time expectation ledger (DRAFT, gated) — record the believed
+    // recipient/lease set BEFORE the sends, at every fanning node. See _fanoutLedger.
+    if (this._latTrace) this._fanoutLedger(role, msg?.msgId, excludeHex);
     for (const subHex of role.subscribers.keys()) {
       if (excludeHex && subHex === excludeHex) continue;
       this._route(idBig(subHex), T.DELIVER, { ...base });
@@ -931,7 +961,7 @@ export const wireHandlersMethods = {
     // A retracted message has no durability obligation left. Cancel it BEFORE
     // the tombstone/fan-out work below, so no retry can outlive the retraction
     // (Aster: the kill must cancel atomically and preserve the tombstone).
-    this._durability?.cancel(target);
+    this._durability?.cancel(role, target);
     const killTs = m.killTs ?? this._now();
     const seq = m.seq;                                 // root-assigned dense counter for this kill
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)
@@ -989,11 +1019,13 @@ export const wireHandlersMethods = {
         // effect, so a tombstone whose every replication push failed must not
         // report durable either.
         this._replicateRole(topicBig, role, bridge, this._now())
-          .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, reason: String(e?.message || e) }))
+          .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, failures: [], reason: String(e?.message || e) }))
           .then((rep) => {
             if (rep.attempted > 0 && rep.verified === 0) {
               this._log('warn', 'pubsub:kill-replicate-all-failed', {
-                topic: idHex(topicBig).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
+                topic: idHex(topicBig).slice(0, 12), attempted: rep.attempted,
+                failed: rep.failed, unsupported: rep.unsupported, violation: rep.violation,
+                targets: rep.failures,
               });
               return;                 // leave pending → the killer keeps retrying
             }
@@ -1011,7 +1043,6 @@ export const wireHandlersMethods = {
   async _onKill(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.KILL, payload); return 'consumed'; }
     const topicBig = idBig(payload.topicId);
     // Root-beacon last-mile correction (KILL) — same one-shot semantics as PUB:
@@ -1075,7 +1106,6 @@ export const wireHandlersMethods = {
   _onTouch(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.TOUCH, payload); return 'consumed'; }
     return 'consumed';
   },
@@ -1102,7 +1132,6 @@ export const wireHandlersMethods = {
     }
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.PULL, payload); return 'consumed'; }
     // Terminus (root/closest) fall-through: answer if we hold it, else a genuine null.
     const hit = role ? (payload.postHash ? role.cache.find(c => c.msgId === payload.postHash) : role.cache[role.cache.length - 1]) : null;
@@ -1189,7 +1218,6 @@ export const wireHandlersMethods = {
     const now = this._now();
     const d = this._topicDecision(payload, meta);
     if (d === 'reroute') { this._reroute(T.METRICSON, payload); return 'consumed'; }
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: no in-region root to arm a metrics lease on
     if (d === 'handle') {
       // Root-beacon last-mile correction (METRICSON): a metrics lease must arm
       // the TRUE root, not mint a competing one at a near-miss node.

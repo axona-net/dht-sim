@@ -45,13 +45,11 @@
 // fan-out, root sets, the old recruit/adopt/promote/dissolve + msgsync/kill-sync.
 // =====================================================================
 
-import { extractS2Prefix }   from '../utils/hexid.js';
 import { RootClaim, roleNature } from './rootClaim.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
-import { DurabilityLedger } from './durability.js';
-import { isRegionLockEnforced as _regionLock,
-         T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
+import { RoleScopedDurability } from './durability.js';
+import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          CACHE_BYTES, MAX_DIRECT, MAX_VIA, VIA_HOP_BUDGET, BEACON_MS,
          BEACON_FANOUT, BEACON_LAYERS, PENDING_PUB_TTL_MS, COLD_BURST_TRIES,
          COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES,
@@ -60,7 +58,7 @@ import { isRegionLockEnforced as _regionLock,
          METRICS_COALESCE_MS,
          MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
-         TICK_LAG_WINDOW, OBLIGATIONS } from './constants.js';
+         TICK_LAG_WINDOW, OBLIGATIONS, ROUTE_FAIL_TRACK_MAX } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -70,13 +68,13 @@ import { writeFlightMethods }   from './writeFlight.js';
 import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 import { shadowEnabled } from '../registry/index.js';
+import { envNum, envStr } from '../utils/env.js';
 
 // Constants, wire types, and the region-lock switch live in constants.js
 // (refactor Phase 2); the caps and region-lock functions are re-exported here
 // unchanged — AxonaPeer, std/chunk, and src/index.js import them from this
 // module as the stable surface.
-export { MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES,
-         configureRegionLock, isRegionLockEnforced } from './constants.js';
+export { MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES } from './constants.js';
 
 
 
@@ -183,13 +181,29 @@ export class AxonaManager {
     // the latch findable in the first place.
     this._tickLagPeak = 0;
     this._logSink = (typeof emitLog === 'function') ? emitLog : null;
+    this._latTrace = (typeof process !== 'undefined' && process.env && process.env.LAT_TRACE === '1'); // per-stage latency trace (diagnostic, no-op off)
+    // Synchronous terminal self-root verification (council-ratified fix, David
+    // 2026-08-30). ROLLOUT GATE, default OFF → _onSub is byte-identical to today.
+    // ON: before a SUB self-roots at a greedy terminal, an origin-independent
+    // bounded lookup must prove local ownership or a strictly-closer reachable
+    // node; on timeout/inconclusive it FAILS CLOSED (holds, renewal retries) and
+    // never self-roots on a local minimum. Remove the gate once armed + validated.
+    this._subTerminalVerify = (typeof process !== 'undefined' && process.env && process.env.SUB_TERMINAL_VERIFY === '1');
 
     // DURABILITY — the second state machine (Aster, council 2026-08-01). Kept in
     // its own module with its own vocabulary because the defect it replaces was
     // one flag carrying two facts: _deliverToApp confirmed the pending entry, so
     // observing DELIVERY discharged DURABILITY. Nothing on the delivery path can
     // reach 'verified' — there is deliberately no function here for it to call.
-    this._durability = new DurabilityLedger({ now });
+    // Per-Role durability (GH #26, council-unanimous): obligations live ON each
+    // Role (role.durability); this facade routes mutations there, enforces the
+    // node budget, and aggregates observationally. Lazy role closures — axonRoles
+    // is initialized below and only read at call time.
+    this._durability = new RoleScopedDurability({
+      now,
+      roles: () => (this.axonRoles ? this.axonRoles.values() : []),
+      roleFor: (t) => this.axonRoles?.get(t) ?? null,
+    });
 
     // REF-1.1 S2.0c Phase 3 — DEFAULT-OFF shadow wiring of the accepted tombstone
     // authorization core (src/pubsub/tombstoneAuth.js). When the flag is set, ONE
@@ -235,7 +249,31 @@ export class AxonaManager {
     this.renewFastMs = renewFastMs;      // adaptive floor
     this.dropMs    = dropMs;
     this.maxDirect = maxDirect || MAX_DIRECT;
+    // Process-generation nonce (Aster c6202ccb): a per-manager-instance id stamped on
+    // every LAT_TRACE receipt/ledger row so the analyzer can filter to the CURRENT
+    // process generation and not mix collected rows across relay restarts (the
+    // win-164-pids issue). node-only concern (LAT_TRACE relays); guarded for browsers.
+    try { this._procNonce = `${(typeof process !== 'undefined' && process.pid) || 0}-${Date.now()}`; } catch { this._procNonce = String(Date.now()); }
+    // TRANSITION LEDGER (Part B, level-isolation build spec v2; David-approved testnet
+    // build 2026-09-01). Run/epoch frame stamped on every ledger row so the analyzer can
+    // scope to one closed-fleet arm and close an epoch on any membership change. Values
+    // are harness-provided per arm (env), null when unset. LAT_TRACE-gated like every
+    // other stamp — no-op / byte-identical when the flag is off.
+    this._runId = envStr('RUN_ID');
+    this._membershipEpoch = envStr('MEMBERSHIP_EPOCH');
+    this._membershipDigest = envStr('MEMBERSHIP_DIGEST');
+    this._ledgerSeq = 0;   // monotonic per-process ledger sequence (feeds the completeness manifest)
+    this._nodeStartEmitted = false;   // node-start census row emitted once (David 2026-09-01)
     this.refreshIntervalMs = refreshIntervalMs;
+    // SUBSCRIBER-LIST REPLICATION (delivery fix, David 2026-09-02; council out,
+    // David-authorized direct). DEFAULT ON. The measured loss is the post-migration
+    // ORPHAN WINDOW: a warm backup inherits the CACHE (root:recv ~1ms) but NOT the
+    // dead root's SUBSCRIBER LIST, so on promotion it has an EMPTY fanout and the
+    // orphaned readers wait ~9s to be re-adopted (95.5% of misses). This ships the
+    // subscriber/children list on REPLICATE full-pushes; a promoted backup seeds its
+    // fanout from the inherited list and replays the cache to them → orphan window ~0.
+    // REPLICATE_SUBS=0 disables (A/B baseline).
+    this._replicateSubs = !(typeof process !== 'undefined' && process.env && process.env.REPLICATE_SUBS === '0');
     this._cacheMax   = replayCacheSize || CACHE_MAX;
     this._cacheBytes = replayCacheBytes || CACHE_BYTES;
     this._rootReplicas = Number.isFinite(rootReplicas) ? Math.max(0, rootReplicas) : ROOT_REPLICAS;
@@ -318,10 +356,43 @@ export class AxonaManager {
     try {
       return Promise.resolve(
         this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET }),
-      ).catch(fail);
+      ).catch(fail).then((r) => this._tallyRoute(targetBig, r));
     } catch (e) {
-      return Promise.resolve(fail(e));   // synchronous throw out of routeMessage
+      return Promise.resolve(this._tallyRoute(targetBig, fail(e)));   // synchronous throw out of routeMessage
     }
+  }
+
+  // OBSERVABILITY (#58 D3): routing reports failure by RESOLVING {consumed:false}
+  // and emits nothing, so "no routed-failure lines" means UNLOGGED, not no
+  // failures — reachability by routing was unmeasurable in production. This is
+  // the single containment point every routed send already passes through, so
+  // the tally is exact and costs one branch.
+  //
+  // COUNTS ONLY, REPORTED IN BULK. A line per failure would flood: a node that
+  // cannot reach a nominee retries it every tick. repairPlane emits one summary
+  // per tick and only when something failed (see _reportRouteOutcomes).
+  // Verdict shape is routing's own, unchanged; this reads it and returns it
+  // untouched, so no caller's contract moves.
+  _tallyRoute(targetBig, r) {
+    try {
+      const s = (this._routeStats ??= { ok: 0, fail: 0, by: new Map() });
+      // A non-reporting adapter resolves undefined/a push count — that is NOT a
+      // failure verdict and must not be counted as one (the 4.58.0 lesson: only
+      // an EXPLICIT verdict is evidence either way).
+      if (r && typeof r === 'object' && typeof r.consumed === 'boolean') {
+        if (r.consumed) { s.ok++; return r; }
+        s.fail++;
+        const k = idHex(targetBig).slice(0, 12);
+        s.by.set(k, (s.by.get(k) || 0) + 1);
+        // Bound the map: a churning mesh must not grow it without limit.
+        if (s.by.size > ROUTE_FAIL_TRACK_MAX) {
+          let worst = null, worstN = Infinity;
+          for (const [id, n] of s.by) if (n < worstN) { worstN = n; worst = id; }
+          if (worst !== null) s.by.delete(worst);
+        }
+      }
+    } catch { /* observability must never break routing */ }
+    return r;
   }
   // Pop a dead waypoint and keep routing. When the via chain empties, _send
   // falls through to the TOPIC ID — that is deliberate and load-bearing: it is
@@ -371,21 +442,6 @@ export class AxonaManager {
     this._log('warn', 'undeliverable', { topic: idHex(topicBig).slice(0, 12), type, why });
   }
 
-  // True iff a topic (or any id) shares this node's region byte (S2 prefix). The
-  // region byte is the high byte of every 264-bit id; only same-region nodes may
-  // form a topic's axon-tree infrastructure (root + child relays).
-  _sameRegion(idBigVal) {
-    try { return extractS2Prefix(idBigVal) === extractS2Prefix(this.nodeId); }
-    catch { return false; }
-  }
-
-  // The region GATE used by every enforcement site. When the region lock is off
-  // (default, pre-critical-mass) this is always true → an out-of-region node may
-  // root/relay/host any topic (nearest node wins, pre-4.13.0 behavior). When on,
-  // it collapses to the strict same-region check.
-  _regionOk(idBigVal) {
-    return !_regionLock() || this._sameRegion(idBigVal);
-  }
 
   // ── Axonic admission control (v4.46.0) ─────────────────────────────────
   // ONE gate, THREE reasons, TWO tiers. The neuromorphic layer has had the
@@ -693,6 +749,64 @@ export class AxonaManager {
     this._send(type, { ...payload, via: [rootHex] });
   }
 
+  // Synchronous terminal-ownership verification (council-ratified, David 2026-08-30).
+  // Origin-independent by construction: it asks the routing "who is genuinely
+  // closest to this topicId?" and never consults where the SUB started. Returns:
+  //   { kind: 'self' }            — verified local ownership → self-root is legal
+  //   { kind: 'closer', rootHex } — a strictly-closer reachable node → attach there
+  //   { kind: 'inconclusive' }    — timeout / no evidence → FAIL CLOSED (Aster):
+  //                                 hold, do NOT self-root; the renewal retries.
+  // Fast path reuses the resolver's fresh cached hint; otherwise a bounded (<=50ms)
+  // single-flight lookup, and on timeout it kicks a background warm so the retry
+  // resolves fast. The iterative lookup is the origin-independent oracle proven by
+  // localmin-probe (all origins converge on one terminus); greedy is not, which is
+  // exactly the local minimum this gate refuses to crown.
+  async _verifyTerminalOwnership(topicBig) {
+    const t0 = this._now();
+    const selfDist = this.nodeId ^ topicBig;
+    const verdict = (kind, rootHex, terminus) => {
+      this._disc?.(topicBig, 'term-verify', { kind, root: rootHex ?? null, terminus: terminus ?? null, ms: this._now() - t0 });
+      return rootHex ? { kind, rootHex } : { kind };
+    };
+    // Fast path: ONLY trust a resolved hint that names a strictly-closer node.
+    // A via=null hint means "resolver's LOCAL findKClosest saw self" — which at a
+    // local minimum is exactly the wrong answer (the network escalation may not
+    // have landed yet). Never infer 'self' from it; verify actively instead.
+    const hint = this._rootHint?.get(topicBig);
+    if (hint && hint.via && (this._now() - hint.at) < this.renewFastMs) {
+      return verdict('closer', lc(hint.via), lc(hint.via));
+    }
+    const canLookup = (typeof this.dht.findKClosest === 'function') || (typeof this.dht.lookup === 'function');
+    if (!canLookup) return verdict('inconclusive');
+    if (!this._termVerifyInflight) this._termVerifyInflight = new Set();
+    if (this._termVerifyInflight.has(topicBig)) return verdict('inconclusive');   // single-flight → hold, renewal retries
+    this._termVerifyInflight.add(topicBig);
+    try {
+      // dht.lookup is the NETWORK iterative that hops relays and escapes the local
+      // synaptome — the true origin-independent oracle. findKClosest is local-only
+      // (returns self at a genuine local minimum in 0ms), so it is only a fast
+      // fallback when the network lookup is unavailable.
+      const probe = (typeof this.dht.lookup === 'function')
+        ? this.dht.lookup(topicBig).then((r) => (r && Array.isArray(r.path) && r.path.length) ? r.path[r.path.length - 1] : null)
+        : this.dht.findKClosest(topicBig, 1).then((a) => (Array.isArray(a) && a.length) ? a[0] : null);
+      const TERM_VERIFY_MS = envNum('TERM_VERIFY_MS', 500);
+      const id = await Promise.race([
+        probe,
+        new Promise((res) => { const t = setTimeout(() => res('__t__'), TERM_VERIFY_MS); if (t && typeof t.unref === 'function') t.unref(); }),
+      ]);
+      if (id === '__t__' || id == null) {
+        if (typeof this.warmRootHint === 'function') this.warmRootHint(topicBig).catch(() => {});
+        return verdict('inconclusive');
+      }
+      let cBig; try { cBig = idBig(id); } catch { return verdict('inconclusive'); }
+      const cHex = lc(idHex(cBig));
+      if (cBig === this.nodeId) return verdict('self', null, cHex);
+      if ((cBig ^ topicBig) < selfDist) return verdict('closer', cHex, cHex);
+      return verdict('self', null, cHex);                                         // nobody strictly closer → legitimate self-root
+    } catch { return verdict('inconclusive'); }
+    finally { this._termVerifyInflight.delete(topicBig); }
+  }
+
   // Forward a one-shot message (PUB/KILL) to the beaconed root and let the
   // VERDICT drive state — the C+D unified transition (council 2026-08-02, seq
   // 146/147, + the atNode amendment). Until v4.59.0 this path was _deferToRoot,
@@ -808,6 +922,7 @@ export class AxonaManager {
   }
 
   _becomeRoot(topicBig, why = 'terminal') {
+    this._disc(topicBig, 'became-root', { why });
     return this._rootClaim.become(topicBig, why);
   }
 
@@ -844,25 +959,142 @@ export class AxonaManager {
     };
   }
 
-  // Subscribe — always sent SYNCHRONOUSLY and immediately (fast path, never blocked
-  // on the network). Pinned (steady state) → via the relay. Unpinned → greedy ([])
-  // toward the bare topic id, every hop routing by its own synaptome.
+  // Subscribe. Pinned (steady state) → renew via the relay, sent immediately.
+  // Unpinned (a fresh or stranded subscriber) → STEER toward the topic-closest
+  // root instead of a bare greedy walk that strands at a local minimum on a
+  // cold/sparse synaptome and replays nothing (measured: fresh since:'all'
+  // ~25-55% vs established 100% — GH #418/#397; cold-subscribe read loss).
   //
-  // NO root-hint via on the unpinned path (v4.64.0). A cached hint pins a waypoint
-  // that was the closest root at ELECTION time; the neuromorphic layer restructures
-  // the mesh continuously, so on resubscribe that waypoint can go from the optimal
-  // path to a poor one — the SUB forced through a node the synaptome has already
-  // routed around. Greedy + synaptome finds the current-best terminal on its own;
-  // trust that. (_rootHint_ still runs its background lookup to warm the WRITE-path
-  // cache — pub/kill/pull/metrics/repair — which is unchanged.)
-  _sendSubscribe(topicBig) {
+  // The v4.64.0 change dropped the root hint from THIS send path (bare greedy
+  // via:[]) on the theory that the synaptome finds the current-best terminal on
+  // its own. On a warm mesh it does; on a COLD one the greedy walk never reaches
+  // the true root, so a fresh subscriber's SUB is never seated and no history is
+  // replayed. Reads have no PENDING_PUB equivalent, so nothing re-sends them.
+  // Two measured recoveries, restored here as one funnel:
+  //
+  //  (a) WARM-HINT FIRST. _rootHint_ background-warms the true-root hint (beacon
+  //      or iterative K-closest). When it has a hint, route the SUB through it —
+  //      synchronously. refreshTick renews unpinned subs every renewFastMs
+  //      (repairPlane §1, `attached ? interval : renewFastMs` → _sendSubscribe),
+  //      so each fast renewal re-routes toward the freshly-resolved root — that
+  //      IS the bounded-read-retry half, no separate retry loop needed.
+  //
+  //  (b) COLD FIRST ATTEMPT, no warm hint yet. Emit the first SUB GREEDY *now*
+  //      (never delayed), THEN run a BOUNDED iterative NETWORK lookup (escapes the
+  //      cold synaptome's local minima — the origin-independent oracle), raced
+  //      against SUB_LOOKUP_MS, and STEER a follow-up SUB toward the resolved root
+  //      if it names a different reachable node. The first SUB is NEVER blocked on
+  //      the lookup: rootElection.js:208 — a SUB that waits on an unbounded lookup
+  //      and misses the join window is never sent → 0% delivery (observed live).
+  //      Emitting greedy first satisfies that invariant unconditionally (the SUB is
+  //      always on the wire immediately); the bounded steer only ADDS reach. An
+  //      earlier draft awaited the lookup BEFORE the first emit — bounded, but it
+  //      still deferred every cold subscribe (including a node subscribing to a
+  //      topic it itself roots) by up to SUB_LOOKUP_MS, a real latency regression.
+  //      Emit-then-steer keeps the first SUB synchronous and reaches the same root.
+  //
+  // Steady state (pinned) is unchanged: no lookup, no hint — renew via the pin.
+  async _sendSubscribe(topicBig) {
     const pinned = this._upstream.get(topicBig) || [];
-    const via = pinned;   // [] when unpinned → greedy toward the topic id
+    let via = pinned;   // [] when unpinned → greedy toward the topic id
+    let steer = false;
+    if (!pinned.length) {
+      // (a) Warm hint (beacon / background-resolved root) — synchronous, if present.
+      const hint = this._rootHint_(topicBig);
+      if (hint) via = [hint];
+      // (b) No warm hint yet → emit greedy now, then steer via a bounded lookup.
+      else if (typeof this.dht.lookup === 'function' || typeof this.dht.findKClosest === 'function') steer = true;
+    }
     const sent = this._emitSubscribe(topicBig, via.slice(0, MAX_VIA));
+    if (steer) this._steerColdSubscribe(topicBig);
     // Only a PINNED renewal can teach us the pin is dead. An unpinned SUB routes
     // toward the topic id itself, and its failure says the mesh is unreachable,
     // not that a waypoint is stale — there is nothing to drop.
     if (pinned.length) this._unpinIfWaypointDead(topicBig, pinned[0], sent);
+  }
+
+  // (b) helper: bounded iterative resolve of the true root for a cold subscribe,
+  // then a follow-up SUB steered toward it. Fire-and-forget from _sendSubscribe so
+  // the first (greedy) SUB is never delayed. Bounded by SUB_LOOKUP_MS. This is the
+  // origin-independent oracle that escapes the greedy local minimum on a cold mesh.
+  //
+  // The greedy first SUB can strand at a spurious terminal that SELF-ROOTS and pins
+  // us to it (the self-root split) — so "am I pinned?" is NOT a sufficient reason to
+  // skip: a pin to a node FARTHER from the topic than the resolved root is exactly
+  // the wrong-root strand we must correct. Steer when unpinned OR when the resolved
+  // root is strictly closer to the topic than our current pin (the root-election
+  // invariant: XOR-closest-to-topic wins). On an idealized/warm mesh the greedy SUB
+  // already reaches the closest node, so b == pin and this is a no-op.
+  _steerColdSubscribe(topicBig) {
+    const SUB_LOOKUP_MS = envNum('SUB_LOOKUP_MS', 600);
+    // Bounded FAST-RETRY burst: the greedy first SUB strands ~60% cold, and a single
+    // steer only covers the case where the lookup resolves on the first try within a
+    // few seconds. refreshTick re-sends unpinned subs only at renewFastMs (~5s), too
+    // slow to beat a fresh reader's window. So burst-retry the resolve+steer at
+    // SUB_RETRY_MS while unattached, up to SUB_RETRY_TRIES — the PENDING_PUB write-path
+    // pattern applied to reads. Cancels the instant a DELIVER pins us (_upstream set)
+    // or the subscription is dropped. Timers unref'd so they never keep the loop alive.
+    const SUB_RETRY_MS = envNum('SUB_RETRY_MS', 1500);
+    const SUB_RETRY_TRIES = envNum('SUB_RETRY_TRIES', 5);
+    // Prefer the iterative NETWORK lookup (crosses the mesh, escapes the cold
+    // synaptome's local minima); fall back to findKClosest. Normalize through
+    // Promise.resolve so an adapter that returns a value SYNCHRONOUSLY (or throws)
+    // is handled identically to an async one — same tolerance _rootHint_ relies on.
+    const resolver = (typeof this.dht.lookup === 'function')
+      ? () => this.dht.lookup(topicBig)
+      : (typeof this.dht.findKClosest === 'function')
+        ? () => this.dht.findKClosest(topicBig, 1)
+        : null;
+    if (!resolver) return;
+    // ONE BUDGET PER COLD CYCLE + GENERATION TOKEN (council bounds, 4.76.1).
+    // repairPlane re-enters _sendSubscribe every renewFastMs (~5s) while a burst still
+    // has retries left — do NOT stack a second steer on a live cycle; the active
+    // bounded budget continues (map presence == a live cycle). A same-topic RESUBSCRIBE
+    // (after unwatch, which eagerly releases the entry) starts a fresh cycle whose gen
+    // obsoletes any late timer still pending from the prior one.
+    if (!this._coldSteerGen) this._coldSteerGen = new Map();
+    if (this._coldSteerGen.has(topicBig)) return;                       // one budget per cold cycle
+    const gen = (this._coldSteerSeq = (this._coldSteerSeq | 0) + 1);
+    this._coldSteerGen.set(topicBig, gen);
+    const mine = () => this._coldSteerGen.get(topicBig) === gen;        // false once superseded/released
+    const release = () => { if (mine()) this._coldSteerGen.delete(topicBig); };
+    const wants = () => this.mySubscriptions.has(topicBig) || this._hostedTopics.has(topicBig) || this._backupTopics.has(topicBig);
+    const reschedule = (n) => {
+      if (n + 1 < SUB_RETRY_TRIES && wants() && mine()) { const t = setTimeout(() => attempt(n + 1), SUB_RETRY_MS); if (t && typeof t.unref === 'function') t.unref(); }
+      else release();                                                   // budget spent / unsubscribed / superseded → free the cycle
+    };
+    const attempt = (n) => {
+      if (!wants() || !mine()) { release(); return; }          // unsubscribed or superseded → stop + free
+      const probe = Promise.resolve().then(resolver).then((r) => {
+        if (r && Array.isArray(r.path)) return r.path.length ? r.path[r.path.length - 1] : null;  // lookup: { path }
+        if (Array.isArray(r)) return r.length ? r[0] : null;                                       // findKClosest: [ids]
+        return null;
+      });
+      Promise.race([
+        probe,
+        new Promise((res) => { const t = setTimeout(() => res(null), SUB_LOOKUP_MS); if (t && typeof t.unref === 'function') t.unref(); }),
+      ]).then((id) => {
+        if (!wants() || !mine()) { release(); return; }
+        let done = false;                                      // DONE = pinned to a node closer-or-equal to the true root (not merely "has a pin" — a pin to a FARTHER decoy is the self-root-split strand we must correct)
+        if (id != null) {
+          try {
+            const b = idBig(id);
+            if (b === this.nodeId) done = true;                // we are the terminus — greedy already lands here
+            else {
+              const pin = this._upstream.get(topicBig) || [];
+              if (pin.length) {
+                let closer = true; try { closer = (b ^ topicBig) < (idBig(pin[0]) ^ topicBig); } catch { closer = true; }
+                if (closer) this._emitSubscribe(topicBig, [lc(idHex(b))]);   // pinned to a FARTHER node → steer toward the true root
+                else done = true;                              // pin already closer-or-equal to the true root → correctly seated
+              } else this._emitSubscribe(topicBig, [lc(idHex(b))]);          // unpinned → steer toward the true root
+            }
+          } catch { /* */ }
+        }
+        if (!done) reschedule(n);                              // timeout/miss/steered → try again until correctly seated or budget spent
+        else release();                                        // correctly seated → free the cycle
+      }).catch(() => reschedule(n));
+    };
+    attempt(0);
   }
 
   // A subscriber must not renew forever toward a corpse.
@@ -978,6 +1210,7 @@ export class AxonaManager {
   // the publish on a slow live-mesh lookup.
   pubsubPublish(topicId, json, meta = {}) {
     const hint = this._rootHint_(topicId);
+    this._disc(topicId, 'pub-root', { hint: hint ? String(hint).slice(0, 12) : null });
     // Retain briefly so a publish that stranded on the greedy walk (hint not yet
     // warm) is re-sent toward the true root the moment the background lookup
     // resolves — a one-shot publish never re-routes on its own, so a cold-hint
@@ -988,6 +1221,7 @@ export class AxonaManager {
     let pmsgId = null; try { pmsgId = JSON.parse(json)?.msgId ?? null; } catch { /* opaque body */ }
     if (pmsgId) this._pendingPub.set(pmsgId, { topicBig: topicId, json, at: this._now(), tries: 0 });
     this._send(T.PUB, { topicId: idHex(topicId), via: hint ? [hint] : [], json });
+    this._latStage(pmsgId, 'pub:send');
     // Early re-sends — ONE plan, ONE pump (v4.25.0, Phase 6): a cold publisher
     // (not yet integrated) front-loads burst waves while its table warms; a WARM
     // first publish to a topic gets one quick re-send so a just-formed tree still
@@ -1030,6 +1264,7 @@ export class AxonaManager {
 
   pubsubUnsubscribe(topicId) {
     this.mySubscriptions.delete(topicId);
+    this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle so a resubscribe starts clean
     const via = this._upstream.get(topicId) || [];
     this._send(T.UNSUB, { topicId: idHex(topicId), via, subscriberId: idHex(this.nodeId) });
     this.pubsubResetTopicConsumption(topicId);
@@ -1086,11 +1321,6 @@ export class AxonaManager {
   }
 
   pubsubHost(topicId) {
-    // REGION RULE backstop (when enforced): a node hosts/roots only topics in its region.
-    if (!this._regionOk(topicId)) {
-      this._log('warn', 'host-refused-foreign-region', { topic: idHex(topicId).slice(0, 12) });
-      return;
-    }
     this._hostedTopics.add(topicId);
     // Participate so the node won't be torn down and can root the topic if closest.
     // Route the announce through _sendSubscribe (lookup-assisted → the true root, and
@@ -1101,6 +1331,7 @@ export class AxonaManager {
   }
   pubsubUnhost(topicId) {
     this._hostedTopics.delete(topicId);
+    this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle
     const role = this.axonRoles.get(topicId);
     if (role) { const me = lc(idHex(this.nodeId)); role.subscribers.delete(me); role.children.delete(me); }
   }
@@ -1120,7 +1351,7 @@ export class AxonaManager {
     this._send(T.KILL, { topicId: idHex(topicId), via: hint ? [hint] : [], kill });
   }
   // pubsubUnpub() — REMOVED v4.3.0 (decision 2026-06-25: keep kill, drop unpub)
-  pubsubTouch(topicId, touch) { this._send(T.TOUCH, { topicId: idHex(topicId), via: [], touch }); }
+  pubsubTouch(topicId, touch) { const hint = this._rootHint_(topicId); this._send(T.TOUCH, { topicId: idHex(topicId), via: hint ? [hint] : [], touch }); }
 
   requestPull(topicId, postHash = null, { timeoutMs = 1000 } = {}) {
     const corrId = idHex(this.nodeId).slice(0, 8) + ':' + (++this._pullSeq);
@@ -1189,6 +1420,7 @@ export class AxonaManager {
     this._upstream.clear();
     this._rootHint.clear();
     this._pendingPub?.clear();
+    this._coldSteerGen?.clear();
     this._lookupInflight?.clear();
     this._rootBeacons.clear();
     this._beaconSeen.clear();
@@ -1201,6 +1433,201 @@ export class AxonaManager {
 
   _log(level, event, ctx) {
     if (this._logSink) { try { this._logSink(level, 'pubsub:' + event, ctx); } catch { /* sink threw */ } }
+  }
+
+  // Per-stage delivery-latency trace (diagnostic, David 2026-08-30). NO-OP unless
+  // LAT_TRACE=1, so the live fleet's behaviour is unchanged. Emits one log per
+  // stage keyed by msgId: t = wall (Date.now, joined across hosts by the harness
+  // offsets), mono = process-local monotonic (exact same-process deltas). The
+  // analyzer reconstructs, per msgId, pub:built → pub:send → root:recv/fanout →
+  // sub:recv → deliver:app → deliver:cb to locate where the 1.7s median lives.
+  _latStage(msgId, stage) {
+    if (!this._latTrace || !msgId) return;
+    this._log('info', 'lat-stage', { msgId, stage, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // Root-registration DISCRIMINATOR (Aster/Vega/Orion, 2026-08-30). Same
+  // LAT_TRACE gate. Captures the SUB-resolved root, PUB-resolved root, self-root
+  // events, and the true root's live fanout membership so the probe can tell
+  // apart the three divergence mechanisms (self-root split / asymmetric greedy
+  // termination / migration without handoff) and prove whether a SUB that
+  // reaches the true root is actually recorded in its fanout.
+  _disc(topicIdBig, event, extra = {}) {
+    if (!this._latTrace) return;
+    let t = null; try { t = topicIdBig?.toString(16)?.slice(0, 12) ?? null; } catch { /* */ }
+    this._log('info', 'disc', { t, ev: event, self: idHex(this.nodeId).slice(0, 12), ...extra });
+  }
+
+  // Paired per-hop DELIVER telemetry (council 73db20f0/e084c12f, David-approved
+  // 2026-09-01). Same LAT_TRACE gate + lat-stage channel as _latStage, so the
+  // relay-disc capture ingests them unchanged. A tx with a matching rx (by
+  // hopAttemptId) crossed the hop; an ok-write tx with NO matching rx is silent
+  // transport loss — the numerator the push-loss diagnosis needs. writeOutcome
+  // segregates local pre-send failure (channel-closed/write-error/no-route) from
+  // that silent loss. hopIdx gives the per-hop denominator so route length is not
+  // inferred from surviving paths (survivorship bias). msgIds bounded for size.
+  _deliverHopTx(msgIds, hopAttemptId, hopIdx, fromHex, toHex, writeOutcome, reason) {
+    if (!this._latTrace) return;
+    this._log('info', 'lat-stage', { stage: 'deliver:hop_tx', hopAttemptId, hopIdx, from: fromHex, to: toHex, writeOutcome, reason: reason ?? null, msgIds, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  _deliverHopRx(msgIds, hopAttemptId, hopIdx, fromHex, toHex) {
+    if (!this._latTrace) return;
+    this._log('info', 'lat-stage', { stage: 'deliver:hop_rx', hopAttemptId, hopIdx, from: fromHex, to: toHex, msgIds, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // EDGE-JOIN RECEIPT (Aster c755397a, David-approved 2026-09-01). The plain sub:recv
+  // proved a node received a message but not WHICH EDGE carried it, so the analyzer
+  // could not separate forwarding loss from tree divergence. This carries the upstream
+  // sender (`from`) and this receiver (`to`), so the ACTUAL delivery graph is
+  // reconstructable and joinable to the fanout-ledger's BELIEVED parent/child edges.
+  // Same LAT_TRACE gate; byte-identical when off.
+  _edgeRecv(msgId, fromHex) {
+    if (!this._latTrace || !msgId) return;
+    this._log('info', 'lat-stage', { stage: 'sub:recv', msgId, from: fromHex ?? null, to: idHex(this.nodeId), proc: this._procNonce, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // PUBLISH-TIME ROOT IDENTITY (Aster c755397a, David-approved 2026-09-01). Emitted by
+  // the node that INGESTS a publish as root — an authoritative, non-inferred binding of
+  // "this node rooted THIS publish" (msgId = H(payload incl nonce), so msgId is the
+  // publish-instance key). Two root:origin rows for one msgId = two nodes independently
+  // rooted the same publish = GENUINE root-set divergence (definitionally same nonce),
+  // distinct from a re-fanout relay reading as rootless. Lets the analyzer report the
+  // distribution of true origin roots per message. Same LAT_TRACE gate.
+  _rootOrigin(msgId, epoch) {
+    if (!this._latTrace || !msgId) return;
+    this._log('info', 'lat-stage', { stage: 'root:origin', msgId, root: idHex(this.nodeId), epoch: Number.isFinite(epoch) ? epoch : null, proc: this._procNonce, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // TRANSITION LEDGER emit (Part B, spec v2). Two independent one-way records the
+  // analyzer joins on (msgId, edgeAttemptId): a SENDER row per intended downstream edge
+  // carrying the queue-boundary timings and the classified outcome, and a RECEIVER row
+  // per arrival. Plus an end-of-run manifest so a missing tail row is distinct from a
+  // lost frame. Every row carries the run/epoch frame + process nonce + a monotonic seq.
+  // This replaces the void-prone tx/rx hop pairing (which conflated send-resolved with
+  // received): here send-outcome is recorded at the sender and arrival is recorded
+  // independently at the receiver, never inferred from the request/reply resolution.
+  _ledgerFrame() {
+    return { runId: this._runId, epoch: this._membershipEpoch, digest: this._membershipDigest,
+             proc: this._procNonce, seq: (this._ledgerSeq = (this._ledgerSeq | 0) + 1) };
+  }
+  // NODE-START census row (David 2026-09-01): a node records the ephemeral transport id
+  // it computed at startup, so the harness harvests the closed-fleet census from the
+  // files the nodes themselves generate — no precomputed keyset and no exception to the
+  // never-persist-transport-id invariant (the id is ephemeral and lives only in this
+  // run's diagnostic ledger). Emitted once, before this process's first ledger row.
+  _nodeStartLedger() {
+    if (!this._latTrace || this._nodeStartEmitted) return;
+    this._nodeStartEmitted = true;
+    this._log('info', 'lat-stage', { stage: 'node-start', transportId: idHex(this.nodeId),
+      runId: this._runId, epoch: this._membershipEpoch, digest: this._membershipDigest,
+      proc: this._procNonce, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+  // Classify a transport.send resolution/rejection into the three send-outcome states
+  // (Aster's review): not-attempted (never hit the wire) / attempted-failed (write
+  // threw) / accepted (write went out — delivered-reply, no-reply, or downstream
+  // handler-error). Rejection reasons come from wstransport (TRANSPORT_*).
+  _txOutcome(ok, err) {
+    if (ok) return { disposition: 'accepted', outcome: 'delivered-reply', reason: null };
+    const m = String((err && (err.code || err.message)) || err || '');
+    if (/NOT_STARTED|CHANNEL_CLOSED/.test(m)) return { disposition: 'not-attempted', outcome: 'channel-unavailable', reason: m };
+    if (/WS write failed/.test(m))            return { disposition: 'attempted-failed', outcome: 'write-failed', reason: m };
+    if (/TIMEOUT/.test(m))                    return { disposition: 'accepted', outcome: 'accepted-no-reply', reason: m };
+    if (/remote handler error/.test(m))       return { disposition: 'accepted', outcome: 'handler-error', reason: m };
+    return { disposition: 'attempted-failed', outcome: 'other', reason: m };
+  }
+  _txLedger(rec) {
+    if (!this._latTrace || !rec || !rec.msgId) return;
+    this._nodeStartLedger();
+    this._log('info', 'lat-stage', { stage: 'tx-ledger', ...this._ledgerFrame(),
+      msgId: rec.msgId, publishNonce: rec.publishNonce ?? null, edgeAttemptId: rec.edgeAttemptId ?? null,
+      ordinal: rec.ordinal ?? 1, from: rec.from ?? idHex(this.nodeId), to: rec.to ?? null,
+      enqueueT: rec.enqueueT ?? null, sendAttemptT: rec.sendAttemptT ?? null,
+      disposition: rec.disposition ?? null, outcome: rec.outcome ?? null, reason: rec.reason ?? null,
+      connId: rec.connId ?? null, hopIdx: rec.hopIdx ?? null,
+      t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+  _rxLedger(rec) {
+    if (!this._latTrace || !rec || !rec.msgId) return;
+    this._nodeStartLedger();
+    this._log('info', 'lat-stage', { stage: 'rx-ledger', ...this._ledgerFrame(),
+      msgId: rec.msgId, publishNonce: rec.publishNonce ?? null, edgeAttemptId: rec.edgeAttemptId ?? null,
+      from: rec.from ?? null, to: idHex(this.nodeId), role: rec.role ?? null, topicId: rec.topicId ?? null,
+      t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+  // End-of-run completeness manifest: first/last seq + count for this process, so the
+  // harvester distinguishes a truncated tail from a genuinely absent row. Call on shutdown.
+  _ledgerManifest() {
+    if (!this._latTrace) return;
+    this._log('info', 'lat-stage', { stage: 'ledger-manifest', runId: this._runId, epoch: this._membershipEpoch,
+      proc: this._procNonce, firstSeq: this._ledgerSeq ? 1 : 0, lastSeq: this._ledgerSeq | 0, count: this._ledgerSeq | 0,
+      t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // Publish-time EXPECTATION LEDGER (combined Gate-4 item 3; Aster a87ad414;
+  // DRAFT 2026-09-01 for David's review — gated but NOT yet approved for a deploy).
+  //
+  // WHY it fires here and not at root:fanout alone. A single root:fanout is ONE
+  // branch transmission; the eligible recipient set of a publish is spread across
+  // the whole delivery tree. So this stamps at EVERY fanning node (root and each
+  // intermediate relay — _fanout is the one choke point they all pass through).
+  // The union of these per-node ledgers reconstructs the tree, joined ACROSS nodes
+  // by msgId (the stable cross-tree identity — node-local seq is NOT a join key).
+  //
+  // TREE POSITION AND DELIVERY OBLIGATION ARE SEPARATE FACTS (Aster 722f8464). A
+  // node can be BOTH an intermediate forwarder AND a local app subscriber, so graph
+  // leafhood — "a sub that is never a node" — does NOT equal the app-subscriber
+  // denominator; it would silently drop subscribed forwarders. Two explicit fields:
+  // per recipient edge, `child`=1 marks a relay-forwarding edge (0 = a terminal
+  // leaf-subscriber edge); per node, `localDelivery`=1 marks that THIS node's own
+  // app owes delivery. Reconciliation derives expected app recipients as
+  // {child=0 recipient edges} ∪ {localDelivery=1 nodes}, deduped by nodeId — never
+  // from leafhood. `parent` (this node's upstream) + node/seq/epoch separate seat
+  // reattachments for the same topic.
+  //
+  // WHAT it records: per message x LOCAL subscriber, the lease state the fanning
+  // node BELIEVED at send time — full-hex id (joins to deliver:app / sub:recv),
+  // {since,lastRenewed}, lease age, whether the recipient is a child-relay edge, and
+  // whether it is the sender we skip. Per node: localDelivery obligation, upstream
+  // parent, and epoch/seq so a publish is pinned to the topology incarnation.
+  //
+  // WHAT it deliberately does NOT do: pre-filter exclusions. Expired-lease / self /
+  // child-relay / sender-dedup are recorded as RAW state (+ dropMs threshold), so
+  // the reconciliation analyzer applies the DECLARED exclusion policy transparently
+  // instead of the kernel silently dropping recipients from the denominator. Its
+  // divergence from the harness's ground-truth subscribe log is the signal that
+  // localizes loss to BEFORE fanout (eligible but absent here) vs AFTER (present
+  // here, no deliver:app). Same LAT_TRACE gate; byte-identical when off; bounded by
+  // maxDirect recips per node.
+  _fanoutLedger(role, msgId, excludeHex) {
+    if (!this._latTrace || !msgId || !role) return;
+    const now = this._now();
+    const recips = [];
+    for (const [subHex, sub] of role.subscribers) {
+      recips.push({
+        sub: subHex,                                       // FULL hex — joins to deliver:app / sub:recv
+        since: sub?.since ?? 0,
+        lastRenewed: sub?.lastRenewed ?? 0,
+        leaseAgeMs: now - (sub?.lastRenewed ?? 0),         // EXPIRED iff leaseAgeMs > dropMs
+        child: role.children?.has(subHex) ? 1 : 0,         // 1 = aggregates a sub-tree (not a leaf app-sub)
+        excludedSender: (excludeHex && subHex === excludeHex) ? 1 : 0,   // the sender this fanout skips
+      });
+    }
+    this._log('info', 'lat-stage', {
+      stage: 'fanout-ledger',
+      msgId, proc: this._procNonce,                                               // STABLE cross-tree join key (same on every node)
+      topicId: idHex(role.topicId),
+      node: idHex(this.nodeId),                            // FULL hex — the fanning node
+      isRoot: role.isRoot ? 1 : 0,
+      localDelivery: this.mySubscriptions?.has(role.topicId) ? 1 : 0,  // THIS node's own app owes delivery — the dual-role field (Aster 722f8464)
+      parent: (this._upstream?.get(role.topicId) || [])[0] || null,    // upstream seat this node renews toward — separates reattachments (null at root)
+      epoch: Number.isFinite(role.epoch) ? role.epoch : null,   // seat generation — meaningful at isRoot:1 (0 on relays)
+      seq: Number.isFinite(role.seq) ? role.seq : null,
+      dropMs: this.dropMs,                                 // analyzer classifies expiry with the SAME threshold
+      n: recips.length,
+      recips,
+      t: Date.now(), mono: globalThis.performance?.now?.() ?? 0,
+    });
   }
 }
 

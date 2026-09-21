@@ -23,6 +23,7 @@ import {
   ROOT_REPLICATE_FULL_MS, REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX,
   HELLO_DEADLINE_MS,
   INGEST_SLICE_MS, MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS,
+  ROUTE_REPORT_TOP,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
@@ -115,7 +116,7 @@ export const repairPlaneMethods = {
           this._unattachedSince.delete(t);
         } else {
           if (!this._unattachedSince.has(t)) this._unattachedSince.set(t, now);
-          if (now - this._unattachedSince.get(t) >= ROOT_CLAIM_MS && this._regionOk(t)) {
+          if (now - this._unattachedSince.get(t) >= ROOT_CLAIM_MS) {
             if (this._rootClaim.selfClosestReachable(t)) {
               // claimReachable returns null when admission REFUSES the claim
               // (v4.49.0 — today only the HARD bridge fence). `continue` is
@@ -266,6 +267,7 @@ export const repairPlaneMethods = {
     //    inbound pointer + flood-dedup caches by their TTLs.
     if (now - this._lastBeaconAt >= BEACON_MS) { this._lastBeaconAt = now; this._emitRootBeacons(); }
     this._verifyRoots(now);   // root self-verification (non-blocking lookups; batched)
+    this._reportRouteOutcomes();
     for (const [t, b] of this._rootBeacons) if (b.exp <= now) this._rootBeacons.delete(t);
     for (const [id, exp] of this._beaconSeen) if (exp <= now) this._beaconSeen.delete(id);
 
@@ -372,6 +374,27 @@ export const repairPlaneMethods = {
   // farther ones retired. On root churn the now-closest backup already holds everything
   // and promotes (via _onSub-terminal when a joiner routes to it, or the stale-promote
   // check below) with no gap.
+  // OBSERVABILITY (#58 D3): one routed-outcome summary per tick, and ONLY when
+  // something failed. Silence here means every routed send that reported a
+  // verdict was consumed — which is the reading production could not previously
+  // make, because failure resolves {consumed:false} and logged nothing.
+  //
+  // Counters are drained on report, so each line covers the interval since the
+  // last one rather than all time. `top` names the worst offenders by id prefix,
+  // which is what turns "routing is failing" into "routing to THIS id is
+  // failing" — the same move that made replicate-all-failed attributable in
+  // 4.76.2. Non-reporting adapters resolve no verdict and appear nowhere.
+  _reportRouteOutcomes() {
+    const s = this._routeStats;
+    if (!s || s.fail === 0) { if (s) { s.ok = 0; s.by.clear(); } return; }
+    const top = [...s.by.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, ROUTE_REPORT_TOP)
+      .map(([id, n]) => ({ id, n }));
+    this._log('info', 'routed-outcomes', { ok: s.ok, failed: s.fail, tracked: s.by.size, top });
+    s.ok = 0; s.fail = 0; s.by.clear();
+  },
+
   _replicateRoots() {
     if (!this._rootReplicas) return;
     const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
@@ -396,7 +419,7 @@ export const repairPlaneMethods = {
       // was the gap Aster found — record() ran only at ingress, so the lifecycle
       // this module documents was never actually executed.
       this._replicateRole(keys[idx], role, bridge, now, budget, idx)
-        .then((rep) => { if (rep) this._durability.recordTopic(keys[idx], rep); })
+        .then((rep) => { if (rep) this._durability.recordTopic(role, rep); })
         .catch(() => {});   // async (findKClosest); never rejects into the tick
     }
     // The first role the budget defers sets this._replicateCursor to its own
@@ -579,7 +602,6 @@ export const repairPlaneMethods = {
       if ((this._upstream.get(t) || []).length) continue;
       const since = this._unattachedSince.get(t);
       if (since == null || now - since < ROOT_CLAIM_MS) continue;
-      if (!this._regionOk(t)) continue;
       if (typeof this._rootClaim?.selfClosestReachable === 'function' && this._rootClaim.selfClosestReachable(t)) continue;
       await this._readRepair(t).catch(() => {});
     }
@@ -655,26 +677,20 @@ export const repairPlaneMethods = {
     let discoveryFailed = false;
     if (typeof this.dht.findKClosest === 'function') {
       let arr = [];
-      // Over-fetch so region filtering has candidates to choose from.
+      // Over-fetch so the cohort has spare candidates to choose from.
       try { arr = await this.dht.findKClosest(t, (this._rootReplicas + 1) * 2); }
       catch { arr = []; discoveryFailed = true; }
-      const seen = new Set(); const inRegion = []; const outRegion = [];
-      const topicRegion = lc(idHex(t)).slice(0, 2);
+      const seen = new Set(); const cand = [];
       for (const id of (Array.isArray(arr) ? arr : [])) {
         let b; try { b = idBig(id); } catch { continue; }
         if (b === this.nodeId || (bridge != null && b === bridge)) continue;   // never self / bridge
         const hex = lc(idHex(b)); if (seen.has(hex)) continue; seen.add(hex);
-        (hex.slice(0, 2) === topicRegion ? inRegion : outRegion).push(hex);
+        cand.push(hex);
       }
-      // IN-REGION FIRST (#362): a replica outside the topic's region is
-      // durable but UNFINDABLE — routed reads terminate at the topic-closest
-      // in-region node, which never learns of an out-of-region copy (observed
-      // live: a burst publisher's cohort recruits all landed on foreign-region
-      // relays and every since:'all' read came back empty while the data sat
-      // safe on the wrong continent of the keyspace). Out-of-region fills
-      // remaining slots only when the region can't supply enough — a wrong-
-      // place copy still beats no copy for eventual reconciliation.
-      want = inRegion.concat(outRegion).slice(0, this._rootReplicas);
+      // The closest reachable nodes fill the replica cohort, whatever their region.
+      // findKClosest already returns them closest-first; region is a placement hint
+      // folded into the id, never a selection gate.
+      want = cand.slice(0, this._rootReplicas);
     } else {
       // Case 4: neighbours() throwing used to propagate out of a function that
       // catches everywhere else. Caught here so it lands as UNKNOWN rather than
@@ -784,7 +800,7 @@ export const repairPlaneMethods = {
     // snapshot carries whether the payload contained the role's state: only a
     // FULL push can testify about a message. See the nil() header above.
     const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0,
-                  dispatched: true, snapshot: !!full };
+                  dispatched: true, snapshot: !!full, failures: [] };
     // role.attempted is a BOUNDED DIAGNOSTICS RECORD, deliberately outside
     // role.replicas and outside every repair, confirm and handoff decision path.
     // It exists so the difference between "no evidence" and "evidence of failure"
@@ -797,6 +813,7 @@ export const repairPlaneMethods = {
         continue;
       }
       out[verdict]++;
+      out.failures.push({ id: hex.slice(0, 12), v: verdict });   // WHO the push failed to + its dispatch verdict — replication-failure attribution (#45/#432/#397)
       role.attempted.set(hex, { at: now, via: verdict });
       if (verdict === 'violation') {
         this._log('error', 'pubsub:dispatch-contract-violation', {
@@ -919,22 +936,16 @@ export const repairPlaneMethods = {
   // Called from AxonaPeer.leave() while the transport is still up: for every
   // topic we ROOT and hold cache for, push the cache to the heir (next-closest
   // live node) so the history isn't lost when we go. Best-effort; never throws.
-  // Pick heir + runner-up from a candidate id list, IN-REGION FIRST (#362).
-  // An heir outside the topic's region accepts the history but routed reads
-  // never find it — subscribes terminate at the topic-closest IN-REGION node.
-  // Prefer candidates whose region byte matches the topic's; out-of-region
-  // candidates are used only when the region offers none (a wrong-place copy
-  // still beats no copy — reconciliation can migrate it later).
+  // Pick heir + runner-up from a candidate id list (closest-first as supplied).
+  // The heir adopts the root claim; any reachable node is a valid, findable root,
+  // so region is not a selection gate — it is only a placement hint in the id.
   _pickHeirs(topicBig, ids) {
-    const topicRegion = lc(idHex(topicBig)).slice(0, 2);
-    const inR = [], outR = [];
+    const ordered = [];
     for (const id of (Array.isArray(ids) ? ids : [])) {
       let b; try { b = idBig(id); } catch { continue; }
       if (b === this.nodeId) continue;
-      let hex; try { hex = lc(idHex(b)); } catch { continue; }
-      (hex.slice(0, 2) === topicRegion ? inR : outR).push(b);
+      ordered.push(b);
     }
-    const ordered = inR.concat(outR);
     const heir = ordered.length > 0 ? ordered[0] : null;
     let alt = null;
     for (const b of ordered) { if (heir !== null && b !== heir) { alt = b; break; } }
@@ -1063,19 +1074,17 @@ export const repairPlaneMethods = {
         for (const j of unacked()) {
           try {
             const arr = await this.dht.findKClosest(j.t, 8);
-            // Region first (#362), reachability second: an out-of-region heir
-            // is unfindable by routed reads even when the transfer succeeds.
-            const topicRegion = lc(idHex(j.t)).slice(0, 2);
-            const tiers = [[], [], [], []];   // [inR+reach, inR, outR+reach, outR]
+            // Reachability first: a reachable heir can adopt the claim now. Region
+            // is not a selection gate — only a placement hint folded into the id.
+            const reachTier = [], rest = [];
             for (const id of (Array.isArray(arr) ? arr : [])) {
               let b; try { b = idBig(id); } catch { continue; }
               if (b === this.nodeId) continue;
               let hex = null; try { hex = lc(idHex(b)); } catch { continue; }
-              const inR = hex.slice(0, 2) === topicRegion;
               const reach = typeof this._isReachableId === 'function' && this._isReachableId(hex);
-              tiers[inR ? (reach ? 0 : 1) : (reach ? 2 : 3)].push(b);
+              (reach ? reachTier : rest).push(b);
             }
-            const ordered = tiers.flat();
+            const ordered = reachTier.concat(rest);
             const pick = ordered.length > 0 ? ordered[0] : null;
             if (pick !== null && pick !== j.heir) { j.alt = j.heir; j.heir = pick; }
           } catch { /* keep the previous heir */ }
@@ -1178,15 +1187,13 @@ export const repairPlaneMethods = {
         { topic: idHex(j.t).slice(0, 12), heir: j.heir === null ? 'none' : idHex(j.heir).slice(0, 10),
           fallback: target === null ? 'none' : idHex(target).slice(0, 10) });
       if (target === null) continue;
-      // Region guard (#362): a HANDOFF makes the receiver ADOPT the root
-      // claim — an out-of-region adoptee is a root that routed reads can
-      // never find (worse than no root: it absorbs the claim AND the
-      // history into an unreachable corner). If the last-resort target is
-      // outside the topic's region, send the same cache as REPLICATE —
-      // durable, findable via anti-entropy/pull migration, no false claim.
-      const topicRegion = lc(idHex(j.t)).slice(0, 2);
-      let targetRegion = null; try { targetRegion = lc(idHex(target)).slice(0, 2); } catch { /* */ }
-      const policy = targetRegion === topicRegion ? 'HANDOFF' : 'REPLICATE';
+      // Role nature decides the push, never region: a departing ROOT hands the
+      // claim to its heir (adopt → becomes the findable root, valid regardless of
+      // region), while a departing BACKUP replicates to a durable holder and never
+      // mints a root — a backup-minted root would spawn a competing root from
+      // replica state (the #333 orphan-backup cascade). This mirrors the primary
+      // dispatch above; region is a placement hint in the id, not a rooting gate.
+      const policy = j.role.isRoot ? 'HANDOFF' : 'REPLICATE';
       // Same unhandled-rejection absorption. This last-gasp fallback makes no claim
       // on the result — nothing follows it — so semantics are unchanged.
       try {

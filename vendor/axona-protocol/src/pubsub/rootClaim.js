@@ -223,8 +223,50 @@ export class RootClaim {
     // BACKUP only through a fresh REPLICATE from the new live principal.)
     if (isRoot && role.backupOf !== null) this.retireBackup(role.topicId, role, 'promoted');
     role.isRoot = isRoot;
+    // OBSERVABILITY (#60): a transition is the moment a seat changes hands, and
+    // the one question it must answer is whether anything was seated beneath it.
+    // role.subscribers and role.children already hold that; nothing logged them,
+    // so production could not tell an empty yield from one that abandoned a
+    // subtree. The relay status line's subs= is mySubscriptions (this node's OWN
+    // subscriptions) and never measured this — an exclusion drawn from it on
+    // 2026-09-07 was wrong for exactly that reason. Counts only: no ids, no
+    // sizes that could correlate a subscriber to a topic beyond what the
+    // transition already names.
+    const seatedSubs = role.subscribers?.size ?? 0;
+    const seatedKids = role.children?.size ?? 0;
     this.m._log('info', 'root-transition',
-      { topic: idHex(role.topicId).slice(0, 12), isRoot, why, ...ctx });
+      { topic: idHex(role.topicId).slice(0, 12), isRoot, why, subs: seatedSubs, kids: seatedKids, ...ctx });
+    // SUBSCRIBER-LIST REPLICATION: on PROMOTION, re-adopt the principal's inherited
+    // subscribers into the fanout and replay the cache to each, so the orphaned
+    // readers are served immediately instead of waiting ~9s to re-subscribe (the
+    // measured post-migration orphan window). Inherited list is dropped after use.
+    if (isRoot && this.m._replicateSubs && role._inheritedSubs && role._inheritedSubs.size) {
+      const now = this.m._now();
+      let seeded = 0;
+      for (const [subHex, info] of role._inheritedSubs) {
+        if (role.subscribers.has(subHex)) continue;
+        role.subscribers.set(subHex, { since: info.since || 0, lastRenewed: now });
+        if (info.child) role.children.add(subHex);
+        seeded++;
+        try { this.m._replayTo(role, subHex, info.since || 0, true); } catch { /* best-effort */ }
+      }
+      role._inheritedSubs = null;
+      if (seeded) this.m._log('info', 'root-inherited-subs', { topic: idHex(role.topicId).slice(0, 12), seeded });
+    }
+    // METRICS-LEASE INHERITANCE (#47): a promoted backup adopts the principal's
+    // active publish lease so metricTopic(T) snapshots continue without waiting on a
+    // METRICSON renewal (which a lingering dead-root can swallow). Complements the
+    // path-node seed in promote() (_metricsWanted) — that only covers nodes the
+    // METRICSON transited; a replicated backup was never on that path. Take the
+    // later expiry so neither source clobbers a fresher lease.
+    if (isRoot && this.m._replicateSubs && role._inheritedMetricsOn) {
+      const now = this.m._now();
+      if (role._inheritedMetricsOn > now && role._inheritedMetricsOn > (role.metricsOn || 0)) {
+        role.metricsOn = role._inheritedMetricsOn;
+        this.m._log('info', 'root-inherited-metrics', { topic: idHex(role.topicId).slice(0, 12), until: role.metricsOn });
+      }
+      role._inheritedMetricsOn = 0;
+    }
   }
 
   // ── BACKUP nature transitions (v4.26.0, Phase 7) ──────────────────────────
@@ -282,7 +324,13 @@ export class RootClaim {
     role.formedAt = m._now(); role.lastVerify = 0;
     m.axonRoles.set(topicBig, role);
     m._log('info', 'root-formed', { topic: idHex(topicBig).slice(0, 12) });
-    m._log('info', 'root-transition', { topic: idHex(topicBig).slice(0, 12), isRoot: true, why, born: true });
+    // Same seated counts as _set (#60). A born root has nothing seated yet, but
+    // the fields are emitted as 0 rather than omitted: a consumer parsing
+    // root-transition must not have to distinguish "no subtree" from "this
+    // emission site forgot to say". This is the SECOND transition emitter —
+    // _set is the other — and they must agree on shape.
+    m._log('info', 'root-transition', { topic: idHex(topicBig).slice(0, 12), isRoot: true, why,
+      subs: role.subscribers?.size ?? 0, kids: role.children?.size ?? 0, born: true });
     m._announceRoot(topicBig);
     // Empty-self-root cohort pull (v4.24.0): a root born with no history must
     // PULL from whoever holds it — nothing reliably tells the holder about a
@@ -308,7 +356,7 @@ export class RootClaim {
     m._announceRoot(role.topicId);
     role.formedAt = m._now(); role.lastVerify = 0;   // promoted claims get an early self-verify too
     const w = m._metricsWanted.get(role.topicId) || 0;
-    if (w > m._now()) role.metricsOn = w;
+    if (w > m._now() && w > (role.metricsOn || 0)) role.metricsOn = w;   // take the later of path-flag vs replicated lease (#47)
   }
 
   // Yield the claim to a strictly-closer live root: demote, pin upstream to it,

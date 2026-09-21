@@ -26,7 +26,7 @@
 // there. It joins the engine only if it earns its way in.
 // =====================================================================
 
-import { T } from './constants.js';
+import { T, METRICS_LEASE_MS } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
 
@@ -150,6 +150,30 @@ export const syncEngineMethods = {
   _syncPush(targetBig, topicBig, role, policyName, { full = true } = {}) {
     const { msgs, dels } = full ? this._syncSnapshot(role) : { msgs: [], dels: [] };
     const payload = { topicId: idHex(topicBig), from: idHex(this.nodeId), msgs, dels };
+    // SUBSCRIBER-LIST REPLICATION: on a FULL push, carry the root's direct
+    // subscriber/children list so the backup can re-adopt them into its fanout on
+    // promotion (collapses the post-migration orphan window). Only from a live root
+    // (a backup has none to give), only on full pushes, size-bounded.
+    if (full && this._replicateSubs && role.isRoot && role.subscribers && role.subscribers.size) {
+      const subs = [];
+      for (const [h, s] of role.subscribers) {
+        subs.push({ id: h, since: (s && Number.isFinite(s.since)) ? s.since : 0, child: role.children?.has(h) ? 1 : 0 });
+        if (subs.length >= 256) break;   // bound the payload
+      }
+      if (subs.length) payload.subs = subs;
+    }
+    // METRICS-LEASE REPLICATION (#47): on a full push, carry the root's remaining
+    // publish lease so a promoted backup keeps emitting metricTopic(T) snapshots across
+    // the transition instead of going metrics-dark until a METRICSON renewal re-routes
+    // to it — which a lingering dead-root can still swallow (#28). Sent as a DURATION,
+    // not an absolute expiry: the backup re-bases it on its own clock, so a constant
+    // offset between separated relays (M4/M1) cancels instead of arming a subscriber-
+    // stale lease or refusing a live one (Vega, review of 3e8537f). ALWAYS present on a
+    // full push (0 = no/lapsed lease) so a push that finds the lease gone CLEARS the
+    // backup's inherited value rather than letting a last-seen expiry outlive demand.
+    if (full && this._replicateSubs && role.isRoot) {
+      payload.metricsRemainingMs = role.metricsOn > this._now() ? (role.metricsOn - this._now()) : 0;
+    }
     if (policyName === 'HANDOFF') return this._route(targetBig, T.HANDOFF, payload);
     return this._route(targetBig, T.REPLICATE, payload);
   },
@@ -219,6 +243,31 @@ export const syncEngineMethods = {
       this._rootClaim.becomeBackup(topicBig, role, from);   // nature transition (I-10)
       await this._applyDels(role, topicBig, payload.dels);
       await this._ingestStampedBatch(role, payload.msgs);
+      // SUBSCRIBER-LIST REPLICATION: stash the principal's subscriber list so a
+      // promoted backup can re-adopt them into its fanout + replay (rootClaim._set).
+      // STORED, not applied — a backup serves nobody until it becomes root.
+      if (this._replicateSubs && Array.isArray(payload.subs)) {
+        const selfHex = lc(idHex(this.nodeId));
+        const inh = new Map();
+        for (const e of payload.subs) {
+          if (!e || typeof e.id !== 'string' || !isHexId(lc(e.id))) continue;
+          const h = lc(e.id);
+          if (h === selfHex) continue;                       // never seed self
+          inh.set(h, { since: Number.isFinite(e.since) ? e.since : 0, child: !!e.child });
+        }
+        role._inheritedSubs = inh.size ? inh : null;
+      }
+      // METRICS-LEASE REPLICATION (#47): re-base the principal's remaining lease onto
+      // THIS node's clock and store it for promotion (rootClaim._set). Present ⟺ full
+      // push (0 = principal's lease lapsed → CLEAR, so a stale expiry can't outlive
+      // demand — Vega/Aster release condition). Clamped to METRICS_LEASE_MS so a bad
+      // remaining can never arm a longer-than-legal lease (Aster guard 1). Receiver-now
+      // + remaining adds at most handoff transit, bounded by latency not clock offset —
+      // soft-state tolerance, not exact expiry preservation. Never acted on as a backup.
+      if (this._replicateSubs && Number.isFinite(payload.metricsRemainingMs)) {
+        const rem = Math.min(Math.max(0, payload.metricsRemainingMs), METRICS_LEASE_MS);
+        role._inheritedMetricsOn = rem > 0 ? (this._now() + rem) : 0;
+      }
       return;
     }
 

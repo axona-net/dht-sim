@@ -55,7 +55,7 @@ export const ANONYMOUS = Symbol.for('axona.publish.anonymous');
 import { buildEnvelope }  from '../pubsub/envelope.js';
 import { buildKill }      from '../pubsub/kill.js';
 import { buildTouch }     from '../pubsub/touch.js';
-import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES, isRegionLockEnforced } from '../pubsub/AxonaManager.js';
+import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES } from '../pubsub/AxonaManager.js';
 import { metricTopic, isMetricTopicName, dataTopicIdOf } from '../pubsub/metrics.js';
 import { authorClassTopic, buildAuthorClass, verifyAuthorClass } from '../pubsub/authorClass.js';
 import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
@@ -67,6 +67,69 @@ import { registerFrame, registerDirectFrame, depositDispatchCapability, readDisp
 import { buildBoundary3Registry } from '../transport/boundary3Registry.js';
 import { buildBoundary6Registry } from './boundary6Registry.js';
 import { buildBoundary5Registry } from './boundary5Registry.js';
+
+/** The emit-side lookahead counters. One definition, used by the lazy init in
+ *  _findCloserInTwoHops and by _resetLookaheadStats, so the two cannot drift. */
+function newLookaheadStats() {
+  return {
+    since: Date.now(),
+    calls: 0, bypassedAtDestination: 0, probingCalls: 0,
+    probesEmitted: 0, probesFulfilled: 0, probesRejected: 0, probesTerminal: 0,
+    probesCloserThanMe: 0,
+    answeredByProbe: 0, answeredByIncoming: 0, answeredNull: 0,
+    // Per-XOR-rank accounting. RANK_BINS-1 buckets: ranks 0-7 individually,
+    // then 8-15, 16-31, 32+. The question is whether informative replies
+    // CONCENTRATE in the nearest targets. If they do, top-K keeps them and the
+    // 67-wide fan-out can shrink; if the rate is flat across rank, top-K cannot
+    // work and the redundancy needs a different mechanism.
+    rankSent:      new Array(RANK_BINS).fill(0),
+    rankCloser:    new Array(RANK_BINS).fill(0),
+    // OUTCOME PARTITION PER RANK (Aster, council 938e4162). closer/sent alone
+    // cannot tell "every probe was REJECTED" from "every reply was non-closer",
+    // and those have opposite meanings: the first says the target was dead, the
+    // second says it was alive and unhelpful. Rank 0 read as a structural blind
+    // spot on the unpartitioned data; it may simply be an unreachable entry.
+    rankRejected:  new Array(RANK_BINS).fill(0),
+    rankTerminal:  new Array(RANK_BINS).fill(0),
+    rankNonCloser: new Array(RANK_BINS).fill(0),
+    // PER-CALL top-K viability. Counting closer REPLIES lost to a cut-off
+    // overstates the damage, because a call needs only ONE closer reply and may
+    // receive several — discarding surplus costs nothing. What decides top-K is
+    // whether the NEAREST closer reply of each call falls inside K.
+    callsWithAnyCloser: 0,
+    answeredWithinK: Object.fromEntries(K_PROBES.map(k => [k, 0])),
+    // Does the raw synaptome contain peers GREEDY would have taken? Greedy
+    // filters CONNECTED/dead/bridge; probeTargets does not. If this is ever
+    // non-zero, "greedy failed, so every probe target is farther than self" is
+    // false, and rank 0 is not what I claimed it was.
+    targetsNearerThanSelf: 0,
+    // Could the free incoming pass have answered ON ITS OWN? The old
+    // answeredByIncoming only fired when probes returned NOTHING, so its zero
+    // proved only that probes always found something.
+    // UNITS ARE IN THE NAMES (Aster fc8146ed, ratified Orion 3d723228). The
+    // previous `incomingCouldAnswer` incremented once PER QUALIFYING SYNAPSE,
+    // so it could exceed `calls` and could not be divided by them — while
+    // `incomingWonFinal` was per call. Two different units under names that
+    // implied one. Anything ending in Links counts links; anything ending in
+    // Calls counts calls.
+    incomingCandidateLinks: 0,   // qualifying reverse links, summed over calls
+    incomingCouldAnswerCalls: 0, // calls where >=1 incoming link beat MY distance
+    incomingWonFinalCalls: 0,    // calls where incoming beat the probes' best
+  };
+}
+
+/** Cut-offs evaluated for top-K viability. */
+const K_PROBES = [1, 2, 4, 8, 16, 32];
+
+/** ranks 0..7 map to bins 0..7; then 8-15 -> 8, 16-31 -> 9, 32+ -> 10. */
+const RANK_BINS = 11;
+const RANK_LABELS = ['0', '1', '2', '3', '4', '5', '6', '7', '8-15', '16-31', '32+'];
+function rankBin(r) {
+  if (r < 8) return r;
+  if (r < 16) return 8;
+  if (r < 32) return 9;
+  return 10;
+}
 
 // REF-1.1 E3: a transport can receive dispatch either through the legacy
 // public primitive (unsealed transport) OR through a deposited capability
@@ -135,6 +198,19 @@ export class AxonaPeer extends DHT {
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
     // Set 0 to disable (A/B diagnostics, or deployments that don't want backup roots).
     this._rootReplicas = rootReplicas;
+    // findKClosest hop/density telemetry (diagnostic, David 2026-08-30). No-op
+    // unless ROUTE_TRACE=1. Emits one route-lookup summary per findKClosest:
+    // seed-pool density, closer-in-seed, rounds, probes, fulfilled/rejected
+    // (dead-peer waits), elapsed, terminus — to separate "sparse table → 0ms
+    // self" from "slow convergence → timeout" local minima.
+    this._routeTrace = (typeof process !== 'undefined' && process.env && process.env.ROUTE_TRACE === '1');
+    // findKClosest dead-peer skip (routing fix, David 2026-08-30). ROLLOUT GATE,
+    // default OFF. ON: findKClosest never PROBES a known-dead or unconnected peer
+    // (exactly the guard _greedyNextHopToward already applies), so a round can no
+    // longer stall on a dead peer's transport timeout — the 4-5s lookup that
+    // blocked synchronous terminal verification. Candidates are unaffected; only
+    // the outbound probe set is filtered. Remove the gate once armed + validated.
+    this._findkSkipDead = (typeof process !== 'undefined' && process.env && process.env.FINDK_SKIP_DEAD === '1');
     // REF-1.1 M1: DEFAULT-OFF Boundary-1 frame-contract registry. When true, the
     // default AxonaManager arms the shadow registry over its 19 routed handlers
     // (observe-only; byte-identical flag-off; the runtime AXONA_REGISTRY_SHADOW env
@@ -334,6 +410,19 @@ export class AxonaPeer extends DHT {
     this._persistFlushMs = 5000;
     /** @type {Set<(event: object) => void>} */
     this._eventListeners = new Set();
+    this._resetLookaheadStats();   // emit-side lookahead census — see lookaheadStats()
+    // Console accessor. axona.chat publishes neither its peer nor its transport,
+    // and that is the tab this measures, so the reader is put where devtools can
+    // reach it. Counts only — no ids, no targets, no payloads. Never clobbers an
+    // existing global: a page can host two peers, and replacing another's
+    // accessor would make the reading describe a different node than the reader
+    // believes.
+    try {
+      const g = typeof globalThis !== 'undefined' ? globalThis : null;
+      if (g && !g.__axonaLookaheadStats) {
+        g.__axonaLookaheadStats = (o) => { try { return this.lookaheadStats(o); } catch { return null; } };
+      }
+    } catch { /* frozen global / sealed realm — the accessor is a convenience */ }
     /** @type {(event: object) => void | null} */
     this._engineListenerUnsub = null;
 
@@ -526,7 +615,7 @@ export class AxonaPeer extends DHT {
     // routing table honest (every synapse is a live channel) the moment a peer
     // goes; the synapse re-admits via onPeerBound if the channel re-forms.
     if (transport && typeof transport.onPeerDied === 'function') {
-      this._onPeerDiedUnsub = transport.onPeerDied((peerBig) => {
+      this._onPeerDiedUnsub = transport.onPeerDied((peerBig, reason) => {
         try {
           const dead = (typeof peerBig === 'bigint') ? peerBig
             : (typeof peerBig === 'string' && isHexId(peerBig)) ? fromHex(peerBig) : null;
@@ -538,7 +627,10 @@ export class AxonaPeer extends DHT {
           node.connections?.delete(dead);
           (node._deadPeers ??= new Set()).add(dead);
           this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
-          this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead) });
+          // reason (4.76.3): the transport-level close cause, threaded through
+          // mesh _retire → onPeerLost. Transports that do not supply one (sim,
+          // pre-4.76.3) log 'unknown'. Makes eviction churn attributable.
+          this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead), reason: reason ?? 'unknown' });
           this._scheduleMaintain();   // a lost peer may have been a near-quota successor → refill
 
         } catch (err) {
@@ -840,6 +932,19 @@ export class AxonaPeer extends DHT {
       const { type, payload, targetId, hops, originId } = msg;
       const targetBig = asId(targetId);   // wire→internal id gate
 
+      // Paired DELIVER hop telemetry (LAT_TRACE-gated; David-approved 2026-09-01).
+      // rx here = this hop actually received the forwarded DELIVER; pairs with the
+      // sender's tx by hopAttemptId. No wire/behaviour change when the flag is off.
+      const _hopLt = this._axonaManager?._latTrace === true && type === 'pubsub:deliver';
+      let _hopMids = null;
+      if (_hopLt) {
+        const _dm = Array.isArray(payload?.msgs) ? payload.msgs : [];
+        _hopMids = _dm.map((m) => m?.msgId).filter(Boolean).slice(0, 8);
+        this._axonaManager._deliverHopRx(_hopMids, msg.hopAttemptId ?? null, hops, fromId, toHex(node.id));
+        // transition-ledger: receiver arrival row per msg, joined to the sender row by edgeAttemptId
+        for (const mid of _hopMids) this._axonaManager._rxLedger({ msgId: mid, edgeAttemptId: msg.hopAttemptId ?? null, from: fromId, topicId: payload?.topicId ?? null });
+      }
+
       // Greedy 1-hop forward — only over synapses we are actually connected
       // to (skip dead/unbound entries, e.g. the bridge after it drops; see
       // _greedyNextHopToward).  Without this a dead synapse that is XOR-near
@@ -848,12 +953,10 @@ export class AxonaPeer extends DHT {
       const connOk = (typeof node.transport?.isConnected === 'function')
         ? node.transport.isConnected.bind(node.transport) : null;
       const deadSet = node._deadPeers;
-      const bridgeId = node.transport?.bridgeNodeIdBig ?? null;
       let nextHopId = null;
       let bestDist  = node.id ^ targetBig;
       for (const syn of node.synaptome.values()) {
         if (deadSet && deadSet.has(syn.peerId)) continue;
-        if (bridgeId !== null && syn.peerId === bridgeId) continue;   // bridge is signaling infra, not a topic root/forwarder
         if (connOk && !connOk(syn.peerId)) continue;
         const d = syn.peerId ^ targetBig;
         if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
@@ -895,13 +998,27 @@ export class AxonaPeer extends DHT {
         catch { /* fall through */ }
       }
 
+      let _hopId = null, _fEnqT = 0, _fSendT = 0;
+      if (_hopLt) { _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(node.id).slice(-6)}`; _fEnqT = Date.now(); }
       try {
         // Wire payload targetId is hex (v1.5 contract).
+        if (_hopLt) _fSendT = Date.now();
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
+          ...(_hopLt ? { hopAttemptId: _hopId } : {}),
         });
+        if (_hopLt) {
+          this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'ok', null);
+          const _oc = this._axonaManager._txOutcome(true, null);
+          for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(node.id), to: toHex(nextHopId), hopIdx: hops + 1, enqueueT: _fEnqT, sendAttemptT: _fSendT, ..._oc });
+        }
         return downstream;
-      } catch {
+      } catch (e) {
+        if (_hopLt) {
+          this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'fail', String(e?.message || e));
+          const _oc = this._axonaManager._txOutcome(false, e);
+          for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(node.id), to: toHex(nextHopId), hopIdx: hops + 1, enqueueT: _fEnqT, sendAttemptT: _fSendT, ..._oc });
+        }
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
     }, { registry: this._b5door });
@@ -2238,7 +2355,6 @@ export class AxonaPeer extends DHT {
   async pub(topic, message, opts = {}) {
     const desc = await this._resolveTopicOrThrow(topic, 'pub');
     const am   = this._requireAxonaManager('pub');
-    await this._assertRegionUsable(desc.topicIdBig, PublishError, 'pub');   // region-occupancy rule
 
     // Signer (design v0.3 §5/§6): opts.signWith is an AUTHOR identity, or the
     // ANONYMOUS sentinel for a deliberately unsigned publish. There is NO default
@@ -2298,6 +2414,8 @@ export class AxonaPeer extends DHT {
         `(WebRTC-interoperable floor). Chunk large payloads with @axona/protocol/std/chunk (publishChunkedBytes).`,
         { context: { topic: desc.name, size: json.length, max: this._maxPublishBytes } });
     }
+
+    if (typeof am._latStage === 'function') am._latStage(envelope.msgId, 'pub:built');
 
     // Lookup-assisted publish (v4.3.1): warm the true-root hint before the first
     // publish so the PUB routes straight to the topic's emergent root instead of
@@ -2455,7 +2573,6 @@ export class AxonaPeer extends DHT {
     const desc       = await this._resolveReadTopic(topic, 'sub');
     const am         = this._requireAxonaManager('sub');
     const topicIdBig = desc.topicIdBig;
-    await this._assertRegionUsable(topicIdBig, SubscribeError, 'sub');   // region-occupancy rule
 
     // Apply `since` mode by seeding AxonaManager's per-topic lastSeenTs
     // BEFORE the subscribe call.  AxonaManager passes lastSeenTs in the
@@ -2513,35 +2630,6 @@ export class AxonaPeer extends DHT {
       this.pub(metricTopic(dataTopicIdHex), JSON.stringify(snapshot), { signWith: ANONYMOUS }));
   }
 
-  // REGION RULE (region occupancy): a topic is served only by nodes IN ITS REGION.
-  // You may pub/sub to any region, but if the topic's region has no operational
-  // (reachable) node, there's no valid root — refuse rather than let a neighbouring
-  // region absorb it (which would hotspot that region). Fast-fail BEFORE sending, so
-  // it's a pre-send guard, not a delivery ack. If we can't yet tell (cold/isolated
-  // lookup), we don't false-refuse — the kernel still won't root an out-of-region
-  // topic, so the worst case is a silent no-op, never a wrong-region hotspot.
-  async _assertRegionUsable(topicIdBig, ErrCls, opName) {
-    // Gated (v4.15.0): the region-occupancy rule is OFF by default pre-critical-mass —
-    // most regions have no node yet, so refusing empty-region pub/sub would break nearly
-    // everything. When off, this guard is a no-op and the nearest node roots (pre-4.13.0).
-    // configureRegionLock({ enforce: true }) turns it back on once coverage exists.
-    if (!isRegionLockEnforced()) return;
-    // node.id is a BigInt by construction (DHTNode gate); asId() keeps the topic arg
-    // honest whether it arrived as a BigInt or a hex id, without any local type-guessing.
-    const selfRegion  = (this._node?.id != null) ? extractS2Prefix(asId(this._node.id)) : null;
-    const topicRegion = extractS2Prefix(asId(topicIdBig));
-    if (selfRegion === topicRegion) return;          // we ARE an in-region node → the region is populated
-    let closest = null;
-    try { const a = await this.findKClosest(asId(topicIdBig), 1); closest = (Array.isArray(a) && a.length) ? asId(a[0]) : null; }
-    catch { closest = null; }
-    if (closest == null) return;                     // indeterminate — don't false-refuse
-    if (extractS2Prefix(closest) !== topicRegion) {
-      throw new ErrCls(ErrorCodes.REGION_UNPOPULATED,
-        `peer.${opName}: region 0x${topicRegion.toString(16)} has no operational node — a topic is served only by nodes in its own region`,
-        { context: { topicRegion } });
-    }
-  }
-
   /**
    * Unsubscribe from `topic` by name — the counterpart to `peer.sub`.
    *
@@ -2567,8 +2655,11 @@ export class AxonaPeer extends DHT {
    * @returns {Promise<{ ok: boolean, removed: number }>}
    */
   async unsub(topic, opts = {}) {
-    // Derive the topicId exactly as sub() does so we target the same feed.
-    const desc       = await this._resolveTopicOrThrow(topic, 'unsub');
+    // Derive the topicId exactly as sub() does so we target the same feed:
+    // a descriptor OR the bare 66-hex topic id (the shareable read handle).
+    // GH #64: this went through the descriptor-only resolver, so a reader who
+    // subscribed by the id they were given could never unsubscribe from it.
+    const desc       = await this._resolveReadTopic(topic, 'unsub');
     const topicIdBig = desc.topicIdBig;
 
     const set = this._subscriptions.get(topicIdBig);
@@ -2613,15 +2704,6 @@ export class AxonaPeer extends DHT {
       return { ok: true, scope: 'keyspace' };
     }
     const desc = await this._resolveTopicOrThrow(topic, 'host');
-    // REGION RULE: hosting a specific topic makes this node its root — only valid
-    // if the topic is in THIS node's region (no node roots a foreign region).
-    const selfRegion = (this._node?.id != null) ? extractS2Prefix(this._node.id) : null;
-    const topicRegion = extractS2Prefix(desc.topicIdBig);
-    if (selfRegion !== topicRegion) {
-      throw new PublishError(ErrorCodes.REGION_UNPOPULATED,
-        `peer.host: cannot host a topic in region 0x${topicRegion.toString(16)} from a node in region 0x${(selfRegion ?? 0).toString(16)} — a node roots/hosts only topics in its own region`,
-        { context: { topicRegion, selfRegion } });
-    }
     // ADDRESS RULE — hosting and owning are DISJOINT properties.
     //
     // A node may host a topic only if its own ADDRESS puts it in that topic's
@@ -3247,6 +3329,10 @@ export class AxonaPeer extends DHT {
       hosting,
       admission,
       wireVersion:   this._transport?.wireVersion ?? null,
+      // Emit-side lookahead census (4.81.0). Cheap to read and it travels with
+      // the rest of health, so a relay's SIGUSR1 dump can carry it without a
+      // second mechanism.
+      lookahead:     (() => { try { return this.lookaheadStats(); } catch { return null; } })(),
       started:       this._started === true,
       transport,
       meshDegraded,
@@ -3471,7 +3557,7 @@ export class AxonaPeer extends DHT {
       // The bridge node id (signaling infra, never a topic root). Lets AxonaManager
       // exclude it from the reachable-closest test in its root-claim fallback, the
       // same way findKClosest/routeMessage already skip it.
-      bridgeId: () => node.transport?.bridgeNodeIdBig ?? null,
+      bridgeId: () => null,   // EXPERIMENT 2026-09-19 (David): the bridge is an ordinary DHT node
       // Per-channel write-flight-ack capability (4.62.2 R13/R15/R17), read by
       // pickCapableAdjacent for D0 delegation. The web transport sets this from a
       // verified CAP_ATTEST; transports without a mesh (sim/node-WS/bridge) expose
@@ -3503,19 +3589,18 @@ export class AxonaPeer extends DHT {
         // the bridge, the SUB/PUB re-homes toward it, the bridge can't serve as a
         // root → the tree never forms (the same strand the iterative findKClosest
         // [bridgeId skip] and the greedy route hop already guard against).
-        const bridgeId = node.transport?.bridgeNodeIdBig ?? null;
         if (typeof selfId === 'bigint') {
           dist.set(selfId, selfId ^ targetIdBig);
         }
         for (const syn of node.synaptome?.values?.() ?? []) {
           const pid = syn.peerId;
-          if (typeof pid === 'bigint' && !dist.has(pid) && pid !== bridgeId) {
+          if (typeof pid === 'bigint' && !dist.has(pid)) {
             dist.set(pid, pid ^ targetIdBig);
           }
         }
         for (const syn of node.incomingSynapses?.values?.() ?? []) {
           const pid = syn.peerId;
-          if (typeof pid === 'bigint' && !dist.has(pid) && pid !== bridgeId) {
+          if (typeof pid === 'bigint' && !dist.has(pid)) {
             dist.set(pid, pid ^ targetIdBig);
           }
         }
@@ -3950,12 +4035,10 @@ export class AxonaPeer extends DHT {
     const t = this._node.transport;
     const connOk = (typeof t?.isConnected === 'function') ? t.isConnected.bind(t) : null;
     const dead   = this._node._deadPeers;
-    const bridgeId = t?.bridgeNodeIdBig ?? null;   // the bridge is signaling infra, not a routable DHT node / topic root
     let bestPeerId = null;
     let bestDist   = this._node.id ^ target;
     for (const syn of this._node.synaptome.values()) {
       if (dead && dead.has(syn.peerId)) continue;
-      if (bridgeId !== null && syn.peerId === bridgeId) continue;   // never route a topic toward the bridge (it can't serve as root)
       if (connOk && !connOk(syn.peerId)) continue;
       const d = syn.peerId ^ target;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
@@ -3984,11 +4067,74 @@ export class AxonaPeer extends DHT {
     const node = this._node;
     const target = asId(targetId);   // wire→internal id gate
     const myDist = node.id ^ target;
+
+    // WE ARE THE DESTINATION. Return null WITHOUT probing (council 2026-09-08,
+    // four seats; measured by ops/lookahead-control.mjs).
+    //
+    // This is not a behaviour change — it returns the value the body below is
+    // ARITHMETICALLY REQUIRED to return, without the network round trips. Both
+    // scoring tests are `d < bestDist`, bestDist starts at myDist, and myDist is
+    // 0 here. XOR distance is unsigned, so `d < 0` is unsatisfiable: neither the
+    // probe loop nor the incomingSynapses loop can assign bestPeerId. The result
+    // is fixed before the first packet leaves.
+    //
+    // What it cost. Both callers (the route_msg handler at :893 and routeMessage
+    // at :4553) reach here whenever greedy finds nobody closer — and at the
+    // destination greedy CANNOT find anybody closer, because nothing beats
+    // distance 0. So every routed message ran a Promise.allSettled fan-out over
+    // the WHOLE synaptome (63-72 peers, unfiltered — no isConnected, no
+    // _deadPeers, no bridge, unlike greedy 20 lines above) on arrival, and
+    // allSettled waits for the slowest. One connected-but-silent peer therefore
+    // cost DEFAULT_REQUEST_TIMEOUT_MS (5_000) before the local handler was
+    // reached, and route_msg is recursive-await, so that wait blocked every
+    // upstream node back to the publisher.
+    //
+    // Paired control, same peer / same payload / one hop, n=40 per arm:
+    //   transport.send  p50    1.0ms   p90     2.9ms
+    //   routeMessage    p50  536.2ms   p90 5,001.0ms   — 531x, 15/40 at the timer
+    // Two of five destinations paid the full 5s on EVERY delivery while
+    // answering a direct probe in ~1ms.
+    //
+    // Deliberately narrow. The genuine local-minimum case (myDist > 0, no closer
+    // neighbour) still probes: that is what lookahead is FOR, and on a sparse
+    // mesh it is how routing escapes a dead end. Filter parity, top-K and a
+    // shorter lookahead timeout were all considered and are NOT bundled here —
+    // Aster's objection stands that degree is not global completeness and a
+    // timeout chosen off one RTT sample is a constant chosen off a sample.
+    // EMIT-SIDE CENSUS — see lookaheadStats(). Counting here (not at the call
+    // sites) makes it complete by construction: this is the only emitter.
+    const LS = (this._lookaheadStats ??= newLookaheadStats());
+    LS.calls++;
+    if (myDist === 0n) { LS.bypassedAtDestination++; return null; }
+
     let bestPeerId = null;        // the FIRST-HOP (adjacent) peer to forward to
     let bestDist   = myDist;
 
     const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
     if (probeTargets.length > 0) {
+      LS.probingCalls++;
+      LS.probesEmitted += probeTargets.length;
+      // XOR RANK, FOR ACCOUNTING ONLY. probeTargets is left in its original
+      // order and every target is still probed — this computes each one's rank
+      // without changing who is asked, so the measurement cannot alter the
+      // behaviour it is measuring.
+      const rawRank = new Array(probeTargets.length);   // exact rank — K needs it
+      const ranks   = new Array(probeTargets.length);   // bucket — histograms use it
+      {
+        const byDist = probeTargets.map((p, i) => [i, p ^ target]);
+        // BigInt: subtracting into a Number would lose precision at 256 bits.
+        byDist.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+        for (let r = 0; r < byDist.length; r++) {
+          const idx = byDist[r][0];
+          rawRank[idx] = r;
+          ranks[idx]   = rankBin(r);
+          LS.rankSent[ranks[idx]]++;
+          // A probe target NEARER than self is one greedy would have taken had
+          // it been eligible — so its presence here means the two sets differ.
+          if (byDist[r][1] < myDist) LS.targetsNearerThanSelf++;
+        }
+      }
+      let minCloserRank = Infinity;
       const settled = await Promise.allSettled(
         probeTargets.map(peerId =>
           node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
@@ -3999,21 +4145,183 @@ export class AxonaPeer extends DHT {
       // to; we score by ITS distance but forward to the FIRST HOP (probeTargets[i]).
       for (let i = 0; i < settled.length; i++) {
         const r = settled[i];
-        if (r.status !== 'fulfilled' || !r.value || r.value.terminal) continue;
+        if (r.status !== 'fulfilled') { LS.probesRejected++; LS.rankRejected[ranks[i]]++; continue; }
+        LS.probesFulfilled++;
+        if (!r.value || r.value.terminal) { LS.probesTerminal++; LS.rankTerminal[ranks[i]]++; continue; }
         const d = r.value.peerId ^ target;
+        // "Useful" is measured against MY distance, not against the running
+        // bestDist: whether a given reply carried a closer node is a property of
+        // the reply, and scoring it against a value that moves as the loop runs
+        // would make the count depend on arrival order.
+        if (d < myDist) {
+          LS.probesCloserThanMe++;
+          LS.rankCloser[ranks[i]]++;
+          if (rawRank[i] < minCloserRank) minCloserRank = rawRank[i];
+        } else {
+          LS.rankNonCloser[ranks[i]]++;
+        }
         if (d < bestDist) {
           bestDist   = d;
           bestPeerId = probeTargets[i];   // adjacent next hop, not the 2-hop node
         }
       }
+      if (minCloserRank !== Infinity) {
+        LS.callsWithAnyCloser++;
+        for (const k of K_PROBES) if (minCloserRank < k) LS.answeredWithinK[k]++;
+      }
     }
+    // Did the FAN-OUT produce the answer, or would we have had it anyway? The
+    // incomingSynapses pass below costs no network at all, so an answer it could
+    // have supplied on its own is an answer the probes did not buy.
+    const answeredByProbe = bestPeerId !== null;
+    const probeBest = bestPeerId;
+
     // incomingSynapses are reverse channels — the peer IS directly connected,
     // so the peer id itself is a valid (adjacent) next hop.
+    //
+    // TWO SEPARATE QUESTIONS, and the old counter conflated them (Aster,
+    // 938e4162; Vega 260f527b; Orion d0c04f27). `answeredByIncoming` only ever
+    // fired when the probes returned NOTHING, so its zero proved that probes
+    // always found something — not that this free pass could not have answered.
+    //   incomingCandidateLinks   : qualifying reverse LINKS, summed over calls
+    //   incomingCouldAnswerCalls : CALLS where at least one such link existed —
+    //                              the free answer, per call, comparable to
+    //                              probingCalls
+    //   incomingWonFinalCalls    : CALLS where incoming also beat the probes
+    let incomingQualifies = false;
     for (const syn of node.incomingSynapses.values()) {
       const d = syn.peerId ^ target;
+      if (d < myDist) { LS.incomingCandidateLinks++; incomingQualifies = true; }
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
     }
+    if (incomingQualifies) LS.incomingCouldAnswerCalls++;
+    if (bestPeerId !== null && bestPeerId !== probeBest) LS.incomingWonFinalCalls++;
+
+    if (bestPeerId === null)          LS.answeredNull++;
+    else if (answeredByProbe)         LS.answeredByProbe++;
+    else                              LS.answeredByIncoming++;
     return bestPeerId;
+  }
+
+  /**
+   * Did the lookahead fan-out earn its traffic?
+   *
+   * Kernel 4.80.0 measured the RECEIVE side: `lookahead_probe` is 83% of all
+   * inbound mesh frames (three windows: 80.4%, 83.1%, 83.5%), a steady ~9.9
+   * probes/sec from every peer, against 0.4 routed messages/sec. Per-peer rate
+   * is constant as the mesh grows, so a node's probe load is O(N) and the
+   * network's is O(N-squared) — roughly 54,000 probe messages/sec across a
+   * 75-node mesh.
+   *
+   * That says what the traffic COSTS. It cannot say what it BUYS, because a
+   * receiver cannot see whether the sender's fan-out changed the sender's
+   * routing decision. This counts that, at the only site that emits probes:
+   *
+   *   probesEmitted / probingCalls   how wide each fan-out actually is
+   *   probesCloserThanMe             replies naming a node closer than me —
+   *                                  the only replies that can change anything
+   *   answeredByProbe                calls where the fan-out supplied the answer
+   *   answeredByIncoming             calls answered by incomingSynapses, which
+   *                                  costs NO network — the probes bought nothing
+   *   answeredNull                   calls that found nobody closer at all
+   *
+   * `usefulProbeRate` is answeredByProbe / probingCalls. If it is near zero at
+   * steady state on a warm mesh, the fan-out is paying O(N-squared) for an
+   * answer it rarely provides — and the design question becomes how to keep the
+   * sparse-mesh escape without paying for it continuously. If it is high, the
+   * traffic is load-bearing and the fix has to be cheaper probing, not less.
+   *
+   * Counts only: no ids, no targets, no payloads.
+   *
+   * @param {{reset?: boolean}} [opts]
+   */
+  lookaheadStats(opts = {}) {
+    const s = this._lookaheadStats;
+    const sinceMs = Math.max(1, Date.now() - s.since);
+    const probing = s.probingCalls || 0;
+    const out = {
+      sinceMs,
+      calls: s.calls,
+      bypassedAtDestination: s.bypassedAtDestination,   // the 4.78.0 fence, counted
+      probingCalls: probing,
+      probesEmitted: s.probesEmitted,
+      probesPerCall: probing ? +(s.probesEmitted / probing).toFixed(1) : 0,
+      probesEmittedPerSec: +(s.probesEmitted / (sinceMs / 1000)).toFixed(1),
+      probesFulfilled: s.probesFulfilled,
+      probesRejected: s.probesRejected,
+      probesTerminal: s.probesTerminal,
+      probesCloserThanMe: s.probesCloserThanMe,
+      answeredByProbe: s.answeredByProbe,
+      answeredByIncoming: s.answeredByIncoming,
+      answeredNull: s.answeredNull,
+      usefulProbeRate: probing ? +(s.answeredByProbe / probing).toFixed(4) : 0,
+      closerReplyRate: s.probesFulfilled ? +(s.probesCloserThanMe / s.probesFulfilled).toFixed(4) : 0,
+      // THE TOP-K QUESTION. rate = closer replies / probes sent, per XOR-rank
+      // bucket. Concentrated in the low ranks => a narrow K keeps the answers.
+      // Flat => top-K cannot work, whatever K is chosen.
+      byRank: RANK_LABELS.map((label, i) => ({
+        rank: label,
+        sent: s.rankSent[i],
+        closer: s.rankCloser[i],
+        // Partitioned, because closer/sent alone cannot separate "the target was
+        // dead" from "the target was alive and had nothing".
+        rejected: s.rankRejected[i],
+        terminal: s.rankTerminal[i],
+        nonCloser: s.rankNonCloser[i],
+        // PRIMARY. closer / sent — the rate a selection decision actually faces.
+        rate: s.rankSent[i] ? +(s.rankCloser[i] / s.rankSent[i]).toFixed(4) : 0,
+        // PRIMARY. closer / replies that came back at all. Excludes only the
+        // UNREACHABLE.
+        //
+        // A TERMINAL REPLY IS EVIDENCE, NOT ABSENCE (Aster fc8146ed, ratified
+        // Orion 3d723228). It is a live peer answering "I have nothing closer" —
+        // proof that this target was reached and had no escape, which is exactly
+        // the population a narrowing decision must weigh. The previous
+        // `rateOfAnswerable` conditioned terminal replies OUT of the
+        // denominator, which inflates the apparent hit rate by discarding the
+        // negative evidence. Removed rather than kept alongside: a
+        // more-flattering ratio sitting next to the honest ones gets quoted.
+        rateOfReplies: (s.rankSent[i] - s.rankRejected[i]) > 0
+          ? +(s.rankCloser[i] / (s.rankSent[i] - s.rankRejected[i])).toFixed(4)
+          : 0,
+      })).filter(b => b.sent > 0),
+      // TOP-K CANDIDATE SURVIVAL, per CALL rather than per reply. `retained` is
+      // the fraction of answerable calls whose NEAREST closer reply falls inside
+      // K. Counting lost replies instead overstates the damage, because a call
+      // needs one closer reply and may receive several.
+      //
+      // IT IS AN UPPER BOUND, NOT A DELIVERY RESULT (Aster fc8146ed, ratified
+      // Orion 3d723228). These are calls observed under a FULL fan-out. A run
+      // actually truncated to K would differ in timing and straggler behaviour,
+      // and this says nothing about whether the message then arrives. Read it as
+      // "could a K-wide fan-out have had a candidate", never as "a K-wide
+      // fan-out works".
+      callsWithAnyCloser: s.callsWithAnyCloser,
+      topK: K_PROBES.map(k => ({
+        k,
+        answered: s.answeredWithinK[k],
+        retained: s.callsWithAnyCloser
+          ? +(s.answeredWithinK[k] / s.callsWithAnyCloser).toFixed(4) : 0,
+      })),
+      // Was the raw synaptome ever holding a peer greedy would have taken?
+      // Non-zero falsifies "greedy failed, so every probe target is farther".
+      targetsNearerThanSelf: s.targetsNearerThanSelf,
+      // The free pass, measured independently of what the probes did.
+      // Units in the names. Links are summed over calls; Calls are comparable to
+      // probingCalls. Do not divide a Links count by a call count.
+      incomingCandidateLinks: s.incomingCandidateLinks,
+      incomingCouldAnswerCalls: s.incomingCouldAnswerCalls,
+      incomingWonFinalCalls: s.incomingWonFinalCalls,
+      // The free-answer fraction, now dimensionally valid: calls over calls.
+      incomingCouldAnswerRate: s.calls
+        ? +(s.incomingCouldAnswerCalls / s.calls).toFixed(4) : 0,
+    };
+    if (opts.reset) this._resetLookaheadStats();
+    return out;
+  }
+
+  _resetLookaheadStats() {
+    this._lookaheadStats = newLookaheadStats();
   }
 
   onEvent(handler) {
@@ -4435,11 +4743,9 @@ export class AxonaPeer extends DHT {
     // region topic funnels its subscribe-k to the bridge, which can't serve as a
     // root → the tree never forms (captured: SUB/PUB routed to the bridge id,
     // role=— everywhere, 0 delivery on contended regions).
-    const bridgeId = src.transport?.bridgeNodeIdBig ?? null;
     const distances = new Map();
     const addCandidate = (peerId) => {
       if (typeof peerId !== 'bigint' || distances.has(peerId)) return;
-      if (bridgeId !== null && peerId === bridgeId) return;   // exclude the bridge from root candidacy
       distances.set(peerId, peerId ^ targetBig);
     };
 
@@ -4447,11 +4753,21 @@ export class AxonaPeer extends DHT {
     for (const syn of src.synaptome.values())         addCandidate(syn.peerId);
     for (const syn of src.incomingSynapses.values())  addCandidate(syn.peerId);
 
+    // ROUTE_TRACE telemetry (no-op off): density of the seed pool + how much of
+    // it is already closer than self (0 → sparse-table local minimum).
+    const _rt = this._routeTrace ? {
+      t0: (globalThis.performance?.now?.() ?? Date.now()),
+      seedPool: distances.size, synCount: src.synaptome?.size ?? 0, inCount: src.incomingSynapses?.size ?? 0,
+      selfDist: src.id ^ targetBig, probes: 0, fulfilled: 0, rejected: 0, roundsRun: 0,
+    } : null;
+    if (_rt) { let c = 0; for (const d of distances.values()) if (d < _rt.selfDist) c++; _rt.closerInSeed = c; }
+
     const visited = new Set();
     let lastPoolSize = 0;
     let stableRounds = 0;
 
     for (let round = 0; round < maxRounds; round++) {
+      if (_rt) _rt.roundsRun = round + 1;
       const sorted = [...distances.entries()]
         .sort((a, b) => a[1] < b[1] ? -1 : 1)
         .map(([peerId]) => peerId);
@@ -4468,8 +4784,20 @@ export class AxonaPeer extends DHT {
       }
       if (toQuery.length === 0) break;
 
-      const probes = toQuery.filter(p => p !== src.id);
-      for (const p of toQuery) visited.add(p);
+      // Never PROBE a known-dead or unconnected peer (the guard greedy already
+      // applies): a dead peer's transport.send only rejects after its timeout,
+      // and Promise.allSettled below waits for the slowest in the batch. Gated;
+      // flag-off is the prior behaviour. Candidates are untouched — only probes.
+      const probes = toQuery.filter(p => {
+        if (p === src.id) return false;
+        if (this._findkSkipDead) {
+          if (src._deadPeers && src._deadPeers.has(p)) return false;
+          const tr = src.transport;
+          if (tr && typeof tr.isConnected === 'function' && !tr.isConnected(p)) return false;
+        }
+        return true;
+      });
+      for (const p of toQuery) visited.add(p);   // mark all considered (incl. skipped) so we don't reselect them
 
       if (probes.length > 0) {
         const settled = await Promise.allSettled(
@@ -4482,6 +4810,7 @@ export class AxonaPeer extends DHT {
           if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
           for (const peerId of r.value) addCandidate(peerId);
         }
+        if (_rt) { _rt.probes += probes.length; for (const r of settled) { if (r.status === 'fulfilled') _rt.fulfilled++; else _rt.rejected++; } }
       }
 
       const grew = distances.size > lastPoolSize;
@@ -4490,10 +4819,21 @@ export class AxonaPeer extends DHT {
       if (topKAllVisited && stableRounds >= 1) break;
     }
 
-    return [...distances.entries()]
+    const _result = [...distances.entries()]
       .sort((a, b) => a[1] < b[1] ? -1 : 1)
       .slice(0, K)
       .map(([peerId]) => peerId);
+    if (_rt) {
+      const term = _result[0] ?? null;
+      this._emitLog('info', 'route-lookup', {
+        target: (typeof targetBig === 'bigint' ? targetBig.toString(16).slice(0, 12) : null),
+        seedPool: _rt.seedPool, synCount: _rt.synCount, inCount: _rt.inCount, closerInSeed: _rt.closerInSeed,
+        rounds: _rt.roundsRun, probes: _rt.probes, fulfilled: _rt.fulfilled, rejected: _rt.rejected,
+        elapsedMs: Math.round((globalThis.performance?.now?.() ?? Date.now()) - _rt.t0),
+        terminus: (term != null ? term.toString(16).slice(0, 12) : null), terminusIsSelf: (term != null && term === src.id),
+      });
+    }
+    return _result;
   }
 
   /**
@@ -4548,15 +4888,37 @@ export class AxonaPeer extends DHT {
       catch { /* fall through; send may still route via the bridge/relay sink */ }
     }
 
+    // Origin hop (0->1) DELIVER telemetry — same LAT_TRACE gate; pairs with the
+    // first forwarder's rx by hopAttemptId. No wire/behaviour change when off.
+    const _hopLt = this._axonaManager?._latTrace === true && type === 'pubsub:deliver';
+    let _hopId = null, _hopMids = null, _enqT = 0, _sendT = 0;
+    if (_hopLt) {
+      const _dm = Array.isArray(payload?.msgs) ? payload.msgs : [];
+      _hopMids = _dm.map((m) => m?.msgId).filter(Boolean).slice(0, 8);
+      _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(originNode.id).slice(-6)}`;
+      _enqT = Date.now();   // transition-ledger: enqueue moment (before the transport handoff)
+    }
     try {
       // Wire payload `targetId` is hex (per the v1.5 contract; the
       // receiver handles either form, but hex is the canonical wire
       // shape so this also works over JSON-serialising transports).
+      if (_hopLt) _sendT = Date.now();   // hand-to-transport moment
       const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
         type, payload, targetId: toHex(targetId), hops: 1, originId,
+        ...(_hopLt ? { hopAttemptId: _hopId } : {}),
       });
+      if (_hopLt) {
+        this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'ok', null);
+        const _oc = this._axonaManager._txOutcome(true, null);   // transition-ledger: sender row per msg
+        for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(originNode.id), to: toHex(nextHopId), hopIdx: 1, enqueueT: _enqT, sendAttemptT: _sendT, ..._oc });
+      }
       return downstream;
-    } catch {
+    } catch (e) {
+      if (_hopLt) {
+        this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'fail', String(e?.message || e));
+        const _oc = this._axonaManager._txOutcome(false, e);
+        for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(originNode.id), to: toHex(nextHopId), hopIdx: 1, enqueueT: _enqT, sendAttemptT: _sendT, ..._oc });
+      }
       return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
     }
   }
