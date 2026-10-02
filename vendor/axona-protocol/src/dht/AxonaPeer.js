@@ -585,6 +585,34 @@ export class AxonaPeer extends DHT {
     // for synaptome convergence via a "ready" gate before calling
     // peer.sub), not a kernel bug to paper over here.
     //
+    // OBLIGATION PROVIDER (4.97.0). The WebRTC mesh's bounded degree retires
+    // channels, and the mesh layer holds channels — it cannot tell the link
+    // carrying a topic's root from a spare. The manager is the only thing that
+    // knows, so hand the transport a reader for it. Installed here because this
+    // is where the peer already owns both halves: the transport and the axon.
+    //
+    // A READER, NOT A SNAPSHOT — and the reader is called ONCE PER ENFORCEMENT
+    // PASS, which 4.97.0 claimed here and did not do. The enforcement loop asks
+    // per candidate, so every resolved channel used to trigger a full walk of
+    // every upstream and every role; Aster found it by reading the source.
+    // makeProtectionResolver now caches on the pass id the mesh supplies, so
+    // the walk happens once and a duty acquired between passes is still seen on
+    // the next. Handing over a frozen copy instead is how this goes stale and
+    // starts retiring live duties.
+    //
+    // Inert for every transport that does not take one (sim, node, tests) and
+    // for every node that never configures a degree cap, which is all of them
+    // except a bridge.
+    if (transport && typeof transport.setObligedPeers === 'function') {
+      try {
+        transport.setObligedPeers(() => {
+          try { return this._engine.axonFor(this._node).obligedPeers(); }
+          catch { return null; }   // null = "cannot say", which the caller must
+                                   // NOT read as "no obligations"
+        });
+      } catch { /* a transport that refuses the hook is not a startup failure */ }
+    }
+
     // onPeerBound handler receives BigInt (contract).
     if (transport && typeof transport.onPeerBound === 'function') {
       this._onPeerBoundUnsub = transport.onPeerBound((peerBig) => {
@@ -2900,7 +2928,7 @@ export class AxonaPeer extends DHT {
    * routing. A human-facing app wires its "I am human" toggle to this; infra nodes
    * self-identify (a bridge declares 'bridge', a relay 'relay'); an automated
    * app/feed declares 'service'.
-   * @param {'agent'|'human'|'service'|'bridge'|'relay'} cls
+   * @param {'agent'|'human'|'service'|'instrument'|'bridge'|'relay'} cls
    * @param {object} o
    * @param {object} o.signWith            the author identity to declare for + sign with
    * @param {string} [o.operator]          self-asserted operator (pubkey/handle); unverified
@@ -2948,7 +2976,7 @@ export class AxonaPeer extends DHT {
   /**
    * Resolve an author's self-declared class from its Author ID alone. Pulls the
    * author's owner-only profile topic and verifies the attestation. Returns
-   * `{ class:'agent'|'human'|'service'|'bridge'|'relay'|'unstated', operator, operatorVerified, label, ts }`;
+   * `{ class:'agent'|'human'|'service'|'instrument'|'bridge'|'relay'|'unstated', operator, operatorVerified, label, ts }`;
    * any missing/invalid/unparseable attestation resolves to `'unstated'` (never a
    * default class). `operatorVerified` is true only for a valid v1.1 countersignature.
    * @param {string} authorId 64-hex Author ID
@@ -3194,7 +3222,10 @@ export class AxonaPeer extends DHT {
    *     synaptomeSize:    number,
    *     peers:            string[],
    *     subscriptions:    number,
-   *     axonRoles:        Array<{topic, isRoot, children, cacheSize}>,
+   *     axonRoles:        Array<{topic, isRoot, nature, holder, subscribers,
+   *                              children, cacheSize, lastReplicaAt,
+   *                              lastReplicaAgeMs}>,
+   *     axonRolesComplete: boolean,   // false = inspection failed/unavailable
    *     wireVersion:      string | null,
    *     started:          boolean,
    *     transport:        { boundCount, meshChannels, meshOpen,
@@ -3251,18 +3282,50 @@ export class AxonaPeer extends DHT {
             ?? (this._engine?.axonaManagerFor?.(this._node))
             ?? this._engine?._axonaManagers?.get?.(this._node.id)
             ?? null;
+    // AN EMPTY INVENTORY AND A FAILED ONE MUST NOT LOOK ALIKE (Aster, 655).
+    //
+    // This used to swallow an inspection failure into an empty array, so
+    // "this node holds no roles" and "I could not read this node's roles"
+    // produced byte-identical output. A census that unions axonRoles across
+    // the fleet would silently count a throwing node as a clean zero — the
+    // false-empty this project keeps paying for, one layer up from the false
+    // zero. axonRolesComplete says which one you are looking at.
     const axonRoles = [];
+    let axonRolesComplete = false;
     if (am && typeof am.inspectRoles === 'function') {
       try {
         for (const r of am.inspectRoles()) {
+          // CARRY THE WHOLE ROW, DO NOT RE-NARROW IT (2026-10-01).
+          //
+          // inspectRoles() already computes nature, holder, subscribers and the
+          // replica stamps, and this loop used to copy four fields and drop the
+          // rest one line later. The cost was not theoretical: a relay's
+          // SIGUSR1 health-dump is the only role-level view that exists on a
+          // relay — relays serve no /diag — so "does this node hold a role with
+          // no subscribers and no messages" was unanswerable anywhere outside a
+          // bridge, on 52 of the fleet's 54 nodes, because of this discard.
+          //
+          // subscribers is the field that question turns on. nature separates a
+          // standby BACKUP (retained deliberately, exempt from the empty/idle
+          // reapers) from a ROOT holding nothing. lastReplicaAgeMs says when
+          // this observer last recorded a replica — activity evidence, and NOT
+          // proof the principal still exists or that the topic is non-empty
+          // (Aster, council 650). Null means never stamped, never "infinitely
+          // old".
           axonRoles.push({
-            topic:      r.topicId,
-            isRoot:     !!r.isRoot,
-            children:   Array.isArray(r.children) ? r.children.length : 0,
-            cacheSize:  r.replayCacheSize ?? r.cacheSize ?? 0,
+            topic:            r.topicId,
+            isRoot:           !!r.isRoot,
+            nature:           r.nature ?? null,
+            holder:           r.holder ?? null,
+            subscribers:      typeof r.subscribers === 'number' ? r.subscribers : null,
+            children:         Array.isArray(r.children) ? r.children.length : 0,
+            cacheSize:        r.replayCacheSize ?? r.cacheSize ?? 0,
+            lastReplicaAt:    r.lastReplicaAt ?? null,
+            lastReplicaAgeMs: r.lastReplicaAgeMs ?? null,
           });
         }
-      } catch { /* best-effort */ }
+        axonRolesComplete = true;
+      } catch { /* best-effort; axonRolesComplete stays false */ }
     }
     let hosting = null;
     if (am && typeof am.inspectHosting === 'function') {
@@ -3326,6 +3389,7 @@ export class AxonaPeer extends DHT {
       peers:         this.peers(),
       subscriptions: this._subscriptions.size,
       axonRoles,
+      axonRolesComplete,   // false = could not read them, NOT "there are none"
       hosting,
       admission,
       wireVersion:   this._transport?.wireVersion ?? null,

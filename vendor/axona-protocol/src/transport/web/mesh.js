@@ -40,6 +40,17 @@ const DEAD_PONG_MS     = 10000;
 // readyState lies 'open', so we don't wait the full DEAD_PONG_MS.
 const SEND_FAIL_LIMIT  = 3;
 const RTT_WINDOW       = 10;
+// ── Bounded mesh degree (4.95.0). Inert unless a cap is configured. ──
+// These mirror the bridge's WebSocket graduation pacing, and for the same
+// reason: retiring many channels at once thins the mesh, they all re-dial, and
+// the re-dials get retired — a storm. Hysteresis, one at a time, and a cooldown
+// that this node enforces on ITS OWN door, because a data channel has no
+// equivalent of the WebSocket 4200 close code. A retired peer is not told
+// "stay away"; it simply finds us unwilling for a while.
+const MESH_DEGREE_SLACK        = 2;
+const MESH_DEGREE_INTERVAL_MS  = 3000;
+const MESH_DEGREE_COOLDOWN_MS  = 60_000;
+const MESH_DEGREE_MIN_UPTIME_MS = 30_000;
 const DC_LABEL         = 'axona';
 const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 // Absolute ceiling on how long a peer may stay in negotiation WITHOUT ever
@@ -81,6 +92,8 @@ function extractFingerprint(sdp) {
 // format stays consistent across WebRTC data channels and the bridge
 // WebSocket.
 import { bigintReplacer, bigintReviver } from '../wire.js';
+// Bounded mesh degree (4.95.0) — the pure choice of which channel to release.
+import { selectMeshRetire } from './mesh_degree.js';
 
 // ── ICE configuration ───────────────────────────────────────────────
 //
@@ -133,9 +146,42 @@ const STUN_SERVERS = [
  */
 
 export class MeshManager {
-  constructor({ sendSignal, log }) {
+  /**
+   * @param {Object} opts
+   * @param {Function} opts.sendSignal
+   * @param {Function} [opts.log]
+   * @param {Object}  [opts.degree]  BOUNDED MESH DEGREE (4.95.0). Omit it and
+   *   this manager behaves exactly as it always has: a channel to every peer.
+   *   That default is deliberate — a browser or a relay on a small mesh wants
+   *   every channel it can get, and only a BRIDGE has a reason to be a mediocre
+   *   node on purpose. See mesh_degree.js for the selection and its limits.
+   * @param {number}   [opts.degree.maxPeers=0]     0 or absent ⇒ unbounded
+   * @param {number}   [opts.degree.slack=2]        hysteresis above the cap
+   * @param {number}   [opts.degree.intervalMs]     ≥1 retirement per this long
+   * @param {number}   [opts.degree.cooldownMs]     do not re-dial a retiree for this long
+   * @param {number}   [opts.degree.minUptimeMs]    an open channel must be this old
+   * @param {(peerId:string)=>string|null} [opts.degree.regionOf]     peerId → keyspace region
+   * @param {(peerId:string)=>boolean}     [opts.degree.isProtected]  peerId carries an obligation
+   */
+  constructor({ sendSignal, log, degree = null }) {
     this._sendSignal = sendSignal;
     this._log = log ?? (() => {});
+    // ── Bounded degree (off unless a cap is configured) ────────────────
+    const d = degree || {};
+    this._degreeMax       = Number.isFinite(d.maxPeers) ? Math.max(0, d.maxPeers) : 0;
+    this._degreeSlack     = Number.isFinite(d.slack)      ? d.slack      : MESH_DEGREE_SLACK;
+    this._degreeInterval  = Number.isFinite(d.intervalMs) ? d.intervalMs : MESH_DEGREE_INTERVAL_MS;
+    this._degreeCooldown  = Number.isFinite(d.cooldownMs) ? d.cooldownMs : MESH_DEGREE_COOLDOWN_MS;
+    this._degreeMinUptime = Number.isFinite(d.minUptimeMs) ? d.minUptimeMs : MESH_DEGREE_MIN_UPTIME_MS;
+    this._degreeRegionOf  = typeof d.regionOf === 'function' ? d.regionOf : () => null;
+    this._degreeProtected = typeof d.isProtected === 'function' ? d.isProtected : () => false;
+    /** peerId → epoch ms of the retirement that put it in cooldown. */
+    this._retiredRecently = new Map();
+    this._lastRetireAt    = 0;
+    this._degreeRetired   = 0;
+    this._degreeRefused   = 0;
+    /** Monotonic enforcement-pass counter; the obligation reader caches on it. */
+    this._degreePass      = 0;
     /** @type {Map<string, PeerState>} */
     this._peers = new Map();
     /** Absolute negotiation deadline (ms) per peerId, set on the FIRST
@@ -505,6 +551,7 @@ export class MeshManager {
     for (const id of peerIds) {
       if (id === this._myId)   continue;
       if (this._peers.has(id)) continue;
+      if (this._inRetireCooldown(id)) continue;   // we just let this one go
       this._initiateTo(id);
     }
     this._notify();
@@ -513,8 +560,102 @@ export class MeshManager {
   onPeerJoined(peerId) {
     if (peerId === this._myId)   return;
     if (this._peers.has(peerId)) return;
+    if (this._inRetireCooldown(peerId)) return;   // we just let this one go
     this._acceptFrom(peerId);
     this._notify();
+  }
+
+  /**
+   * Did we retire this peer recently enough that re-opening would just undo it?
+   *
+   * THIS IS THE ANTI-THRASH GUARD AND IT IS NOT OPTIONAL. The WebSocket side
+   * graduates with close code 4200, which the remote kernel reads as "you are
+   * meshed, do not reconnect". A DataChannel close carries no such word: the
+   * remote sees an ordinary teardown and its next peer-list refresh initiates
+   * again. So the cap has to hold OUR door, not just close the channel —
+   * otherwise a bridge at cap retires and re-accepts the same peer for ever,
+   * which is the create-and-destroy cycle measured at 2.8/s on the west bridge
+   * wearing a different costume.
+   *
+   * Inert when no cap is configured: nothing is ever retired, so nothing is
+   * ever in cooldown.
+   */
+  _inRetireCooldown(peerId) {
+    const at = this._retiredRecently.get(peerId);
+    if (at == null) return false;
+    if ((Date.now() - at) < this._degreeCooldown) { this._degreeRefused++; return true; }
+    this._retiredRecently.delete(peerId);
+    return false;
+  }
+
+  /**
+   * Hold the mesh at its configured degree by retiring one open channel.
+   *
+   * Called after a channel opens. Off unless `degree.maxPeers` was configured,
+   * which is why every existing caller (browser, relay, test) is unaffected.
+   * Hysteresis, one per interval and the cooldown above are the same three
+   * anti-storm rules the bridge's WebSocket graduation uses.
+   */
+  _enforceDegree() {
+    if (this._degreeMax <= 0) return;
+    const now = Date.now();
+    if (now - this._lastRetireAt < this._degreeInterval) return;
+
+    const open = [];
+    for (const st of this._peers.values()) if (st.openedAt > 0) open.push(st);
+    if (open.length <= this._degreeMax + this._degreeSlack) return;   // hysteresis
+
+    // ONE OBLIGATION READ PER PASS, and the pass id is how that is enforced
+    // (4.98.0). Aster's source read of 4.97.0: this map calls _degreeProtected
+    // for EVERY open candidate, the resolver calls its provider each time, and
+    // AxonaManager.obligedPeers() rebuilds its Set by walking every upstream
+    // and every role on each call. So a single above-band pass repeated the
+    // whole obligation walk once per resolved channel — 40 channels meant 40
+    // walks, every 3 seconds. The code said "read once per enforcement pass"
+    // in three separate comments and did not do it.
+    //
+    // The pass id lets the resolver cache within a pass and refresh on the
+    // next, which is the contract that was claimed. It is deliberately NOT a
+    // time-based cache: a stale duty set is the failure this protection exists
+    // to prevent, and a pass boundary is the only honest place to refresh.
+    const passId = ++this._degreePass;
+    const pick = selectMeshRetire(open.map((st) => ({
+      id:          st.peerId,
+      region:      this._degreeRegionOf(st.peerId),
+      openedAt:    st.openedAt,
+      rttMs:       this.getLatency(st.peerId),
+      inCooldown:  this._retiredRecently.has(st.peerId),
+      isProtected: !!this._degreeProtected(st.peerId, passId),
+    })), { now, minUptimeMs: this._degreeMinUptime });
+    if (!pick) return;
+
+    this._retiredRecently.set(pick.id, now);
+    this._lastRetireAt = now;
+    this._degreeRetired++;
+    this._log('mesh-degree-retire', {
+      peerId: pick.id, region: pick.region, ageMs: pick.ageMs, rttMs: pick.rttMs,
+      basis: pick.basis, open: open.length, cap: this._degreeMax,
+    });
+    this._retire(pick.id, 'degree-cap');
+
+    // Bound the cooldown map: a long-lived bridge would otherwise accumulate an
+    // entry per peer it has ever retired.
+    if (this._retiredRecently.size > 1000) {
+      for (const [k, t] of this._retiredRecently) {
+        if (now - t > this._degreeCooldown) this._retiredRecently.delete(k);
+      }
+    }
+  }
+
+  /** Degree accounting for /diag and the tests. Zeroes when no cap is set. */
+  degreeStats() {
+    let open = 0;
+    for (const st of this._peers.values()) if (st.openedAt > 0) open++;
+    return {
+      cap: this._degreeMax, slack: this._degreeSlack, open,
+      retired: this._degreeRetired, refused: this._degreeRefused,
+      inCooldown: this._retiredRecently.size,
+    };
   }
 
   onPeerLeft(peerId) {
@@ -820,6 +961,7 @@ export class MeshManager {
       this._negotiationDeadline.delete(state.peerId);
       state.retryUsed = false;
       this._log('dc-open', { peerId: state.peerId, role: state.role });
+      this._enforceDegree();   // bounded degree (4.95.0); inert unless a cap is configured
       // Dump the nominated candidate pair so we can see what
       // address family / protocol the data path is actually using —
       // and keep polling so we notice ICE renegotiations later on.
