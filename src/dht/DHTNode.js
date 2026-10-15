@@ -105,6 +105,24 @@ export class DHTNode {
     this.maxOutgoing    = Infinity;
     this.maxIncoming    = Infinity;
 
+    /**
+     * TWO POOLS (G7 of the two-pool packet, axona-docs ca52384; the kernel's
+     * pool_profile.js is the source of the rules). `pools` is null (NOT
+     * ARMED: the single bilateral cap plus the directional dial caps above,
+     * byte-identical to 0.130.0) or a frozen {M, I, H}. Armed, every link
+     * this node holds has a CLASS at this end — M for a link this node
+     * selected (it initiated, or promoted), I for a link it accepted — and
+     *   charged(M) ≤ M, charged(I) ≤ I, charged(M) + charged(I) ≤ H.
+     * The simulator has no reservation window: tryConnect reserves and
+     * allocates in one synchronous step, as the kernel's mesh does between
+     * reserve() and _attachPc. A matrix from this engine may be called
+     * "50+50" only when every node in it is armed (DHT.poolsArmed()).
+     */
+    this.pools = null;
+    /** peerId → 'M' | 'I' (only while armed). */
+    this._cls = new Map();
+    this.poolCounters = { refusedM: 0, refusedI: 0, refusedH: 0, promoted: 0, promotionDeficit: 0, swapsM: 0 };
+
     // Injected by the DHT implementation
     this.routingTable = null;
 
@@ -134,9 +152,81 @@ export class DHTNode {
    *
    * @param {DHTNode} other
    */
+  // ── G7: the two pools ──────────────────────────────────────────────
+
+  /**
+   * Arm the two pools on this node. Refuses (throws) an infeasible profile
+   * the way the kernel's makePoolProfile does for the three pool rules; the
+   * kernel's module carries the full table. Idempotent; null disarms.
+   */
+  setPools(p) {
+    if (p == null) { this.pools = null; this._cls.clear(); return null; }
+    const M = Number(p.M), I = Number(p.I), H = p.H == null ? M + I : Number(p.H);
+    if (!Number.isInteger(M) || M < 1) throw new RangeError(`pools.M must be an integer ≥ 1, got ${p.M}`);
+    if (!Number.isInteger(I) || I < 0) throw new RangeError(`pools.I must be an integer ≥ 0, got ${p.I}`);
+    if (!Number.isInteger(H) || M + I > H) throw new RangeError(`pools.H (${p.H}) must be ≥ M + I = ${M + I}: no borrowing, no 101st allocation`);
+    this.pools = Object.freeze({ M, I, H });
+    // The pools bound the physical links; the legacy total cap must not read
+    // smaller than H or the pools could never fill (one bound, one source).
+    if (Number.isFinite(this.maxConnections) && this.maxConnections < H) this.maxConnections = H;
+    return this.pools;
+  }
+  get poolsArmed() { return this.pools !== null; }
+  /** The class this end holds `peerId` in: 'M' | 'I' | null (unarmed, or not a link). */
+  classOf(peerId) { return this.pools ? (this._cls.get(peerId) ?? null) : null; }
+  chargedOf(cls) { let n = 0; for (const c of this._cls.values()) if (c === cls) n++; return n; }
+  /** Room in class `cls` at this end, and under H. */
+  _poolRoom(cls) {
+    if (!this.pools) return true;
+    if (this.connections.size >= this.pools.H) { this.poolCounters.refusedH++; return false; }
+    if (this.chargedOf(cls) >= this.pools[cls]) { if (cls === 'M') this.poolCounters.refusedM++; else this.poolCounters.refusedI++; return false; }
+    return true;
+  }
+  /**
+   * G6 in the simulator: PROMOTE an I link to M at this end — no second
+   * link, the class moves. Needs M room or a lawful M-class swap victim
+   * (the stratum rule, M victims only). Ends in promoted or deficit; the
+   * link stays I on deficit.
+   */
+  promote(peerId) {
+    if (!this.pools || this._cls.get(peerId) !== 'I') return false;
+    if (this.chargedOf('M') >= this.pools.M) {
+      const other = this._network?.nodes?.get(peerId);
+      if (!other || !this._trySwapIn(other, { victimClass: 'M' })) { this.poolCounters.promotionDeficit++; return false; }
+    }
+    this._cls.set(peerId, 'M');
+    this.poolCounters.promoted++;
+    return true;
+  }
+  /** Snapshot for the harness and the fence. */
+  poolStats() {
+    return {
+      armed: this.pools !== null,
+      pools: this.pools,
+      chargedM: this.chargedOf('M'), chargedI: this.chargedOf('I'),
+      links: this.connections.size,
+      ...this.poolCounters,
+    };
+  }
+
   tryConnect(other) {
     if (other === this) return false;
-    if (this.connections.has(other.id)) return true;
+    if (this.connections.has(other.id)) {
+      // G7: a link this end holds as INCOMING that this end now SELECTS is a
+      // promotion (v1.1 §3), not a second link.
+      if (this.pools && this._cls.get(other.id) === 'I') return this.promote(other.id);
+      return true;
+    }
+
+    // G7: armed pools — the initiator reserves M, the acceptor reserves I;
+    // both under H. A refusal at either end allocates nothing on either side
+    // and never reclassifies to bypass a full pool. An unarmed end keeps the
+    // legacy caps below for its own side.
+    if (this.pools || other.pools) {
+      const mineOk   = this.pools  ? this._poolRoomOrSwap(other) : true;
+      const theirsOk = other.pools ? other._poolRoom('I') : true;
+      if (!mineOk || !theirsOk) return false;
+    }
 
     // Bilateral total cap (always enforced).
     const myFull    = this.connections.size  >= this.maxConnections;
@@ -154,6 +244,7 @@ export class DHTNode {
       this.connections.add(other.id);
       this._outboundConns.add(other.id);
       other.connections.add(this.id);
+      this._classify(other);
       return true;
     }
 
@@ -172,7 +263,24 @@ export class DHTNode {
     this.connections.add(other.id);
     this._outboundConns.add(other.id);
     other.connections.add(this.id);
+    this._classify(other);
     return true;
+  }
+
+  /** G7: after a link forms, each armed end records its class: M at the initiator, I at the acceptor. */
+  _classify(other) {
+    if (this.pools)  this._cls.set(other.id, 'M');
+    if (other.pools) other._cls.set(this.id, 'I');
+  }
+  /** G7: M room at the initiator, or a lawful swap among M-class victims only. */
+  _poolRoomOrSwap(other) {
+    if (this.connections.size >= this.pools.H) { this.poolCounters.refusedH++; return false; }
+    if (this.chargedOf('M') < this.pools.M) return true;
+    // At M full the only lawful way in is a managed replacement: the stratum
+    // rule over M victims (never an I link — ingress is not coverage).
+    if (this._trySwapIn(other, { victimClass: 'M' })) { this.poolCounters.swapsM++; return true; }
+    this.poolCounters.refusedM++;
+    return false;
   }
 
   /**
@@ -187,10 +295,14 @@ export class DHTNode {
    *
    * @param {DHTNode} candidate
    */
-  _trySwapIn(candidate) {
+  _trySwapIn(candidate, { victimClass = null } = {}) {
     const candidateStratum = Math.min(63, clz64(this.id ^ candidate.id));
     const counts = new Array(64).fill(0);
+    // G7: with a victim class named, only links of that class count and may
+    // be evicted (an M swap never evicts an I link).
+    const eligible = (pid) => victimClass === null || this._cls.get(pid) === victimClass;
     for (const pid of this.connections) {
+      if (!eligible(pid)) continue;
       const s = Math.min(63, clz64(this.id ^ pid));
       counts[s]++;
     }
@@ -206,7 +318,7 @@ export class DHTNode {
     // guard: it prevents thrashing (evicting and re-adding similar peers).
     if (maxCount <= counts[candidateStratum] + 1) return false;
 
-    const victimId = this._chooseVictim(evictStratum);
+    const victimId = this._chooseVictim(evictStratum, victimClass);
     if (victimId == null) return false;
 
     // Free the slot on both sides. The victim's routing-table entry (if
@@ -215,10 +327,12 @@ export class DHTNode {
     // dead-peer eviction in N-DHT).
     this.connections.delete(victimId);
     this._outboundConns.delete(victimId);  // safe even if victim was inbound
+    this._cls.delete(victimId);
     const victimNode = this._network?.nodes?.get(victimId);
     if (victimNode) {
       victimNode.connections.delete(this.id);
       victimNode._outboundConns.delete(this.id);
+      victimNode._cls.delete(this.id);
     }
     return true;
   }
@@ -233,8 +347,9 @@ export class DHTNode {
    * @param {number} stratum
    * @returns {bigint|null} peerId to evict, or null if no peer is in this stratum
    */
-  _chooseVictim(stratum) {
+  _chooseVictim(stratum, victimClass = null) {
     for (const pid of this.connections) {
+      if (victimClass !== null && this._cls.get(pid) !== victimClass) continue;   // G7
       const s = Math.min(63, clz64(this.id ^ pid));
       if (s === stratum) return pid;
     }
@@ -250,8 +365,10 @@ export class DHTNode {
     if (!other) return;
     this.connections.delete(other.id);
     this._outboundConns?.delete(other.id);    // safe — only fires if outbound
+    this._cls?.delete(other.id);              // G7: the class leaves with the link
     other.connections?.delete(this.id);
     other._outboundConns?.delete(this.id);    // safe — only fires if outbound
+    other._cls?.delete(this.id);
   }
 
   /**

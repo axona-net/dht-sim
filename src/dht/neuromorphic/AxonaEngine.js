@@ -657,6 +657,11 @@ export class AxonaEngine extends DHT {
       node._maxSynaptome = isFinite(nodeBootstrapCap)
         ? Math.min(nodeBootstrapCap, this.MAX_SYNAPTOME)
         : 256;
+      // G7 (two-pool packet, axona-docs ca52384): a harness that sets
+      // `engine.pools = { M, I, H }` arms every node's link model with the
+      // disjoint pools; unset (the default) leaves the single cap above,
+      // and no matrix from an unarmed run may be labelled "50+50".
+      if (this.pools && typeof node.setPools === 'function') node.setPools(this.pools);
     }
 
     // Shuffled processing order (NX-6 parity): under tight bilateral caps,
@@ -782,6 +787,7 @@ export class AxonaEngine extends DHT {
     newNode._maxSynaptome = isFinite(newNodeCap)
       ? Math.min(newNodeCap, this.MAX_SYNAPTOME)
       : 256;
+    if (this.pools && typeof newNode.setPools === 'function' && !newNode.pools) newNode.setPools(this.pools);   // G7
     for (const peer of buildXorRoutingTable(newNode.id, sorted, k, newNodeCap)) {
       if (!newNode.tryConnect(peer)) continue;  // bilateral cap
       const latMs   = roundTripLatency(newNode, peer);
@@ -813,6 +819,7 @@ export class AxonaEngine extends DHT {
         ? Math.min(c, this.MAX_SYNAPTOME)
         : 256;
     }
+    if (this.pools && typeof newNode.setPools === 'function' && !newNode.pools) newNode.setPools(this.pools);   // G7
     const newNodeCap = newNode._maxSynaptome;
 
     const addPeer = (peer) => {
