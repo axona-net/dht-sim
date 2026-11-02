@@ -34,6 +34,7 @@
 import { makeProtectionResolver } from './mesh_degree.js';
 import { MeshManager }       from './mesh.js';
 import { makePoolProfile, PoolProfileError } from './pool_profile.js';
+import { sanitizeGraduatedSample } from './graduated_sample.js';
 import { MeshAuth }          from './mesh-auth.js';
 import { WebRTCTransport }   from './webrtc.js';
 import { BridgeTransport, BRIDGE_CONN_ID_EXPORT as BRIDGE_CONN_ID } from './bridge.js';
@@ -706,7 +707,15 @@ export function webTransport({
             return;
           }
           const peers = Array.isArray(frame.peers) ? frame.peers : [];
-          for (const h of peerListHandlers) { try { h(peers.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ } }   // row 12: the directory sample
+          // P1.a (axona-docs c7b0230): a bridge may add `graduated`, a sample of
+          // 66-hex ids it graduated off its door. The ids reach the row-12
+          // handlers, which nominate them as source `directory`; they NEVER
+          // reach mesh.onPeerList, because an id is not a connection handle
+          // (Orion, MPSH-3) and the fill dials nominations under its budget.
+          const graduated = sanitizeGraduatedSample(frame.graduated);
+          if (graduated.length) log('peer-list-graduated', { offered: Array.isArray(frame.graduated) ? frame.graduated.length : 0, kept: graduated.length });
+          const forHandlers = graduated.length ? peers.concat(graduated) : peers;
+          for (const h of peerListHandlers) { try { h(forHandlers.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ } }   // row 12: the directory sample
           if (typeof mesh.onPeerList === 'function') {
             return mesh.onPeerList(peers);
           }
@@ -1640,6 +1649,12 @@ export function webTransport({
   composite.classOf = (nodeId) => { try { return webrtc.classOf(nodeId); } catch { return null; } };
   composite.reclass = (nodeId, cls, opts) => { try { return webrtc.reclass(nodeId, cls, opts); } catch (err) { return { ok: false, why: `threw:${err?.message}`, prev: null, deferred: false }; } };
   // G5: the reason the far end refused our last offer to `nodeId`, read once.
+  // P3 (kernel 4.126.0): the kernel's relay sink learned the offer cannot be
+  // delivered; retire that attempt's never-opened negotiation now. Boolean:
+  // true when the mesh retired it, false when there was nothing to retire.
+  composite.abortNegotiation = (toHex, attempt = null, reason = 'no-path') => {
+    try { return mesh.abortNegotiation(toHex, attempt, reason) === true; } catch { return false; }
+  };
   composite.lastRejectFor = (nodeId) => {
     try { const hex = (typeof nodeId === 'bigint') ? toHex(nodeId) : String(nodeId); return mesh.lastRejectFor(hex); } catch { return null; }
   };
