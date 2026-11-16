@@ -1544,3 +1544,7 @@ _reinforceWave(trace)
 // Cascade backpropagation (N-2-BP+)
 if (finalHopWasDirect) _backpropGateway(trace, gateway)
 ```
+
+## License
+
+Copyright 2026 Axona.net. Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Provided "as is", without warranty of any kind.
